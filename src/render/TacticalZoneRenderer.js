@@ -22,6 +22,7 @@ const CORRIDOR_COLORS = {
   APEX_SHIELD: { base: new THREE.Color(0xd500f9), top: new THREE.Color(0xff4081) },
   DIAMOND_DEFENSE: { base: new THREE.Color(0x7c4dff), top: new THREE.Color(0xb388ff) },
   EXIT_SQUEEZE: { base: new THREE.Color(0xff3d00), top: new THREE.Color(0xff6e40) },
+  OUTSIDE_DEFENSE_SQUEEZE: { base: new THREE.Color(0xffd600), top: new THREE.Color(0xffff00) },
   LOCK_DEFENSIVE_LANE: { base: new THREE.Color(0xaa00ff), top: new THREE.Color(0xe040fb) },
   ONE_MOVE_RETURN: { base: new THREE.Color(0x651fff), top: new THREE.Color(0x8c9eff) },
   DEFEND_LEFT: { base: new THREE.Color(0xf05cff), top: new THREE.Color(0xff4081) },

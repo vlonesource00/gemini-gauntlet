@@ -143,7 +143,7 @@ export class TacticalDefenseEngine {
   }
 
   /**
-   * Real-time Attacker Intent Classifier with Asymmetric Feint Filter.
+   * Real-time Attacker Intent Classifier with Heading & Momentum Vector Tracking.
    */
   classifyAttackerIntent({
     challenger,
@@ -159,40 +159,46 @@ export class TacticalDefenseEngine {
 
     const attackerLateral = finite(challenger.otherLateral, finite(challenger.side, 0));
     const lateralDelta = attackerLateral - currentLateral;
-    const attackerLatVel = finite(challenger.relativeLateralVelocity, 0);
+    const attackerLatVel = finite(challenger.otherLateralSpeed, finite(challenger.relativeLateralVelocity, 0));
+    const attackerNose = finite(challenger.otherNoseTrackDeviation, 0);
     const insideSign = turnSign;
-    const isMovingInside = (attackerLateral * insideSign) > 0 || (attackerLatVel * insideSign) > 0.15;
-    const isPositionedOutside = (attackerLateral * -insideSign) > 0.8;
+    const outsideSign = -turnSign;
+
+    // Heading and momentum vectors pointing or moving toward inside or outside
+    const isMovingInside = (attackerLateral * insideSign) > 0 || (attackerLatVel * insideSign) > 0.15 || (attackerNose * insideSign) > 0.04;
+    const isPositionedOutside = (attackerLateral * outsideSign) > 0.6;
+    const isPointingOutside = (attackerLatVel * outsideSign) > 0.15 || (attackerNose * outsideSign) > 0.04;
+    const isMovingOutside = isPositionedOutside || isPointingOutside;
 
     // Asymmetric Feint Filter: tracks dwell time on the outside
-    if (isPositionedOutside && !isMovingInside) {
+    if (isMovingOutside && !isMovingInside) {
       this.outsideDwellTimer += dt;
     } else {
       this.outsideDwellTimer = Math.max(0, this.outsideDwellTimer - dt * 2.0);
     }
 
-    // 1. DUMMY_FEINT_AND_SWITCH: twitched outside but dwelling < 0.45s and snapping back inside
-    if (distToCorner < 65 && distToCorner > 15 && this.outsideDwellTimer < 0.45 && attackerLatVel * insideSign > 0.35) {
+    // 1. DUMMY_FEINT_AND_SWITCH: twitched outside but dwelling < 0.40s and snapping nose/momentum back inside
+    if (distToCorner < 65 && distToCorner > 15 && this.outsideDwellTimer < 0.40 && (attackerLatVel * insideSign > 0.30 || attackerNose * insideSign > 0.08)) {
       return 'DUMMY_FEINT_AND_SWITCH';
     }
 
-    // 2. ATTACK_DIVEBOMB_INSIDE: closing fast toward inside apex line
-    if (distToCorner < 70 && turnCurvature > 0.0035 && isMovingInside && (closingSpeed > 1.2 || ttc < 2.5)) {
-      return 'ATTACK_DIVEBOMB_INSIDE';
-    }
-
-    // 3. ATTACK_OUTSIDE_MOMENTUM: established wide on outside with continuous dwell
-    if (distToCorner < 60 && turnCurvature > 0.0035 && isPositionedOutside && this.outsideDwellTimer >= 0.40) {
+    // 2. ATTACK_OUTSIDE_MOMENTUM: established wide on outside or pointing nose/momentum outside
+    if (distToCorner < 75 && (turnCurvature > 0.0025 || distToCorner < 45) && (isPositionedOutside || (isPointingOutside && this.outsideDwellTimer >= 0.20))) {
       return 'ATTACK_OUTSIDE_MOMENTUM';
     }
 
+    // 3. ATTACK_DIVEBOMB_INSIDE: closing fast toward inside apex line
+    if (distToCorner < 75 && turnCurvature > 0.0030 && isMovingInside && (closingSpeed > 1.0 || ttc < 2.8)) {
+      return 'ATTACK_DIVEBOMB_INSIDE';
+    }
+
     // 4. EXIT_CUTBACK: trailing car positioned for exit underneath
-    if (distToCorner <= 15 && turnCurvature > 0.0035 && Math.abs(lateralDelta) > 2.5 && closingSpeed > 0.5) {
+    if (distToCorner <= 18 && turnCurvature > 0.0030 && (attackerLateral * insideSign > 0.8 || attackerNose * insideSign > 0.05) && closingSpeed > 0.3) {
       return 'EXIT_CUTBACK';
     }
 
     // 5. DRAFT_AND_SLINGSHOT: high-speed pull-out on straightaway
-    if (distToCorner > 70 && closingSpeed > 1.6 && ttc < 2.0 && Math.abs(attackerLatVel) > 0.5) {
+    if (distToCorner > 70 && closingSpeed > 1.4 && ttc < 2.4 && Math.abs(attackerLatVel) > 0.35) {
       return 'DRAFT_AND_SLINGSHOT';
     }
 
@@ -296,23 +302,30 @@ export class TacticalDefenseEngine {
       }
 
       // Dynamic Phase Transitions through Corner (maintaining single-move commitment)
-      const committedSign = Math.sign(this.targetOffset) || turnSign;
+      const outsideSign = -turnSign;
+      const committedSign = this.defenseDirection || Math.sign(this.targetOffset) || turnSign;
+      const isOutsideCommitted = committedSign === outsideSign;
+
       if (distToCorner > 65 && this.towBreakTimer > 0) {
         this.phase = 'BREAK_TOW';
-      } else if (distToCorner <= 65 && distToCorner > 28) {
+      } else if (isOutsideCommitted && distToCorner > 18) {
+        // Outside Momentum Defense: Hold outside corridor to pinch attacker
+        this.phase = 'OUTSIDE_DEFENSE_SQUEEZE';
+        this.targetOffset = clamp(committedSign * Math.min(3.6, roadMargin - 2.2), -roadMargin + 0.6, roadMargin - 0.6);
+      } else if (distToCorner <= 65 && distToCorner > 28 && !isOutsideCommitted) {
         // Approach Corridor Lock - Aggressively shut the inside door
         this.phase = 'LOCK_DEFENSIVE_LANE';
         this.targetOffset = clamp(committedSign * Math.min(4.2, roadMargin * 0.78), -roadMargin + 0.4, roadMargin - 0.4);
-      } else if (distToCorner <= 28 && distToCorner > 14 && attackerIntent !== 'ATTACK_DIVEBOMB_INSIDE') {
+      } else if (distToCorner <= 28 && distToCorner > 14 && attackerIntent !== 'ATTACK_DIVEBOMB_INSIDE' && !isOutsideCommitted) {
         // FIA One-Move Return toward racing line leaving 2.2m margin on track edge
         this.phase = 'ONE_MOVE_RETURN';
         const returnOffset = clamp(committedSign * Math.min(2.0, roadMargin - 2.2), -roadMargin + 0.6, roadMargin - 0.6);
         this.targetOffset = returnOffset;
-      } else if (inCorner && attackerIntent === 'EXIT_CUTBACK') {
+      } else if (inCorner && (attackerIntent === 'EXIT_CUTBACK' || attackerIntent === 'DUMMY_FEINT_AND_SWITCH')) {
         // Diamond Defense: late-apex squaring to defend cutback and maximize exit drive
         this.phase = 'DIAMOND_DEFENSE';
-        this.targetOffset = 0.0; // mid-track launch locus
-      } else if (inCorner && attackerIntent === 'ATTACK_OUTSIDE_MOMENTUM') {
+        this.targetOffset = committedSign * 0.5; // mid-track launch locus preserving sign
+      } else if (inCorner && (attackerIntent === 'ATTACK_OUTSIDE_MOMENTUM' || isOutsideCommitted)) {
         // Exit Squeeze: drift smoothly to leave legal 2.2m track edge margin
         this.phase = 'EXIT_SQUEEZE';
         this.targetOffset = clamp(committedSign * Math.min(3.2, roadMargin - 2.2), -roadMargin + 0.6, roadMargin - 0.6);
@@ -381,12 +394,18 @@ export class TacticalDefenseEngine {
     const challengerLateral = finite(challenger.otherLateral, finite(challenger.side, 0));
     const lateralDelta = challengerLateral - currentLateral;
     const inDirectTow = Math.abs(lateralDelta) < 1.1 && gap < 45.0;
+    const outsideSign = -turnSign;
 
     let defensiveOffset = nominalBase;
     let phase = 'LOCK_DEFENSIVE_LANE';
     let reason = 'CLAIM_INSIDE_DEFENSIVE_CORRIDOR';
 
-    if (inCorner) {
+    if (attackerIntent === 'ATTACK_OUTSIDE_MOMENTUM') {
+      // Squeeze outside corridor to block high-speed outside momentum pass
+      defensiveOffset = clamp(outsideSign * Math.min(3.6, roadMargin - 2.2), -roadMargin + 0.6, roadMargin - 0.6);
+      phase = 'OUTSIDE_DEFENSE_SQUEEZE';
+      reason = 'PINCH_OUTSIDE_MOMENTUM_CORRIDOR';
+    } else if (inCorner) {
       defensiveOffset = clamp(turnSign * Math.min(4.6, roadMargin * 0.85), -roadMargin + 0.35, roadMargin - 0.35);
       phase = 'APEX_SHIELD';
       reason = 'PROTECT_INSIDE_APEX_LINE';
@@ -425,6 +444,7 @@ export class TacticalDefenseEngine {
         this.phase = cand.phase;
         this.defenseTargetId = challenger.other.id;
         this.targetOffset = cand.offset;
+        this.defenseDirection = Math.sign(cand.offset) || turnSign;
         this.oneMoveLocked = true;
         this.age = 0;
 

@@ -14,6 +14,12 @@ const wrap = (value, length) => {
   return ((value % length) + length) % length;
 };
 
+const wrapAngle = (angle) => {
+  let result = (angle + Math.PI) % (Math.PI * 2);
+  if (result < 0) result += Math.PI * 2;
+  return result - Math.PI;
+};
+
 const smoothstep = (value) => {
   const u = clamp(value, 0, 1);
   return u * u * (3 - 2 * u);
@@ -92,6 +98,14 @@ export class TrafficAwareness {
         ? bodyGap / closingSpeed
         : (closingSpeed > 0.15 && bodyGap <= 0 ? 0 : 99);
 
+      const otherForward = other.forward ?? { x: -Math.sin(other.yaw || 0), z: Math.cos(other.yaw || 0) };
+      const otherHeading = finite(other.yaw, Math.atan2(-otherForward.x, otherForward.z));
+      const egoHeading = finite(vehicle.yaw, Math.atan2(-forward.x, forward.z));
+      const relativeHeading = wrapAngle(otherHeading - egoHeading);
+      const otherTrackPoint = track?.atDistance ? track.atDistance(otherDist) : null;
+      const otherTrackAngle = otherTrackPoint?.tangent ? Math.atan2(otherTrackPoint.tangent.x, otherTrackPoint.tangent.z) : otherHeading;
+      const otherNoseTrackDeviation = wrapAngle(otherHeading - otherTrackAngle);
+
       entries.push({
         other,
         delta,
@@ -101,6 +115,11 @@ export class TrafficAwareness {
         lateralDelta,
         otherLateral,
         otherTargetLateral,
+        otherForward,
+        otherHeading,
+        relativeHeading,
+        otherNoseTrackDeviation,
+        otherLateralSpeed,
         egoForwardSpeed,
         otherForwardSpeed,
         relativeSpeed: finite(vehicle.speed) - finite(other.speed),
