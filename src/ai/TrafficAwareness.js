@@ -245,11 +245,13 @@ export class TrafficAwareness {
 
         const isPassTarget = targetId !== null && entry.other.id === targetId;
         const initialTargetSeparation = Math.abs(startLateral - opponentStart);
+        const targetSeparatingOffset = isPassTarget && Math.abs(offset - opponentStart) >= 2.6;
         const separatingFromPassTarget = isPassTarget
-          && Math.abs(longitudinalGap) > 2.6
-          && lateralGap >= initialTargetSeparation - 0.1;
+          && (targetSeparatingOffset || (Math.abs(longitudinalGap) > 2.0 && lateralGap >= initialTargetSeparation - 0.1));
 
-        if (longitudinalClearance < 0 && lateralClearance < 0 && !separatingFromPassTarget) {
+        const isSlowObstacle = isPassTarget && entry.other.speed < 15.0 && Math.abs(offset - opponentStart) >= 2.6;
+
+        if (longitudinalClearance < 0 && lateralClearance < 0 && !separatingFromPassTarget && !isSlowObstacle) {
           collisionFree = false;
           if (!blocker || clearance < blocker.clearance) {
             blocker = { entry, clearance, time };

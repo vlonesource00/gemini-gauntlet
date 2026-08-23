@@ -518,13 +518,15 @@ export class TacticalAttackEngine {
     candidates.sort((a, b) => b.score - a.score);
     const chosen = candidates[0] ?? null;
 
+    const isSlowObstacle = target.other.speed < 18.0 || (target.delta < 28.0 && target.relativeLongitudinalVelocity < -3.5);
+
     const attackRange = target.other.speed < vehicle.speed * 0.8
       ? 48
       : 34 + aggression * 8;
 
     const straightSend = !inCorner && (chosen?.timeGainS ?? 0) > 0.05;
 
-    if (chosen && (target.delta < attackRange || straightSend || slipstream.shouldPullOut)) {
+    if (chosen && (target.delta < attackRange || straightSend || slipstream.shouldPullOut || isSlowObstacle)) {
       this.phase = chosen.phase;
       this.targetId = target.other.id;
       this.targetOffset = chosen.offset;
@@ -557,6 +559,49 @@ export class TacticalAttackEngine {
         divebombing: this.divebombActive,
         switchbacking: this.switchbackActive,
         kerbAllowance
+      };
+    }
+
+    // If target is slow or stopped, NEVER fall into DRAFT behind it! Force immediate open flank evasion pass!
+    if (isSlowObstacle) {
+      const openSide = spaceOnRight >= spaceOnLeft ? 1 : -1;
+      const evasionOffset = openSide > 0
+        ? clamp(leadLateral + Math.max(3.4, spaceOnRight * 0.65), -roadMargin + 0.6, roadMargin - 0.6)
+        : clamp(leadLateral - Math.max(3.4, spaceOnLeft * 0.65), -roadMargin + 0.6, roadMargin - 0.6);
+
+      this.phase = openSide > 0 ? 'ATTACK_RIGHT' : 'ATTACK_LEFT';
+      this.targetId = target.other.id;
+      this.targetOffset = evasionOffset;
+      this.side = openSide;
+      this.age = 0;
+      this.noProgressAge = 0;
+      this.divebombActive = false;
+      this.switchbackActive = false;
+      this.intent = {
+        targetId: this.targetId,
+        side: this.side,
+        lane: this.phase,
+        gapM: target.delta,
+        predictedTimeGainS: 1.8,
+        straightSend: true,
+        safetyThresholdM: -0.35,
+        targetClosingSpeed: 8.0,
+        commitmentDuration: 12.0
+      };
+
+      return {
+        phase: this.phase,
+        desiredOffset: this.targetOffset,
+        target,
+        corridor: null,
+        committed: true,
+        straightSend: true,
+        safetyThresholdM: -0.35,
+        predictedTimeGainS: 1.8,
+        divebombing: false,
+        switchbacking: false,
+        kerbAllowance,
+        reason: 'OBSTACLE_EVASION_OVERTAKE'
       };
     }
 

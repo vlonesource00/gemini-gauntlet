@@ -458,21 +458,30 @@ export class ResearchAIController {
     if (committed && passTarget) {
       const closingFloor = straightSend ? 8.0 : 5.0;
       const cornerLimit = physicalTargetSpeed * (1.0 + this._aggression * 0.05);
-      desiredSpeed = Math.min(cornerLimit, Math.max(desiredSpeed, passTarget.other.speed + closingFloor));
+      const isSlowObstacle = passTarget.other.speed < 16.0;
+      const obstacleFloor = isSlowObstacle ? Math.min(physicalTargetSpeed, Math.max(14.0, passTarget.other.speed + 10.0)) : 0;
+      desiredSpeed = Math.max(obstacleFloor, Math.min(cornerLimit, Math.max(desiredSpeed, passTarget.other.speed + closingFloor)));
     } else if (passTarget && passTarget.delta > 0 && passTarget.delta < 32 && !defending) {
-      const safeGap = clamp(7.0 + passTarget.relativeLongitudinalVelocity ** 2 / 10.0, 8.0, 30.0);
-      desiredSpeed = Math.min(
-        desiredSpeed,
-        Math.max(0, passTarget.other.speed + clamp((passTarget.delta - safeGap) * 0.35, -6.0, 2.5))
-      );
+      const isSlowObstacle = passTarget.other.speed < 16.0;
+      if (isSlowObstacle) {
+        const escapeSpeed = Math.min(physicalTargetSpeed, Math.max(12.0, passTarget.other.speed + 8.0));
+        desiredSpeed = Math.min(desiredSpeed, Math.max(escapeSpeed, passTarget.other.speed + 4.0));
+      } else {
+        const safeGap = clamp(7.0 + passTarget.relativeLongitudinalVelocity ** 2 / 10.0, 8.0, 30.0);
+        desiredSpeed = Math.min(
+          desiredSpeed,
+          Math.max(0, passTarget.other.speed + clamp((passTarget.delta - safeGap) * 0.35, -6.0, 2.5))
+        );
+      }
     }
 
     if (recovering) desiredSpeed = isOffTrack ? 7.0 : 14.0;
 
     // 6. Emergency Hazard Avoidance
     const hazard = this.awareness.forwardHazard(traffic);
-    const passTargetClear = committed && actualSeparation >= 3.2 && hazard?.other?.id === passTarget?.other?.id;
-    const emergency = Boolean(hazard && !passTargetClear && (hazard.ttc < 2.8 || hazard.longitudinal < 9.0));
+    const passTargetClear = committed && actualSeparation >= 2.4 && hazard?.other?.id === passTarget?.other?.id;
+    const isEvasiveOvertake = committed && passTarget && passTarget.other.speed < 16.0 && actualSeparation >= 1.8;
+    const emergency = Boolean(hazard && !passTargetClear && !isEvasiveOvertake && (hazard.ttc < 2.5 || (hazard.longitudinal < 8.0 && Math.abs(finite(current?.lateral, 0) - finite(hazard.otherLateral, 0)) < 1.8)));
 
     if (emergency) {
       desiredSpeed = Math.min(desiredSpeed, Math.max(0, hazard.other.speed - 2.5));

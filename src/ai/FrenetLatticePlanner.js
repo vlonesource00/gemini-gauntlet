@@ -165,13 +165,15 @@ export class FrenetLatticePlanner {
         const isPassTarget = targetId !== null && entry.other.id === targetId;
         const initialTargetSeparation = Math.abs(startLateral - opponentStart);
         const separatingPassTrajectory = isPassTarget
-          && Math.abs(terminalLateral - opponentStart) >= 3.4
-          && lateralGap >= initialTargetSeparation - 0.08;
+          && (Math.abs(terminalLateral - opponentStart) >= 2.6
+            || (Math.abs(longitudinalGap) > 2.0 && lateralGap >= initialTargetSeparation - 0.08));
 
-        if (longitudinalClearance < 0 && lateralClearance < 0 && !separatingPassTrajectory) {
+        const isSlowObstaclePass = isPassTarget && entry.other.speed < 15.0 && Math.abs(terminalLateral - opponentStart) >= 2.6;
+
+        if (longitudinalClearance < 0 && lateralClearance < 0 && !separatingPassTrajectory && !isSlowObstaclePass) {
           predictedCollisions += 1;
           collisionRisk += 25000 + (-longitudinalClearance + 0.2) * (-lateralClearance + 0.2) * 2500;
-        } else if (Math.abs(longitudinalGap) < 12 && lateralClearance < 1.5) {
+        } else if (Math.abs(longitudinalGap) < 12 && lateralClearance < 1.5 && !isSlowObstaclePass) {
           collisionRisk += (12 - Math.abs(longitudinalGap)) * (1.5 - lateralClearance) * 20;
         }
       }
