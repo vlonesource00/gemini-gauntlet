@@ -1,10 +1,10 @@
 /**
  * PaceOptimizer.js
  * Physics-based optimal pace and vehicle control engine:
- * - Friction circle (G-G diagram) tire load limit modeling
+ * - Friction circle (G-G diagram) tire load limit modeling (Prototype up to 26.5 m/s² / 2.70G lateral)
  * - Trail braking modulation during corner entry
  * - Backward reachable speed envelope integration over track curvature & banking
- * - Smooth corner-exit throttle unwind controller to prevent snap oversteer
+ * - Smooth corner-exit full throttle commitment to maximize acceleration without artificial lag
  * - Deterministic pure pursuit & Stanley steering stabilization
  */
 
@@ -24,11 +24,11 @@ export class PaceOptimizer {
   /**
    * @param {Object} options
    * @param {number} [options.trailBrakingSkill=0.85] - Driver trail braking proficiency (0-1)
-   * @param {number} [options.unwindFactor=0.75] - Exit throttle modulation intensity (0-1)
+   * @param {number} [options.unwindFactor=0.60] - Exit throttle modulation intensity (0-1)
    */
   constructor({
     trailBrakingSkill = 0.85,
-    unwindFactor = 0.75
+    unwindFactor = 0.60
   } = {}) {
     this.trailBrakingSkill = clamp(trailBrakingSkill, 0, 1);
     this.unwindFactor = clamp(unwindFactor, 0, 1);
@@ -41,25 +41,28 @@ export class PaceOptimizer {
 
   /**
    * Compute maximum physical cornering speed based on curvature, banking, and tire grip.
+   * Calibrated for Prototype class up to 26.5 m/s² (2.70G) to reflect true ground-effect downforce at speed.
    * @param {Object} params
    * @returns {number} Corner apex speed limit in m/s
    */
   calculateCornerSpeed({
     curvature = 0,
     banking = 0,
-    vehicleClass = 'gt',
+    vehicleClass = 'prototype',
     tireGripFactor = 1.0,
     skill = 0.85
   } = {}) {
     const kappa = Math.max(1e-5, Math.abs(finite(curvature, 0)));
-    // Base G limits calibrated to aerodynamic downforce & tire grip for maximum pace without off-track excursions
-    const classBaseG = vehicleClass === 'prototype' ? 2.25 : vehicleClass === 'gt' ? 1.28 : 1.10;
-    const peakG = classBaseG * tireGripFactor * (0.85 + skill * 0.12);
+    // Calibrated lateral acceleration budget: Prototype class up to 26.5 m/s² (2.70G) reflecting true ground-effect downforce
+    const classBaseG = vehicleClass === 'prototype' ? 2.70 : vehicleClass === 'gt' ? 1.30 : 1.10;
+    const peakG = classBaseG * tireGripFactor * (0.86 + skill * 0.14);
     const g = 9.81;
 
     // Banking bonus: a_lat_eff = g * (peakG * cos(theta) + sin(theta))
-    const bankAngle = finite(banking, 0);
-    const effectiveLatAccel = g * (peakG * Math.cos(bankAngle) + Math.sin(bankAngle));
+    // High-speed banking carry: amplify banking support on high-speed sweeps (e.g. Oakland Bowl and high-speed esses)
+    const bankAngle = Math.abs(finite(banking, 0));
+    const bankCarry = Math.sin(bankAngle) * (vehicleClass === 'prototype' ? 1.35 : 1.05);
+    const effectiveLatAccel = g * (peakG * Math.cos(bankAngle) + bankCarry);
 
     return Math.sqrt(effectiveLatAccel / kappa);
   }
@@ -82,9 +85,10 @@ export class PaceOptimizer {
     closingSpeed = 0,
     insideLineOffset = 0
   } = {}) {
-    const vClass = vehicle?.classKey || 'gt';
-    const classBrakeG = vClass === 'prototype' ? 1.42 : vClass === 'gt' ? 1.15 : 0.95;
-    const sustainedDecel = classBrakeG * 9.81 * tireGripFactor * (0.88 + aggression * 0.10);
+    const vClass = vehicle?.classKey || 'prototype';
+    // Deceleration budget for speed envelope backward reachability (-3.5G threshold capability, 1.85G sustained)
+    const classBrakeG = vClass === 'prototype' ? 1.85 : vClass === 'gt' ? 1.25 : 1.0;
+    const sustainedDecel = classBrakeG * 9.81 * tireGripFactor * (0.88 + aggression * 0.12);
 
     // Deep Defensive Braking Point offset (shifts braking threshold deeper into turn-in under threat)
     let deepBrakeOffsetM = 0;
@@ -111,15 +115,18 @@ export class PaceOptimizer {
         curvature = curvature / Math.max(0.40, 1.0 - Math.abs(insideLineOffset) * curvature);
       }
 
+      // Boost corner target speed evaluation for Prototype class with 2.70G lateral budget and banking carry
+      const physLimit = this.calculateCornerSpeed({
+        curvature,
+        banking: point.banking,
+        vehicleClass: vClass,
+        tireGripFactor,
+        skill
+      });
+
       const trackLimit = track?.targetSpeed
-        ? track.targetSpeed(sampleDist, skill)
-        : this.calculateCornerSpeed({
-            curvature,
-            banking: point.banking,
-            vehicleClass: vClass,
-            tireGripFactor,
-            skill
-          });
+        ? (vClass === 'prototype' ? Math.max(physLimit, track.targetSpeed(sampleDist, skill) * 1.30) : track.targetSpeed(sampleDist, skill))
+        : physLimit;
 
       const cornerSpeed = Math.max(5.5, trackLimit);
       const reachableSpeed = Math.sqrt(cornerSpeed * cornerSpeed + 2.0 * sustainedDecel * effectiveDist);
@@ -140,8 +147,8 @@ export class PaceOptimizer {
     lateralAccel = 0,
     tireGripFactor = 1.0
   }) {
-    const vClass = vehicle?.classKey || 'gt';
-    const classBaseG = vClass === 'prototype' ? 2.4 : vClass === 'gt' ? 1.75 : 1.4;
+    const vClass = vehicle?.classKey || 'prototype';
+    const classBaseG = vClass === 'prototype' ? 2.70 : vClass === 'gt' ? 1.75 : 1.40;
     const maxTotalAccel = classBaseG * 9.81 * tireGripFactor;
 
     const actualLatAccel = Math.min(Math.abs(finite(lateralAccel, 0)), maxTotalAccel);
@@ -199,6 +206,10 @@ export class PaceOptimizer {
 
   /**
    * Calculate throttle and brake pedals using trail braking and throttle unwind modulation.
+   * Features:
+   * - Threshold braking: when speedError < -1.2 m/s, rapidly ramps brake to 1.0 (-3.5G threshold capability)
+   * - Full throttle commitment: aggressive exit drive without artificial lag
+   * - Reduced conservative oversteer throttle cuts during high-G cornering
    * @param {Object} params
    * @returns {Object} Pedals and G-G telemetry
    */
@@ -239,13 +250,18 @@ export class PaceOptimizer {
       return { throttle: 0, brake: 1.0, friction, trailBraking: false };
     }
 
-    // 1. Raw speed error response
-    if (speedError > -0.6) {
-      throttle = clamp((straight ? 0.96 : 0.54) + finite(speedError) * 0.15, 0, 1);
+    // 1. Speed error response with rapid threshold braking & instant throttle pickup
+    if (speedError > -0.3) {
+      throttle = clamp((straight ? 1.0 : 0.62) + finite(speedError) * 0.30, 0, 1);
     }
 
-    if (speedError < -0.4) {
-      brake = clamp((-finite(speedError) - 0.25) * 0.30, 0, 1);
+    if (speedError < -0.35) {
+      if (speedError < -1.2) {
+        // High-G threshold braking (-3.5G deceleration capacity)
+        brake = clamp(0.85 + (-finite(speedError) - 1.2) * 1.5, 0.85, 1.0);
+      } else {
+        brake = clamp((-finite(speedError) - 0.25) * 0.80, 0, 0.85);
+      }
     }
 
     // 2. High-Precision Trail Braking Modulation
@@ -255,31 +271,38 @@ export class PaceOptimizer {
       const trailExp = defending ? 1.4 : 1.8;
       const latFactor = clamp(this.trailBrakingSkill * friction.latUtilization, 0, 0.98);
       const trailFactor = Math.pow(Math.max(0.01, 1.0 - Math.pow(latFactor, 2)), 1.0 / trailExp);
-      brake *= clamp(trailFactor, 0.25, 1.0);
+      brake *= clamp(trailFactor, 0.30, 1.0);
     }
 
-    // 3. Defensive Exit Throttle Unwind & Traction Ellipse Controller
+    // 3. Corner-Exit Full Throttle Commitment & Traction Ellipse Controller
     if (throttle > 0.04 && !straight) {
       const steerMagnitude = saturate(Math.abs(finite(steerAngle, 0)));
       const latUtil = friction.latUtilization;
-      const tractionBudget = Math.sqrt(Math.max(0.04, 1.0 - Math.pow(latUtil, 2)));
+      // High-downforce traction budget: ground effect expands traction envelope at speed
+      const tractionBudget = Math.sqrt(Math.max(0.16, 1.0 - Math.pow(latUtil * 0.88, 2)));
+      // As steer unwinds, ramp throttle aggressively towards 1.0 without artificial lag
       const unwindGain = clamp(
-        tractionBudget * (1.0 - this.unwindFactor * steerMagnitude * 0.65),
-        0.18,
+        tractionBudget * (1.0 - this.unwindFactor * Math.pow(steerMagnitude, 1.8) * 0.40) + (1.0 - steerMagnitude) * 0.35,
+        0.35,
         1.0
       );
-      throttle *= unwindGain;
+      throttle = clamp(throttle * unwindGain, 0, 1);
+      // Immediate full throttle commitment when steering is mostly unwound on corner exit
+      if (speedError > 0 && steerMagnitude < 0.25 && latUtil < 0.85) {
+        throttle = Math.max(throttle, 1.0);
+      }
     }
 
-    // 4. Oversteer / Lateral Instability Control
+    // 4. Oversteer / Lateral Instability Control (Tuned for high-G prototype dynamics without premature throttle cuts)
     const slip = Math.abs(finite(slipAngle, 0));
     const yaw = Math.abs(finite(yawRate, 0));
-    const instability = saturate(Math.max((slip - 0.12) / 0.18, (yaw - 1.05) / 1.15));
+    // High-G prototype threshold: allow yaw rates up to 1.50 rad/s and slip up to 0.20 rad before intervention
+    const instability = saturate(Math.max((slip - 0.20) / 0.16, (yaw - 1.50) / 1.10));
 
     if (instability > 0) {
-      throttle *= (1.0 - instability * 0.80);
+      throttle *= (1.0 - instability * 0.50);
       if (speedError > -3.0) {
-        brake *= (1.0 - instability * 0.40);
+        brake *= (1.0 - instability * 0.25);
       }
     }
 

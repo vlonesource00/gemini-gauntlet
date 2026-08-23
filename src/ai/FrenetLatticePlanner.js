@@ -137,8 +137,9 @@ export class FrenetLatticePlanner {
         roadViolation += excess + 1.0;
       }
 
-      // Edge risk starts building when within 0.5m of the boundary
-      edgeRisk += Math.max(0, Math.abs(lateral) - (surfaceLimit - 0.5)) ** 2;
+      // Edge risk starts building only when exceedingly close to the actual surface boundary
+      const edgeBuffer = Math.max(0.12, 0.40 - aggression * 0.22 - (kerbAllowance > 0 ? 0.12 : 0));
+      edgeRisk += Math.max(0, Math.abs(lateral) - (surfaceLimit - edgeBuffer)) ** 2;
 
       // Traffic proximity and collision evaluation
       for (const entry of trafficEntries || []) {
@@ -173,8 +174,14 @@ export class FrenetLatticePlanner {
         if (longitudinalClearance < 0 && lateralClearance < 0 && !separatingPassTrajectory && !isSlowObstaclePass) {
           predictedCollisions += 1;
           collisionRisk += 25000 + (-longitudinalClearance + 0.2) * (-lateralClearance + 0.2) * 2500;
-        } else if (Math.abs(longitudinalGap) < 12 && lateralClearance < 1.5 && !isSlowObstaclePass) {
-          collisionRisk += (12 - Math.abs(longitudinalGap)) * (1.5 - lateralClearance) * 20;
+        } else if (!isSlowObstaclePass && !separatingPassTrajectory) {
+          // Attenuate distant proximity penalty so AI does not hesitate to set up bold overtaking maneuvers
+          const distAbs = Math.abs(longitudinalGap);
+          const proximityHorizon = Math.max(4.5, 8.5 - aggression * 2.0);
+          if (distAbs < proximityHorizon && lateralClearance < 1.0) {
+            const timeDiscount = Math.max(0.2, 1.0 - time / Math.max(0.5, horizon));
+            collisionRisk += (proximityHorizon - distAbs) * (1.0 - lateralClearance) * 12 * timeDiscount;
+          }
         }
       }
 
@@ -209,26 +216,31 @@ export class FrenetLatticePlanner {
     }
 
     // Lateral dynamics budget
-    const availableLatG = (7.5 + aggression * 5.0) * (1.0 + kerbAllowance * 0.1);
+    const availableLatG = (7.5 + aggression * 5.0) * (1.0 + kerbAllowance * 0.12);
     const accelerationExcess = Math.max(0, maxLateralAcceleration - availableLatG);
 
     // Multi-objective cost weighting
-    const wProg = weights.prog ?? 0.8;
+    const wProg = weights.prog ?? (0.8 + aggression * 0.4);
     const wColl = weights.coll ?? 1.0;
-    const wEdge = weights.edge ?? 65.0;
+    const wEdge = weights.edge ?? (42.0 * (1.0 - aggression * 0.45));
     const wAccel = weights.accel ?? 9.0;
-    const wJerk = weights.jerk ?? (committed ? 0.8 : 1.4);
+    const wJerk = weights.jerk ?? (committed ? 0.7 : 1.3);
     const wIntent = weights.intent ?? (committed ? 190.0 : 45.0);
 
     const lateralDelta = Math.abs(terminalLateral - startLateral);
     const intentError = Math.abs(terminalLateral - desiredOffset);
     const avgSpeed = speedSum / this.pointCount;
 
+    // Reward bold candidate trajectories that utilize full track width and kerbs
+    const trackWidthRatio = clamp(Math.abs(terminalLateral) / Math.max(1.0, effectiveRoadMargin), 0, 1);
+    const kerbReward = (kerbAllowance > 0 && Math.abs(terminalLateral) > roadMargin * 0.75) ? (0.6 + aggression * 0.8) : 0;
+    const rewardWidth = -(trackWidthRatio * (0.5 + aggression * 0.7) + kerbReward) * (intentType === 'RACING_LINE' || intentType === 'TACTICAL_TARGET' || intentType === 'PRIMARY_INTENT' ? 1.4 : 1.0);
+
     const costRoadViolation = roadViolation * 1e6;
     const costCollision = collisionRisk * wColl;
     const costEdge = edgeRisk * wEdge;
     const costAccel = accelerationExcess * accelerationExcess * wAccel;
-    const costJerk = (lateralDelta * 0.22 + (committed ? transitionTime * 1.2 : transitionTime * 0.25)) * wJerk;
+    const costJerk = (lateralDelta * 0.20 + (committed ? transitionTime * 1.0 : transitionTime * 0.22)) * wJerk;
     const costIntent = intentError * intentError * wIntent;
     const rewardProgress = -avgSpeed * wProg;
 
@@ -238,7 +250,8 @@ export class FrenetLatticePlanner {
       + costAccel
       + costJerk
       + costIntent
-      + rewardProgress;
+      + rewardProgress
+      + rewardWidth;
 
     return {
       points,
@@ -259,7 +272,8 @@ export class FrenetLatticePlanner {
         accelerationExcess: costAccel,
         jerk: costJerk,
         intent: costIntent,
-        progressReward: rewardProgress
+        progressReward: rewardProgress,
+        trackWidthReward: rewardWidth
       }
     };
   }
@@ -315,15 +329,17 @@ export class FrenetLatticePlanner {
 
     // Generate balanced left, center, right, and evasive candidates so AI can dynamically adapt if blocked
     const oppositeLane = intendedOffset > 0.5 ? -Math.min(margin * 0.75, intendedOffset) : (intendedOffset < -0.5 ? Math.min(margin * 0.75, -intendedOffset) : 0);
-    const candidatePool = [
-      intendedOffset,
-      ...fallbackOffsets,
-      currentLateral,
-      0,
-      oppositeLane,
-      -margin * 0.65,
-      margin * 0.65
-    ];
+    const candidatePool = recovering
+      ? [intendedOffset, currentLateral, 0]
+      : [
+          intendedOffset,
+          ...fallbackOffsets,
+          currentLateral,
+          0,
+          oppositeLane,
+          -margin * 0.65,
+          margin * 0.65
+        ];
 
     const standardOffsets = uniqueOffsets(candidatePool, -margin, margin);
 
@@ -410,8 +426,8 @@ export class FrenetLatticePlanner {
 
     // Compute pursuit tracking target point
     const pursuitDist = clamp(
-      finite(trackingDistance, finite(lookAhead, 12) * 0.72),
-      5.5,
+      finite(trackingDistance, finite(lookAhead, 12) * 0.85),
+      6.5,
       25.0
     );
 

@@ -705,9 +705,11 @@ export class TelemetryHUD {
     if (this.root && this.root.parentNode) {
       this.root.parentNode.removeChild(this.root);
     }
-    const styleEl = document.getElementById('ai-telemetry-hud-styles');
-    if (styleEl && styleEl.parentNode) {
-      styleEl.parentNode.removeChild(styleEl);
+    if (typeof document !== 'undefined') {
+      const styleEl = document.getElementById('ai-telemetry-hud-styles');
+      if (styleEl && styleEl.parentNode) {
+        styleEl.parentNode.removeChild(styleEl);
+      }
     }
     this.ggHistory.length = 0;
     this.canvas = null;
