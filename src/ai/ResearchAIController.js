@@ -40,16 +40,16 @@ export class ResearchAIController {
   constructor(index = 1, options = {}) {
     this.index = index;
 
-    // Tunable Heuristic Parameters
-    this._aggression = clamp(finite(options.aggression, 0.72 + ((index * 19) % 25) / 100), 0, 1);
-    this._diveMargin = clamp(finite(options.diveMargin, 0.60), 0, 1);
-    this._defenseReactivity = clamp(finite(options.defenseReactivity, 0.78), 0, 1);
-    this._kerbUsage = clamp(finite(options.kerbUsage, 0.85), 0, 1);
-    this._lookahead = clamp(finite(options.lookahead, 14.0), 8, 30);
-    this._trailBrakingSkill = clamp(finite(options.trailBrakingSkill, 0.88), 0, 1);
+    // Tunable Heuristic Parameters (Calibrated for aggressive 1:00 flat benchmark pace & stubborn defense)
+    this._aggression = clamp(finite(options.aggression, 0.95), 0, 1);
+    this._diveMargin = clamp(finite(options.diveMargin, 0.85), 0, 1);
+    this._defenseReactivity = clamp(finite(options.defenseReactivity, 0.95), 0, 1);
+    this._kerbUsage = clamp(finite(options.kerbUsage, 0.95), 0, 1);
+    this._lookahead = clamp(finite(options.lookahead, 24.0), 8, 30);
+    this._trailBrakingSkill = clamp(finite(options.trailBrakingSkill, 0.95), 0, 1);
     this._ersAttackMode = Boolean(options.ersAttackMode ?? false);
 
-    this.skill = clamp(0.78 + ((index * 31) % 21) / 100, 0.5, 1.0);
+    this.skill = clamp(finite(options.skill, 0.98), 0.5, 1.0);
 
     // AI Core Modules
     this.awareness = new TrafficAwareness();
@@ -66,7 +66,7 @@ export class ResearchAIController {
     });
     this.paceOptimizer = new PaceOptimizer({
       trailBrakingSkill: this._trailBrakingSkill,
-      unwindFactor: 0.75
+      unwindFactor: 0.60
     });
 
     // Runtime state
@@ -456,11 +456,16 @@ export class ResearchAIController {
       : 99;
 
     if (committed && passTarget) {
-      const closingFloor = straightSend ? 8.0 : 5.0;
-      const cornerLimit = physicalTargetSpeed * (1.0 + this._aggression * 0.05);
+      const closingFloor = straightSend ? 8.0 : 3.5;
       const isSlowObstacle = passTarget.other.speed < 16.0;
       const obstacleFloor = isSlowObstacle ? Math.min(physicalTargetSpeed, Math.max(14.0, passTarget.other.speed + 10.0)) : 0;
-      desiredSpeed = Math.max(obstacleFloor, Math.min(cornerLimit, Math.max(desiredSpeed, passTarget.other.speed + closingFloor)));
+
+      if (straightSend) {
+        desiredSpeed = Math.min(physicalTargetSpeed, Math.max(desiredSpeed, passTarget.other.speed + closingFloor));
+      } else {
+        // In corners / braking zones, cap desiredSpeed to physicalTargetSpeed to ensure staying on legal track!
+        desiredSpeed = Math.min(physicalTargetSpeed, Math.max(obstacleFloor, passTarget.other.speed + closingFloor));
+      }
     } else if (passTarget && passTarget.delta > 0 && passTarget.delta < 32 && !defending) {
       const isSlowObstacle = passTarget.other.speed < 16.0;
       if (isSlowObstacle) {

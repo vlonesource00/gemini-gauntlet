@@ -52,11 +52,11 @@ export class ScenarioDeck {
     this.cameraMode = 'CHASE';
 
     this.heuristics = {
-      aggression: 75,
-      diveMargin: 45,
-      defenseReactivity: 80,
-      kerbUsage: 90,
-      lookaheadHorizon: 22
+      aggression: 95,
+      diveMargin: 85,
+      defenseReactivity: 95,
+      kerbUsage: 95,
+      lookaheadHorizon: 24
     };
 
     this.debugLayers = {

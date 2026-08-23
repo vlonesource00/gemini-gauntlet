@@ -52,7 +52,8 @@ export class PaceOptimizer {
     skill = 0.85
   } = {}) {
     const kappa = Math.max(1e-5, Math.abs(finite(curvature, 0)));
-    const classBaseG = vehicleClass === 'prototype' ? 2.1 : vehicleClass === 'gt' ? 1.38 : 1.15;
+    // Base G limits calibrated to aerodynamic downforce & tire grip for maximum pace without off-track excursions
+    const classBaseG = vehicleClass === 'prototype' ? 2.25 : vehicleClass === 'gt' ? 1.38 : 1.15;
     const peakG = classBaseG * tireGripFactor * (0.85 + skill * 0.12);
     const g = 9.81;
 
@@ -75,25 +76,25 @@ export class PaceOptimizer {
     lookaheadDistances = [0, 6, 12, 18, 26, 36, 48, 62, 80, 102, 128, 160],
     tireGripFactor = 1.0,
     skill = 0.85,
-    aggression = 0.7,
+    aggression = 0.80,
     defending = false,
     threatScore = 0,
     closingSpeed = 0,
     insideLineOffset = 0
   } = {}) {
     const vClass = vehicle?.classKey || 'gt';
-    const classBrakeG = vClass === 'prototype' ? 1.40 : vClass === 'gt' ? 1.15 : 0.95;
+    const classBrakeG = vClass === 'prototype' ? 1.42 : vClass === 'gt' ? 1.15 : 0.95;
     const sustainedDecel = classBrakeG * 9.81 * tireGripFactor * (0.88 + aggression * 0.10);
 
     // Deep Defensive Braking Point offset (shifts braking threshold deeper into turn-in under threat)
     let deepBrakeOffsetM = 0;
-    if (defending && threatScore >= 0.35) {
+    if (defending && threatScore >= 0.30) {
       const v0 = Math.max(8.0, finite(vehicle?.speed, 0));
       const maxA = sustainedDecel;
-      const psi = 0.05 + 0.12 * aggression;
+      const psi = 0.06 + 0.14 * aggression;
       const omega = saturate(threatScore);
       const gamma = clamp(1.0 + closingSpeed / 8.0, 0.8, 1.4);
-      const maxCap = Math.min(14.0, 0.20 * (v0 * v0 / (2.0 * maxA)));
+      const maxCap = Math.min(16.0, 0.22 * (v0 * v0 / (2.0 * maxA)));
       deepBrakeOffsetM = Math.min(maxCap, (v0 * v0 / (2.0 * maxA)) * psi * omega * gamma);
     }
 

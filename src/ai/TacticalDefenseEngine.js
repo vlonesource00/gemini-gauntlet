@@ -300,13 +300,13 @@ export class TacticalDefenseEngine {
       if (distToCorner > 65 && this.towBreakTimer > 0) {
         this.phase = 'BREAK_TOW';
       } else if (distToCorner <= 65 && distToCorner > 28) {
-        // Approach Corridor Lock
+        // Approach Corridor Lock - Aggressively shut the inside door
         this.phase = 'LOCK_DEFENSIVE_LANE';
-        this.targetOffset = clamp(committedSign * Math.min(3.2, roadMargin * 0.62), -roadMargin + 0.6, roadMargin - 0.6);
+        this.targetOffset = clamp(committedSign * Math.min(4.2, roadMargin * 0.78), -roadMargin + 0.4, roadMargin - 0.4);
       } else if (distToCorner <= 28 && distToCorner > 14 && attackerIntent !== 'ATTACK_DIVEBOMB_INSIDE') {
         // FIA One-Move Return toward racing line leaving 2.2m margin on track edge
         this.phase = 'ONE_MOVE_RETURN';
-        const returnOffset = clamp(committedSign * Math.min(1.8, roadMargin - 2.2), -roadMargin + 0.6, roadMargin - 0.6);
+        const returnOffset = clamp(committedSign * Math.min(2.0, roadMargin - 2.2), -roadMargin + 0.6, roadMargin - 0.6);
         this.targetOffset = returnOffset;
       } else if (inCorner && attackerIntent === 'EXIT_CUTBACK') {
         // Diamond Defense: late-apex squaring to defend cutback and maximize exit drive
@@ -315,11 +315,11 @@ export class TacticalDefenseEngine {
       } else if (inCorner && attackerIntent === 'ATTACK_OUTSIDE_MOMENTUM') {
         // Exit Squeeze: drift smoothly to leave legal 2.2m track edge margin
         this.phase = 'EXIT_SQUEEZE';
-        this.targetOffset = clamp(committedSign * Math.min(2.8, roadMargin - 2.2), -roadMargin + 0.6, roadMargin - 0.6);
+        this.targetOffset = clamp(committedSign * Math.min(3.2, roadMargin - 2.2), -roadMargin + 0.6, roadMargin - 0.6);
       } else if (inCorner) {
-        // Apex Shielding: pin inner kerb to deny inside dive
+        // Apex Shielding: pin inner kerb to shut the inside door completely
         this.phase = 'APEX_SHIELD';
-        this.targetOffset = clamp(committedSign * Math.min(3.6, roadMargin * 0.72), -roadMargin + 0.5, roadMargin - 0.5);
+        this.targetOffset = clamp(committedSign * Math.min(4.6, roadMargin * 0.85), -roadMargin + 0.35, roadMargin - 0.35);
       }
 
       return {
@@ -356,10 +356,10 @@ export class TacticalDefenseEngine {
       };
     }
 
-    // Evaluate New Defensive Trigger
+    // Evaluate New Defensive Trigger (instant proactive response)
     const shouldDefend = challenger
-      && (threatLevel === 'CRITICAL' || threatLevel === 'HIGH' || (threatLevel === 'MEDIUM' && closingSpeed > 0.8))
-      && traffic.egoForwardSpeed > 6.0
+      && (threatLevel !== 'NONE' || threatScore >= 0.18 || gap < 48.0)
+      && traffic.egoForwardSpeed > 4.0
       && this.cooldown <= 0;
 
     if (!shouldDefend) {
@@ -387,7 +387,7 @@ export class TacticalDefenseEngine {
     let reason = 'CLAIM_INSIDE_DEFENSIVE_CORRIDOR';
 
     if (inCorner) {
-      defensiveOffset = clamp(turnSign * Math.min(3.6, roadMargin * 0.72), -roadMargin + 0.5, roadMargin - 0.5);
+      defensiveOffset = clamp(turnSign * Math.min(4.6, roadMargin * 0.85), -roadMargin + 0.35, roadMargin - 0.35);
       phase = 'APEX_SHIELD';
       reason = 'PROTECT_INSIDE_APEX_LINE';
     } else if (gap > 18.0 && inDirectTow && distToCorner > 65) {
@@ -399,8 +399,8 @@ export class TacticalDefenseEngine {
       reason = 'AERODYNAMIC_TOW_BREAK';
       this.towBreakTimer = 2.2;
     } else {
-      // Pre-braking inside corridor lock
-      defensiveOffset = clamp(turnSign * Math.min(3.2, roadMargin * 0.62), -roadMargin + 0.6, roadMargin - 0.6);
+      // Pre-braking inside corridor lock - Aggressively shut inside line
+      defensiveOffset = clamp(turnSign * Math.min(4.2, roadMargin * 0.78), -roadMargin + 0.4, roadMargin - 0.4);
       phase = 'LOCK_DEFENSIVE_LANE';
       reason = 'LOCK_INSIDE_BRAKING_LANE';
     }
