@@ -309,7 +309,8 @@ export class ResearchAIController {
     const turnSign = Math.sign(finite(turn?.turnSign, 1)) || 1;
 
     const currentPoint = track?.atDistance ? track.atDistance(vehicle.distance) : { curvature: 0 };
-    const currentCurv = Math.abs(finite(currentPoint?.curvature, 0));
+    const signedCurv = finite(currentPoint?.curvature, 0);
+    const currentCurv = Math.abs(signedCurv);
 
     // Curvature-Adaptive Apex Lookahead Horizon:
     // lookahead(v, kappa) = clamp((v * 0.36) / (1.0 + 90.0 * Math.abs(kappa)), 7.5, 26.0)
@@ -381,8 +382,8 @@ export class ResearchAIController {
     }
 
     // 3. Multi-Candidate Frenet Trajectory Planning
-    // Tactical candidate variations for lattice sampling
-    const tacticalCandidates = [
+    // Tactical candidate variations for lattice sampling (only sampled during tactical combat)
+    const tacticalCandidates = (tacticalMode === 'PACE' || recovering) ? [] : [
       { offset: targetOffset, intentType: 'TACTICAL_TARGET', transitionScales: [0.75, 1.0, 1.3] },
       { offset: paceLine, intentType: 'RACING_LINE', transitionScales: [1.0, 1.5] },
       { offset: plannedRoadMargin * 0.65, intentType: 'RIGHT_OPEN_LANE', transitionScales: [0.8, 1.1] },
@@ -428,7 +429,8 @@ export class ResearchAIController {
       roadMargin: plannedRoadMargin,
       kerbAllowance,
       lookAhead: lookAheadDist,
-      trackingDistance: (committed || defending) ? Math.max(trackingDistance, clamp(vehicle.speed * 0.95, 12.0, 24.0)) : trackingDistance
+      trackingDistance: (committed || defending) ? Math.max(trackingDistance, clamp(vehicle.speed * 0.95, 12.0, 24.0)) : trackingDistance,
+      referenceLineAtDistance: (s) => this.referenceProfile?.paceAtDistance?.(s)?.lineLateral ?? 0
     });
 
     const trackingPoint = this.trajectoryPlan.trackingPoint ?? this.trajectoryPlan.points.at(-1);
@@ -494,7 +496,8 @@ export class ResearchAIController {
     const refData = this.referenceProfile?.paceAtDistance?.(vehicle.distance);
     const refSpeed = refData?.targetSpeed;
     if (Number.isFinite(refSpeed) && refSpeed > 10.0 && tacticalMode === 'PACE' && (vehicle.classKey === 'prototype' || !vehicle.classKey)) {
-      desiredSpeed = Math.max(desiredSpeed, refSpeed * (1.0 + (this._aggression - 0.5) * 0.12));
+      const scaledRef = refSpeed * (1.0 + (this._aggression - 0.5) * 0.06);
+      desiredSpeed = Math.min(physicalTargetSpeed, Math.max(desiredSpeed, scaledRef));
     }
 
     // Overtake speed adjustments (Aggressive closing velocity & acceleration)
@@ -506,7 +509,8 @@ export class ResearchAIController {
     if (committed && passTarget) {
       const isCornerApproach = Boolean(attDecision.inCorner) || (attDecision.distToCorner != null && attDecision.distToCorner < 85) || turnCurvature > 0.003;
       const straightClosingFloor = 14.0 + clamp(this._aggression, 0, 1) * 4.0; // Up to +18.0 m/s closing floor on straights
-      const closingFloor = (straightSend && !isCornerApproach) ? straightClosingFloor : 3.5;
+      const cornerClosingFloor = Math.max(4.5, 7.5 * this._aggression);
+      const closingFloor = (straightSend && !isCornerApproach) ? straightClosingFloor : cornerClosingFloor;
       const isSlowObstacle = passTarget.other.speed < 16.0;
       const obstacleFloor = isSlowObstacle ? Math.min(physicalTargetSpeed, Math.max(14.0, passTarget.other.speed + 10.0)) : 0;
 
@@ -544,20 +548,21 @@ export class ResearchAIController {
 
     // 7. Low-Level Pedal Control & Trail Braking
     const speedError = desiredSpeed - vehicle.speed;
-    const straight = currentCurv < 0.0035;
+    const straight = Math.abs(signedCurv) < 0.0030;
 
-    const latAccel = vehicle.speed * vehicle.speed * finite(this.trajectoryPlan.maxCurvaturePerM, 0);
+    // Live physical lateral acceleration experienced right now (v * yawRate)
+    const liveLatAccel = Math.abs(finite(vehicle.speed, 0) * finite(vehicle.yawRate, 0));
 
     const pedals = this.paceOptimizer.computePedals({
       vehicle,
       speedError,
       desiredSpeed,
       headingError,
-      lateralAccel: latAccel,
+      lateralAccel: liveLatAccel,
       steerAngle: this.steerCommand,
       yawRate: vehicle.yawRate,
       slipAngle: liveSlip,
-      currentCurvature: currentCurv,
+      currentCurvature: signedCurv,
       straight,
       recovering,
       emergency,
@@ -602,7 +607,7 @@ export class ResearchAIController {
       attDecision,
       defDecision,
       pedals,
-      latAccel,
+      latAccel: liveLatAccel,
       ersMode,
       emergency
     });

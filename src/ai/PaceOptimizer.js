@@ -53,8 +53,10 @@ export class PaceOptimizer {
     skill = 0.85
   } = {}) {
     const kappa = Math.max(1e-5, Math.abs(finite(curvature, 0)));
-    // Calibrated lateral acceleration budget: Prototype class up to 26.5 m/s² (2.70G) reflecting true ground-effect downforce
-    const classBaseG = vehicleClass === 'prototype' ? 2.70 : vehicleClass === 'gt' ? 1.30 : 1.10;
+    // Speed-dependent aerodynamic downforce: mechanical grip base (1.85G) + downforce scaling up to 2.70G at speed
+    const vEst = Math.sqrt(9.81 * 1.85 / kappa);
+    const downforceFactor = vehicleClass === 'prototype' ? saturate((vEst - 18.0) / 35.0) : 0;
+    const classBaseG = vehicleClass === 'prototype' ? (1.80 + 0.90 * downforceFactor) : vehicleClass === 'gt' ? 1.30 : 1.10;
     const peakG = classBaseG * tireGripFactor * (0.86 + skill * 0.14);
     const g = 9.81;
 
@@ -85,10 +87,10 @@ export class PaceOptimizer {
     insideLineOffset = 0
   } = {}) {
     const vClass = vehicle?.classKey || 'prototype';
-    // Calibrated sustained deceleration budget for backward speed envelope reachability
-    // Prototype: ~10.5 m/s²; GT: ~7.5 m/s²; Touring: ~5.5 m/s²
-    const brakingDecel = (vClass === 'prototype' ? 10.5 : vClass === 'gt' ? 7.5 : 5.5) * tireGripFactor * (0.90 + (aggression - 0.5) * 0.15);
-    const speedEnvelopeDistances = [0, 6, 12, 18, 24, 32, 42, 54, 68, 84, 104, 128, 160, 200, 250, 310];
+    // Calibrated physical sustained deceleration budget ensuring optimal braking point arrival
+    // Prototype: ~8.8 m/s²; GT: ~7.0 m/s²; Touring: ~5.2 m/s²
+    const brakingDecel = (vClass === 'prototype' ? 8.8 : vClass === 'gt' ? 7.0 : 5.2) * tireGripFactor * (0.92 + (aggression - 0.5) * 0.10);
+    const speedEnvelopeDistances = [0, 4, 8, 12, 16, 22, 28, 36, 46, 58, 72, 88, 108, 132, 160, 200, 250, 310];
 
     let speedLimit = 95.0; // max track velocity ceiling
 
@@ -101,13 +103,14 @@ export class PaceOptimizer {
         curvature = curvature / Math.max(0.40, 1.0 - Math.abs(insideLineOffset) * curvature);
       }
 
+      const safetyFactor = defending ? 0.94 : (aggression > 0.8 ? 0.99 : 0.96);
       const physLimit = this.calculateCornerSpeed({
         curvature,
         banking: point.banking,
         vehicleClass: vClass,
         tireGripFactor,
         skill
-      });
+      }) * safetyFactor;
 
       const trackLimit = track?.targetSpeed
         ? (vClass === 'prototype' ? Math.max(physLimit, track.targetSpeed(sampleDist, skill) * 1.15) : track.targetSpeed(sampleDist, skill))
@@ -174,11 +177,15 @@ export class PaceOptimizer {
     const lateralGain = recovering ? 0.085 : committed ? 0.080 : 0.055;
     const yawDamping = committed ? 0.12 : 0.17;
 
+    const vSpeed = finite(speed, 0);
+    // Speed-dependent steering limit prevents destructive high-speed front tire saturation scrub
+    const maxUsableSteer = recovering ? 1.0 : clamp(15.0 / Math.max(8.0, vSpeed), 0.30, 1.0);
+
     // Direct pure-pursuit trajectory tracking with lateral error trim and yaw rate damping
     let target = clamp(
       finite(headingError) * headingGain - finite(lateralError) * lateralGain - finite(yawRate) * yawDamping,
-      -1,
-      1
+      -maxUsableSteer,
+      maxUsableSteer
     );
 
     if (yielding) target = clamp(target, -0.3, 0.3);
@@ -240,17 +247,28 @@ export class PaceOptimizer {
       return { throttle: 0, brake: 1.0, friction, trailBraking: false, instability: 0 };
     }
 
-    // 1. Raw Speed Error Demand
-    if (speedError > -0.3) {
-      throttle = clamp((straight ? 1.0 : 0.65) + finite(speedError) * 0.30, 0, 1);
+    // 1. Dynamic Speed Demand & In-Corner Deceleration vs Straight Threshold Braking
+    const steerMagnitude = saturate(Math.abs(finite(steerAngle, 0)));
+    const latUtil = friction.latUtilization;
+    const isCornering = !straight && (steerMagnitude > 0.18 || latUtil > 0.58);
+    // In mid-corner, avoid sudden brake stabbing on minor speed errors; lift throttle and coast instead
+    const brakeThreshold = isCornering ? -1.80 : -0.70;
+
+    if (speedError > brakeThreshold + 0.30) {
+      throttle = clamp((straight ? 1.0 : 0.85) + finite(speedError) * 0.25, 0, 1.0);
+      brake = 0;
+    } else {
+      throttle = 0;
     }
 
-    if (speedError < -0.35) {
-      if (speedError < -1.2) {
-        // High-G straight threshold braking (-3.5G deceleration capacity)
-        brake = clamp(0.85 + (-finite(speedError) - 1.2) * 1.5, 0.85, 1.0);
+    if (speedError < brakeThreshold) {
+      throttle = 0;
+      if (speedError < -2.5) {
+        // High-G threshold braking on corner approach (-3.5G capacity)
+        brake = clamp(0.80 + (-finite(speedError) - 2.5) * 0.30, 0.80, 1.0);
       } else {
-        brake = clamp((-finite(speedError) - 0.25) * 0.80, 0, 0.85);
+        // Progressive corner entry brake modulation
+        brake = clamp((-finite(speedError) - Math.abs(brakeThreshold)) * 0.45, 0, 0.75);
       }
     }
 
@@ -266,27 +284,27 @@ export class PaceOptimizer {
     }
 
     // 3. Traction Control (TCS) & Corner-Exit Throttle Modulation
-    // Prevents power-oversteer by respecting available longitudinal traction budget
-    if (throttle > 0.03 && !straight) {
-      const steerMagnitude = saturate(Math.abs(finite(steerAngle, 0)));
-      const latUtil = friction.latUtilization;
-      // Longitudinal grip available within tire traction ellipse
-      const tractionBudget = Math.sqrt(Math.max(0.06, 1.0 - Math.pow(latUtil * 0.90, 2)));
+    // Intervenes ONLY in tight high-load cornering (|steer| > 0.25 AND latUtil > 0.72)
+    const isHardCornering = !straight && (steerMagnitude > 0.25 && latUtil > 0.72);
+
+    if (throttle > 0.03 && isHardCornering && brake < 0.05) {
+      const tractionBudget = Math.sqrt(Math.max(0.20, 1.0 - Math.pow(latUtil * 0.85, 2)));
       const vSpeed = finite(vehicle?.speed, 0);
-      const lowSpeedBoost = clamp((16.0 - vSpeed) / 10.0, 0, 0.45);
+      const lowSpeedBoost = clamp((20.0 - vSpeed) / 12.0, 0, 0.45);
       const unwindGain = clamp(
-        tractionBudget * (1.0 - this.unwindFactor * Math.pow(steerMagnitude, 1.4) * 0.40) + lowSpeedBoost,
-        0.30,
+        tractionBudget * (1.0 - this.unwindFactor * Math.pow(steerMagnitude, 1.2) * 0.25) + lowSpeedBoost,
+        0.60,
         1.0
       );
       throttle = clamp(throttle * unwindGain, 0, 1);
-      // Clean full throttle pickup when steering and lateral load have safely unwound
-      if (speedError > 0 && steerMagnitude < 0.15 && latUtil < 0.50 && Math.abs(finite(slipAngle, 0)) < 0.05) {
-        throttle = 1.0;
-      }
     }
 
-    // 4. Oversteer / Lateral Instability Control (Phase-Aware Yaw & Slip Evaluation)
+    // Instant 100% full throttle pickup as soon as steering unwinds or on straights
+    if (speedError > 0.2 && steerMagnitude < 0.18 && brake < 0.05 && Math.abs(finite(slipAngle, 0)) < 0.06) {
+      throttle = 1.0;
+    }
+
+    // 4. Oversteer / Lateral Instability Control (Phase-Aware Yaw & Real Breakaway Slip)
     const rawSlip = finite(slipAngle, 0);
     const vSpeed = finite(vehicle?.speed, 0);
     // Kinematic geometric body slip from steering lock at low-to-medium speeds
@@ -298,30 +316,34 @@ export class PaceOptimizer {
     // yaw rate lag behind curvature reversal is normal dynamic response, not a spin.
     let excessYaw = 0;
     if (Math.sign(yawRate) === Math.sign(kinYawRate) || Math.abs(kinYawRate) < 0.15) {
-      excessYaw = Math.max(0, Math.abs(finite(yawRate, 0)) - Math.abs(kinYawRate) - 0.35);
-    } else if (dynamicExcessSlip > 0.085) {
+      excessYaw = Math.max(0, Math.abs(finite(yawRate, 0)) - Math.abs(kinYawRate) - 0.45);
+    } else if (dynamicExcessSlip > 0.12) {
       // If slipping significantly while yawing against curvature, evaluate counter-spin
       excessYaw = Math.abs(finite(yawRate, 0));
     }
     
-    // Dynamic instability triggers on genuine tire breakaway slides
+    // Dynamic instability triggers ONLY on genuine tire breakaway slides (> 8 deg / 0.13 rad slip)
     const speedWeight = saturate(vSpeed / 8.0);
     const instability = saturate(Math.max(
-      (dynamicExcessSlip - 0.065) / 0.08,
-      (excessYaw - 0.65) / 0.75
+      (dynamicExcessSlip - 0.130) / 0.09,
+      (excessYaw - 0.85) / 0.90
     )) * speedWeight;
 
     if (instability > 0) {
-      // Cut throttle progressively to restore rear tire traction, preserving minimum maintenance drive
-      const minMaintenanceThrottle = (vSpeed > 15.0 && !straight) ? 0.25 : 0;
-      throttle = Math.max(minMaintenanceThrottle, throttle * (1.0 - instability * 0.75));
+      if (brake > 0.03 || speedError < -0.30) {
+        throttle = 0;
+      } else {
+        // High-speed maintenance throttle floor (25%) prevents lethal lift-off snap spins in esses
+        const minFloor = (vSpeed > 18.0 && !straight && dynamicExcessSlip < 0.18) ? 0.25 : 0.0;
+        throttle = Math.max(minFloor, throttle * (1.0 - instability * 0.70));
+      }
       // Soften brake during oversteer slides to prevent rear lockup
       brake *= Math.max(0.1, 1.0 - instability * 0.55);
     }
 
     // Prevent low-speed steering scrub stall in tight chicanes and hairpins
-    if (speedError > 1.2 && vSpeed < 12.0 && throttle < 0.42) {
-      throttle = clamp(0.42 + finite(speedError) * 0.06, 0.42, 0.80);
+    if (speedError > 0.8 && vSpeed < 22.0 && brake < 0.05 && throttle < 0.55 && instability === 0) {
+      throttle = clamp(0.55 + finite(speedError) * 0.05, 0.55, 0.90);
     }
 
     return {
