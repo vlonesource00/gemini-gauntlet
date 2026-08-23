@@ -465,25 +465,25 @@ export class TacticalDefenseEngine {
 
     if (attackerIntent === 'ATTACK_OUTSIDE_MOMENTUM') {
       // Outside Defense Squeeze: Smoothly drift out to leave exactly 1 car width (2.2m) at the track boundary
-      defensiveOffset = clamp(outsideSign * Math.min(3.6, roadMargin - 2.2), -roadMargin + 0.6, roadMargin - 0.6);
+      defensiveOffset = clamp(outsideSign * Math.min(3.2, roadMargin - 2.2), -roadMargin + 0.8, roadMargin - 0.8);
       phase = 'OUTSIDE_DEFENSE_SQUEEZE';
       reason = 'SQUEEZE_OUTSIDE_MOMENTUM_CORRIDOR';
     } else if (inCorner) {
-      // Physical Apex Shielding: Pin inside line tight to apex curb (0.35m margin), completely denying inside room
-      defensiveOffset = clamp(turnSign * Math.min(4.6, roadMargin * 0.85), -roadMargin + 0.35, roadMargin - 0.35);
+      // Physical Apex Shielding: Pin inside line tight to apex curb (0.6m margin), completely denying inside room
+      defensiveOffset = clamp(turnSign * Math.min(3.4, roadMargin * 0.65), -roadMargin + 0.6, roadMargin - 0.6);
       phase = 'APEX_SHIELD';
       reason = 'PHYSICAL_APEX_SHIELDING';
     } else if (gap > 18.0 && inDirectTow && distToCorner > 65) {
-      // Stepped lateral tow break (shifts 2.4m off draft line to destroy >66% follower tow)
+      // Stepped lateral tow break (shifts 2.2m off draft line to destroy >66% follower tow)
       const breakSide = distToCorner < 140 ? turnSign : (currentLateral > 0 ? -1 : 1);
-      const breakShift = 2.4 * breakSide;
+      const breakShift = 2.2 * breakSide;
       defensiveOffset = clamp(currentLateral + breakShift, -roadMargin + 0.8, roadMargin - 0.8);
       phase = 'BREAK_TOW';
       reason = 'AERODYNAMIC_TOW_BREAK';
       this.towBreakTimer = 2.2;
     } else {
       // Proactive Door Shutting: Claim preferred defensive inside lane with zero hesitation
-      defensiveOffset = clamp(turnSign * Math.min(4.2, roadMargin * 0.78), -roadMargin + 0.4, roadMargin - 0.4);
+      defensiveOffset = clamp(turnSign * Math.min(3.2, roadMargin * 0.60), -roadMargin + 0.6, roadMargin - 0.6);
       phase = 'LOCK_DEFENSIVE_LANE';
       reason = 'PROACTIVE_SHUT_INSIDE_DOOR';
     }

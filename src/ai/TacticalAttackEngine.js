@@ -510,20 +510,20 @@ export class TacticalAttackEngine {
     const targetSpeed = Math.max(vehicle.speed, target.other.speed + 18.0);
     const candidates = [];
 
-    // Wide Attack Swoops: Command deep lateral separation (4.2m to 5.4m) when pulling out from slipstream
-    const lateralSwoop = clamp(4.2 + this.aggression * 1.2, 4.2, 5.4);
+    // Attack Swoops: Command clean lateral separation (3.2m to 4.0m) when pulling out from slipstream
+    const lateralSwoop = clamp(3.2 + this.aggression * 0.6, 3.2, 4.0);
 
-    // Left Attack Lane Candidate: deep lateral separation (4.2m to 5.4m) to the left of lead car
-    if (spaceOnLeft >= 2.4) {
+    // Left Attack Lane Candidate: lateral separation to the left of lead car
+    if (spaceOnLeft >= 2.2) {
       const isLeftInside = inCorner && turnSign < 0;
       const isLeftDive = isLeftInside && divebomb.feasible;
       const isLeftSwitch = !isLeftInside && inCorner && switchback.feasible;
 
-      const leftSwoopOffset = clamp(leadLateral - lateralSwoop, -roadMargin + 0.55, roadMargin - 0.55);
+      const leftSwoopOffset = clamp(leadLateral - lateralSwoop, -baseRoadMargin, baseRoadMargin);
       const leftTargetOffset = isLeftDive
-        ? divebomb.insideOffset
-        : (isLeftInside ? clamp(turnSign * Math.min(3.6, roadMargin * 0.65), -roadMargin + 0.55, roadMargin - 0.55)
-          : (isLeftSwitch ? switchback.outsideOffset : leftSwoopOffset));
+        ? clamp(divebomb.insideOffset, -baseRoadMargin, baseRoadMargin)
+        : (isLeftInside ? clamp(turnSign * Math.min(3.2, baseRoadMargin * 0.70), -baseRoadMargin, baseRoadMargin)
+          : (isLeftSwitch ? clamp(switchback.outsideOffset, -baseRoadMargin, baseRoadMargin) : leftSwoopOffset));
 
       const leftCorridor = awareness.evaluateCorridor({
         vehicle,
@@ -568,17 +568,17 @@ export class TacticalAttackEngine {
       }
     }
 
-    // Right Attack Lane Candidate: deep lateral separation (4.2m to 5.4m) to the right of lead car
-    if (spaceOnRight >= 2.4) {
+    // Right Attack Lane Candidate: lateral separation to the right of lead car
+    if (spaceOnRight >= 2.2) {
       const isRightInside = inCorner && turnSign > 0;
       const isRightDive = isRightInside && divebomb.feasible;
       const isRightSwitch = !isRightInside && inCorner && switchback.feasible;
 
-      const rightSwoopOffset = clamp(leadLateral + lateralSwoop, -roadMargin + 0.55, roadMargin - 0.55);
+      const rightSwoopOffset = clamp(leadLateral + lateralSwoop, -baseRoadMargin, baseRoadMargin);
       const rightTargetOffset = isRightDive
-        ? divebomb.insideOffset
-        : (isRightInside ? clamp(turnSign * Math.min(3.6, roadMargin * 0.65), -roadMargin + 0.55, roadMargin - 0.55)
-          : (isRightSwitch ? switchback.outsideOffset : rightSwoopOffset));
+        ? clamp(divebomb.insideOffset, -baseRoadMargin, baseRoadMargin)
+        : (isRightInside ? clamp(turnSign * Math.min(3.2, baseRoadMargin * 0.70), -baseRoadMargin, baseRoadMargin)
+          : (isRightSwitch ? clamp(switchback.outsideOffset, -baseRoadMargin, baseRoadMargin) : rightSwoopOffset));
 
       const rightCorridor = awareness.evaluateCorridor({
         vehicle,

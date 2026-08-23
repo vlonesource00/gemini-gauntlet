@@ -390,8 +390,10 @@ export class ResearchAIController {
     ];
 
     const lookAheadDist = recovering
-      ? clamp(9.0 + vehicle.speed * 0.35, 8.0, 18.0)
-      : dynamicLookahead;
+      ? clamp(10.0 + vehicle.speed * 0.42, 10.0, 20.0)
+      : clamp(11.0 + vehicle.speed * 0.58, 12.0, 30.0);
+
+    const trackingDistance = clamp(lookAheadDist * 0.72 / (1.0 + currentCurv * 20.0), 5.5, 24.0);
 
     const maxTireWear = Math.max(0, ...(vehicle.wheels ?? []).map((w) => finite(w.wear, 0)));
     const tireGripFactor = clamp(1.0 - maxTireWear * 0.50, 0.80, 1.0);
@@ -425,7 +427,8 @@ export class ResearchAIController {
       urgent: committed || defending,
       roadMargin: plannedRoadMargin,
       kerbAllowance,
-      lookAhead: lookAheadDist
+      lookAhead: lookAheadDist,
+      trackingDistance: (committed || defending) ? Math.max(trackingDistance, clamp(vehicle.speed * 0.95, 12.0, 24.0)) : trackingDistance
     });
 
     const trackingPoint = this.trajectoryPlan.trackingPoint ?? this.trajectoryPlan.points.at(-1);
@@ -437,17 +440,36 @@ export class ResearchAIController {
       lateral: plannedTargetOffset
     };
 
-    // 4. Lateral Pursuit Steering
-    const headingError = wrapAngle(
+    // 4. Lateral Pursuit Steering & Orientation-Aware Rejoin
+    const trackPointAtCar = track?.atDistance ? track.atDistance(vehicle.distance) : { tangent: { x: 0, z: 1 } };
+    const trackHeadingAtCar = Math.atan2(trackPointAtCar.tangent.x, trackPointAtCar.tangent.z);
+    const yawAlignment = wrapAngle(vehicle.yaw - trackHeadingAtCar);
+    const isFacingBackwards = Math.abs(yawAlignment) > Math.PI * 0.55;
+
+    let headingError = wrapAngle(
       Math.atan2(targetPos.x - vehicle.position.x, targetPos.z - vehicle.position.z) - vehicle.yaw
     );
+
+    // If spun backwards during off-track recovery, command decisive turn-around lock
+    if (recovering && isFacingBackwards) {
+      headingError = Math.sign(yawAlignment) * -1.2;
+    }
+
     const lateralError = finite(current?.lateral, 0) - plannedTargetOffset;
+
+    const liveSlip = Math.atan2(
+      finite(vehicle.localVelocity?.x, 0),
+      Math.max(3.0, Math.abs(finite(vehicle.localVelocity?.z, vehicle.speed)))
+    );
 
     this.steerCommand = this.paceOptimizer.computeSteering({
       previous: this.steerCommand,
       headingError,
       lateralError,
       yawRate: vehicle.yawRate,
+      slipAngle: liveSlip,
+      speed: vehicle.speed,
+      currentCurvature: currentCurv,
       dt,
       committed,
       recovering
@@ -468,10 +490,10 @@ export class ResearchAIController {
 
     desiredSpeed = Math.min(desiredSpeed, trajectorySpeedLimit);
 
-    // Synchronize pace with user baseline reference profile if available (57s pace baseline)
+    // Synchronize pace with user baseline reference profile if available (57s pace baseline for Prototype)
     const refData = this.referenceProfile?.paceAtDistance?.(vehicle.distance);
     const refSpeed = refData?.targetSpeed;
-    if (Number.isFinite(refSpeed) && refSpeed > 10.0 && tacticalMode === 'PACE') {
+    if (Number.isFinite(refSpeed) && refSpeed > 10.0 && tacticalMode === 'PACE' && (vehicle.classKey === 'prototype' || !vehicle.classKey)) {
       desiredSpeed = Math.max(desiredSpeed, refSpeed * (1.0 + (this._aggression - 0.5) * 0.12));
     }
 
@@ -509,13 +531,12 @@ export class ResearchAIController {
       }
     }
 
-    if (recovering) desiredSpeed = isOffTrack ? 7.0 : 14.0;
+    if (recovering) desiredSpeed = isOffTrack ? (isFacingBackwards ? 5.0 : 8.5) : 14.0;
 
     // 6. Emergency Hazard Avoidance
     const hazard = this.awareness.forwardHazard(traffic);
-    const passTargetClear = committed && actualSeparation >= 2.4 && hazard?.other?.id === passTarget?.other?.id;
-    const isEvasiveOvertake = committed && passTarget && passTarget.other.speed < 16.0 && actualSeparation >= 1.8;
-    const emergency = Boolean(hazard && !passTargetClear && !isEvasiveOvertake && (hazard.ttc < 2.5 || (hazard.longitudinal < 8.0 && Math.abs(finite(current?.lateral, 0) - finite(hazard.otherLateral, 0)) < 1.8)));
+    const passTargetCombat = (committed || defending) && hazard?.other?.id === (passTarget?.other?.id ?? this.defenseEngine.defenseTargetId);
+    const emergency = Boolean(hazard && !passTargetCombat && (hazard.ttc < 2.2 || (hazard.longitudinal < 6.0 && Math.abs(finite(current?.lateral, 0) - finite(hazard.otherLateral, 0)) < 1.6)));
 
     if (emergency) {
       desiredSpeed = Math.min(desiredSpeed, Math.max(0, hazard.other.speed - 2.5));
@@ -524,10 +545,6 @@ export class ResearchAIController {
     // 7. Low-Level Pedal Control & Trail Braking
     const speedError = desiredSpeed - vehicle.speed;
     const straight = currentCurv < 0.0035;
-    const liveSlip = Math.atan2(
-      finite(vehicle.localVelocity?.x, 0),
-      Math.max(3.0, Math.abs(finite(vehicle.localVelocity?.z, vehicle.speed)))
-    );
 
     const latAccel = vehicle.speed * vehicle.speed * finite(this.trajectoryPlan.maxCurvaturePerM, 0);
 
@@ -540,6 +557,7 @@ export class ResearchAIController {
       steerAngle: this.steerCommand,
       yawRate: vehicle.yawRate,
       slipAngle: liveSlip,
+      currentCurvature: currentCurv,
       straight,
       recovering,
       emergency,

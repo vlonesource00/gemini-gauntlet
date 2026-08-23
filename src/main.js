@@ -206,7 +206,7 @@ const scenarioDeck = new ScenarioDeck({
     const ok = lapRecorder.downloadTelemetryFile();
     const notice = document.querySelector('[data-hud="notice"]');
     if (notice) {
-      notice.textContent = ok ? 'TELEMETRY JSON EXPORTED SUCCESSFULLY [DOWNLOAD STARTED]' : 'NO RECORDED LAP DATA TO EXPORT YET';
+      notice.textContent = ok ? 'BUNDLED TELEMETRY JSON (PLAYER + AI) EXPORTED SUCCESSFULLY [DOWNLOAD STARTED]' : 'NO RECORDED LAP DATA TO EXPORT YET';
       notice.style.display = 'block';
       setTimeout(() => { notice.style.display = 'none'; }, 3500);
     }
@@ -326,8 +326,8 @@ function fixedStep(dt) {
   // Scenario engine evaluation
   scenarioEngine.update(dt, collisionStats);
 
-  // Reference Lap recording & telemetry
-  lapRecorder.update(player, dt);
+  // Reference Lap recording & multi-vehicle telemetry (Player + AI)
+  lapRecorder.update(vehicles, dt);
 
   physicsCounter += 1;
 }

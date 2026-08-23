@@ -22,7 +22,8 @@ export class ReferenceLapManager {
     this.roadHalfWidth = finite(track?.roadHalfWidth, 7.6);
     this.curbWidth = finite(track?.curbWidth, 1.35);
 
-    // Live lap tracking
+    // Multi-vehicle live lap tracking
+    this.trackers = new Map();
     this.currentLapTime = 0;
     this.currentLapDistance = 0;
     this.previousDistance = 0;
@@ -31,11 +32,16 @@ export class ReferenceLapManager {
     this.bestLapTime = null;
     this.isRecording = true;
 
-    // Buffer of samples for the ongoing lap
+    // AI Telemetry storage
+    this.lastAILapTime = null;
+    this.lastAIProfile = null;
+    this.aiLapHistory = [];
+
+    // Buffer of samples for the player ongoing lap (backwards compatible)
     this.liveSamples = [];
     this.sampleIntervalM = 2.0; // 2m high-resolution spatial sampling
     this.lastSampleDistance = -999;
-    this.lapHistory = []; // All recorded laps
+    this.lapHistory = []; // All recorded player laps
 
     // Active baseline profile (either user recorded or default optimal)
     this.userBaseline = null;
@@ -50,6 +56,38 @@ export class ReferenceLapManager {
     this.previousDistance = 0;
     this.liveSamples = [];
     this.lastSampleDistance = -999;
+    for (const tracker of this.trackers.values()) {
+      tracker.currentLapTime = 0;
+      tracker.previousDistance = 0;
+      tracker.liveSamples = [];
+      tracker.lastSampleDistance = -999;
+    }
+  }
+
+  /**
+   * Retrieve or instantiate a telemetry tracker for a specific vehicle.
+   * @private
+   */
+  _getTracker(vehicle) {
+    const isPlayer = Boolean(vehicle?.player || vehicle?.id === 'player' || vehicle?.id === 'player-a1' || vehicle?.id === 'player-a2');
+    const id = vehicle?.id || (isPlayer ? 'player' : 'ai');
+
+    if (!this.trackers.has(id)) {
+      this.trackers.set(id, {
+        id,
+        isPlayer,
+        currentLapTime: 0,
+        previousDistance: 0,
+        lapCount: 0,
+        lastLapTime: null,
+        bestLapTime: null,
+        liveSamples: [],
+        lastSampleDistance: -999,
+        lapHistory: [],
+        lastCompletedProfile: null
+      });
+    }
+    return this.trackers.get(id);
   }
 
   /**
@@ -71,15 +109,13 @@ export class ReferenceLapManager {
   }
 
   /**
-   * Update recorder with player vehicle telemetry every physics frame.
-   * @param {Object} vehicle - Player vehicle
-   * @param {number} dt - Step duration in seconds
-   * @returns {Object} Live lap status
+   * Sample vehicle telemetry for one specific vehicle tracker.
+   * @private
    */
-  update(vehicle, dt) {
-    if (!vehicle) return { currentLapTime: 0, deltaS: 0 };
+  _sampleVehicle(vehicle, tracker, dt) {
+    if (!vehicle || !tracker) return { lapCompleted: false };
 
-    this.currentLapTime += dt;
+    tracker.currentLapTime += dt;
     const dist = finite(vehicle.distance, 0);
     const speed = finite(vehicle.speed, 0);
     const speedKph = speed * 3.6;
@@ -89,42 +125,53 @@ export class ReferenceLapManager {
     let newBest = false;
 
     // Detect start/finish line wrap-around
-    const crossedLine = this.previousDistance > (this.trackLength - 60) && dist < 60;
+    const crossedLine = tracker.previousDistance > (this.trackLength - 60) && dist < 60;
 
-    if (crossedLine && this.currentLapTime > 15.0) {
+    if (crossedLine && tracker.currentLapTime > 15.0) {
       lapCompleted = true;
-      this.lapCount += 1;
-      this.lastLapTime = this.currentLapTime;
+      tracker.lapCount += 1;
+      tracker.lastLapTime = tracker.currentLapTime;
 
-      if (!this.bestLapTime || this.currentLapTime < this.bestLapTime) {
-        this.bestLapTime = this.currentLapTime;
+      if (!tracker.bestLapTime || tracker.currentLapTime < tracker.bestLapTime) {
+        tracker.bestLapTime = tracker.currentLapTime;
         newBest = true;
       }
 
       // Finalize full telemetry lap profile with deep analytics
-      const completedProfile = this._buildProfileFromSamples(this.liveSamples, this.currentLapTime, vehicle);
+      const completedProfile = this._buildProfileFromSamples(tracker.liveSamples, tracker.currentLapTime, vehicle);
       if (completedProfile) {
-        this.lapHistory.push(completedProfile);
+        tracker.lastCompletedProfile = completedProfile;
+        tracker.lapHistory.push(completedProfile);
 
-        // Automatically set new best lap as active baseline
-        if (newBest || !this.userBaseline) {
-          this.setBaselineFromProfile(completedProfile);
+        if (tracker.isPlayer) {
+          this.lapHistory.push(completedProfile);
+          this.lastLapTime = tracker.lastLapTime;
+          this.bestLapTime = tracker.bestLapTime;
+          this.lapCount = tracker.lapCount;
+
+          if (newBest || !this.userBaseline) {
+            this.setBaselineFromProfile(completedProfile);
+          }
+        } else {
+          this.lastAILapTime = tracker.lastLapTime;
+          this.lastAIProfile = completedProfile;
+          this.aiLapHistory.push(completedProfile);
         }
 
-        // Automatically trigger JSON export / persistence
+        // Auto-save bundled telemetry payload (Player + AI)
         this.autoSaveTelemetryJSON(completedProfile);
       }
 
-      // Reset for next lap
-      this.currentLapTime = 0;
-      this.liveSamples = [];
-      this.lastSampleDistance = -999;
+      // Reset tracker buffer for next lap
+      tracker.currentLapTime = 0;
+      tracker.liveSamples = [];
+      tracker.lastSampleDistance = -999;
     }
 
-    this.previousDistance = dist;
+    tracker.previousDistance = dist;
 
     // Record high-resolution multi-channel spatial sample
-    if (Math.abs(dist - this.lastSampleDistance) >= this.sampleIntervalM || this.lastSampleDistance < 0) {
+    if (Math.abs(dist - tracker.lastSampleDistance) >= this.sampleIntervalM || tracker.lastSampleDistance < 0) {
       const controls = vehicle.controls ?? {};
       const powertrain = vehicle.powertrain ?? {};
       const ers = vehicle.ers ?? {};
@@ -174,9 +221,9 @@ export class ReferenceLapManager {
       const vertG = Number(finite(telemetry.verticalG, 1.0).toFixed(2));
       const combG = Number(Math.hypot(latG, longG).toFixed(2));
 
-      this.liveSamples.push({
+      const sample = {
         distance: Number(dist.toFixed(2)),
-        timeS: Number(this.currentLapTime.toFixed(3)),
+        timeS: Number(tracker.currentLapTime.toFixed(3)),
         sector,
         x: Number(finite(vehicle.position?.x, 0).toFixed(2)),
         y: Number(finite(vehicle.position?.y, 0).toFixed(2)),
@@ -235,22 +282,67 @@ export class ReferenceLapManager {
         /* Surface & Grip */
         surfaceZone: surface.zone ?? 'road',
         surfaceGrip: Number(finite(surface.grip, 1.0).toFixed(2))
-      });
-      this.lastSampleDistance = dist;
+      };
+
+      tracker.liveSamples.push(sample);
+      tracker.lastSampleDistance = dist;
+
+      if (tracker.isPlayer) {
+        this.liveSamples = tracker.liveSamples;
+        this.currentLapTime = tracker.currentLapTime;
+        this.previousDistance = tracker.previousDistance;
+        this.lastSampleDistance = dist;
+      }
     }
 
-    // Compute live delta vs baseline
-    const deltaS = this.calculateDelta(dist, this.currentLapTime);
+    return { lapCompleted, newBest };
+  }
+
+  /**
+   * Update recorder with vehicle telemetry every physics frame.
+   * Supports single vehicle or array of vehicles (e.g. [player, aiVehicle]).
+   * @param {Object|Array<Object>} target - Vehicle or array of vehicles
+   * @param {number} dt - Step duration in seconds
+   * @returns {Object} Live lap status for the primary player vehicle
+   */
+  update(target, dt) {
+    if (!target) return { currentLapTime: 0, deltaS: 0 };
+
+    let playerTracker = null;
+    let playerLapCompleted = false;
+    let playerNewBest = false;
+
+    if (Array.isArray(target)) {
+      for (const v of target) {
+        const tracker = this._getTracker(v);
+        const { lapCompleted, newBest } = this._sampleVehicle(v, tracker, dt);
+        if (tracker.isPlayer) {
+          playerTracker = tracker;
+          playerLapCompleted = lapCompleted;
+          playerNewBest = newBest;
+        }
+      }
+    } else {
+      playerTracker = this._getTracker(target);
+      const { lapCompleted, newBest } = this._sampleVehicle(target, playerTracker, dt);
+      playerLapCompleted = lapCompleted;
+      playerNewBest = newBest;
+    }
+
+    const currentDist = playerTracker ? playerTracker.previousDistance : 0;
+    const currentLapTime = playerTracker ? playerTracker.currentLapTime : this.currentLapTime;
+    const deltaS = this.calculateDelta(currentDist, currentLapTime);
 
     return {
-      currentLapTime: this.currentLapTime,
+      currentLapTime,
       lastLapTime: this.lastLapTime,
       bestLapTime: this.bestLapTime,
       deltaS,
-      lapCompleted,
-      newBest,
+      lapCompleted: playerLapCompleted,
+      newBest: playerNewBest,
       lapCount: this.lapCount,
-      hasBaseline: Boolean(this.userBaseline)
+      hasBaseline: Boolean(this.userBaseline),
+      lastAILapTime: this.lastAILapTime
     };
   }
 
@@ -294,31 +386,97 @@ export class ReferenceLapManager {
   }
 
   /**
-   * Automatically save telemetry JSON to LocalStorage and provide export format.
+   * Automatically save bundled telemetry JSON (Player + AI) to LocalStorage.
    */
   autoSaveTelemetryJSON(profile) {
     try {
-      const jsonStr = JSON.stringify(profile, null, 2);
-      localStorage.setItem('gemini_gauntlet_last_lap_telemetry', jsonStr);
+      const bundledJSON = this.exportTelemetryJSON();
+      if (bundledJSON) {
+        localStorage.setItem('gemini_gauntlet_last_lap_telemetry', bundledJSON);
+      }
     } catch {
       // Storage full
     }
   }
 
   /**
-   * Export structured JSON telemetry object or download file.
+   * Compute multi-metric diagnostic comparison between Player and AI laps.
+   * @private
    */
-  exportTelemetryJSON(lapIndex = null) {
-    const profile = lapIndex !== null && this.lapHistory[lapIndex]
-      ? this.lapHistory[lapIndex]
-      : this.activeProfile ?? this.lapHistory[this.lapHistory.length - 1] ?? null;
+  _computeLapComparison(player, ai) {
+    if (!player || !ai) return null;
+    const pTime = finite(player.lapTime, 0);
+    const aiTime = finite(ai.lapTime, 0);
+    const timeDeltaS = Number((pTime - aiTime).toFixed(3));
+    const s1DeltaS = Number(((player.sectors?.[0]?.timeS ?? 0) - (ai.sectors?.[0]?.timeS ?? 0)).toFixed(3));
+    const s2DeltaS = Number(((player.sectors?.[1]?.timeS ?? 0) - (ai.sectors?.[1]?.timeS ?? 0)).toFixed(3));
+    const s3DeltaS = Number(((player.sectors?.[2]?.timeS ?? 0) - (ai.sectors?.[2]?.timeS ?? 0)).toFixed(3));
 
-    if (!profile) return null;
-    return JSON.stringify(profile, null, 2);
+    return {
+      lapTimeDeltaS: timeDeltaS,
+      playerFaster: timeDeltaS < 0,
+      sectorDeltas: [
+        { sector: 1, deltaS: s1DeltaS },
+        { sector: 2, deltaS: s2DeltaS },
+        { sector: 3, deltaS: s3DeltaS }
+      ],
+      speedComparison: {
+        playerTopSpeedKph: player.speedStats?.topSpeedKph ?? 0,
+        aiTopSpeedKph: ai.speedStats?.topSpeedKph ?? 0,
+        topSpeedDeltaKph: Number(((player.speedStats?.topSpeedKph ?? 0) - (ai.speedStats?.topSpeedKph ?? 0)).toFixed(1)),
+        playerAvgSpeedKph: player.speedStats?.avgSpeedKph ?? 0,
+        aiAvgSpeedKph: ai.speedStats?.avgSpeedKph ?? 0,
+        avgSpeedDeltaKph: Number(((player.speedStats?.avgSpeedKph ?? 0) - (ai.speedStats?.avgSpeedKph ?? 0)).toFixed(1))
+      },
+      gForceComparison: {
+        playerPeakLatG: player.gForceStats?.peakLateralG ?? 0,
+        aiPeakLatG: ai.gForceStats?.peakLateralG ?? 0,
+        playerPeakBrakeG: player.gForceStats?.peakBrakingG ?? 0,
+        aiPeakBrakeG: ai.gForceStats?.peakBrakingG ?? 0
+      },
+      trackWidthComparison: {
+        playerAvgWidthPct: player.trackWidthAnalysis?.avgTrackWidthUsedPct ?? 0,
+        aiAvgWidthPct: ai.trackWidthAnalysis?.avgTrackWidthUsedPct ?? 0
+      },
+      pedalComparison: {
+        playerFullThrottlePct: player.pedalTraceAnalysis?.fullThrottlePct ?? 0,
+        aiFullThrottlePct: ai.pedalTraceAnalysis?.fullThrottlePct ?? 0,
+        playerHeavyBrakingPct: player.pedalTraceAnalysis?.heavyBrakingPct ?? 0,
+        aiHeavyBrakingPct: ai.pedalTraceAnalysis?.heavyBrakingPct ?? 0
+      }
+    };
   }
 
   /**
-   * Trigger browser file download of recorded lap telemetry.
+   * Export bundled JSON telemetry object containing Player lap, AI lap, and delta diagnostics.
+   */
+  exportTelemetryJSON(lapIndex = null) {
+    const playerProfile = lapIndex !== null && this.lapHistory[lapIndex]
+      ? this.lapHistory[lapIndex]
+      : this.activeProfile ?? this.lapHistory[this.lapHistory.length - 1] ?? null;
+
+    const aiProfile = this.lastAIProfile ?? (this.aiLapHistory.length > 0 ? this.aiLapHistory[this.aiLapHistory.length - 1] : null);
+    const comparison = this._computeLapComparison(playerProfile, aiProfile);
+
+    const bundled = {
+      ...(playerProfile || {}),
+      exportedAt: new Date().toISOString(),
+      playerLap: playerProfile,
+      aiLap: aiProfile,
+      comparison,
+      lapHistorySummary: {
+        playerLapsCount: this.lapHistory.length,
+        aiLapsCount: this.aiLapHistory.length,
+        playerBestLapTime: this.bestLapTime,
+        aiLastLapTime: this.lastAILapTime
+      }
+    };
+
+    return JSON.stringify(bundled, null, 2);
+  }
+
+  /**
+   * Trigger browser file download of recorded bundled lap telemetry (Player + AI).
    */
   downloadTelemetryFile(lapIndex = null) {
     if (typeof document === 'undefined') return false;
@@ -326,7 +484,7 @@ export class ReferenceLapManager {
     if (!jsonStr) return false;
 
     const profile = JSON.parse(jsonStr);
-    const fileName = `lap_telemetry_${(profile.lapTime ?? 0).toFixed(3)}s_${Date.now()}.json`;
+    const fileName = `lap_telemetry_bundled_${(profile.lapTime ?? 57.425).toFixed(3)}s_${Date.now()}.json`;
     const blob = new Blob([jsonStr], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
