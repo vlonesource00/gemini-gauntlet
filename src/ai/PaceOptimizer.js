@@ -75,22 +75,45 @@ export class PaceOptimizer {
     lookaheadDistances = [0, 6, 12, 18, 26, 36, 48, 62, 80, 102, 128, 160],
     tireGripFactor = 1.0,
     skill = 0.85,
-    aggression = 0.7
+    aggression = 0.7,
+    defending = false,
+    threatScore = 0,
+    closingSpeed = 0,
+    insideLineOffset = 0
   } = {}) {
     const vClass = vehicle?.classKey || 'gt';
     const classBrakeG = vClass === 'prototype' ? 1.40 : vClass === 'gt' ? 1.15 : 0.95;
     const sustainedDecel = classBrakeG * 9.81 * tireGripFactor * (0.88 + aggression * 0.10);
 
+    // Deep Defensive Braking Point offset (shifts braking threshold deeper into turn-in under threat)
+    let deepBrakeOffsetM = 0;
+    if (defending && threatScore >= 0.35) {
+      const v0 = Math.max(8.0, finite(vehicle?.speed, 0));
+      const maxA = sustainedDecel;
+      const psi = 0.05 + 0.12 * aggression;
+      const omega = saturate(threatScore);
+      const gamma = clamp(1.0 + closingSpeed / 8.0, 0.8, 1.4);
+      const maxCap = Math.min(14.0, 0.20 * (v0 * v0 / (2.0 * maxA)));
+      deepBrakeOffsetM = Math.min(maxCap, (v0 * v0 / (2.0 * maxA)) * psi * omega * gamma);
+    }
+
     let speedLimit = 95.0; // max track velocity ceiling
 
     for (const dist of lookaheadDistances) {
-      const sampleDist = finite(vehicle?.distance, 0) + dist;
+      const effectiveDist = Math.max(0, dist + deepBrakeOffsetM);
+      const sampleDist = finite(vehicle?.distance, 0) + effectiveDist;
       const point = track?.atDistance ? track.atDistance(sampleDist) : { curvature: 0, banking: 0 };
       
+      // Account for compressed corner radius if running on the defensive inside lane
+      let curvature = Math.abs(finite(point.curvature, 0));
+      if (Math.abs(insideLineOffset) > 0.5 && curvature > 1e-4) {
+        curvature = curvature / Math.max(0.40, 1.0 - Math.abs(insideLineOffset) * curvature);
+      }
+
       const trackLimit = track?.targetSpeed
         ? track.targetSpeed(sampleDist, skill)
         : this.calculateCornerSpeed({
-            curvature: point.curvature,
+            curvature,
             banking: point.banking,
             vehicleClass: vClass,
             tireGripFactor,
@@ -98,7 +121,7 @@ export class PaceOptimizer {
           });
 
       const cornerSpeed = Math.max(5.5, trackLimit);
-      const reachableSpeed = Math.sqrt(cornerSpeed * cornerSpeed + 2.0 * sustainedDecel * dist);
+      const reachableSpeed = Math.sqrt(cornerSpeed * cornerSpeed + 2.0 * sustainedDecel * effectiveDist);
       speedLimit = Math.min(speedLimit, reachableSpeed);
     }
 
@@ -190,6 +213,7 @@ export class PaceOptimizer {
     straight = false,
     recovering = false,
     emergency = false,
+    defending = false,
     tireGripFactor = 1.0
   }) {
     const friction = this.evaluateFrictionCircle({
@@ -216,29 +240,31 @@ export class PaceOptimizer {
 
     // 1. Raw speed error response
     if (speedError > -0.6) {
-      throttle = clamp((straight ? 0.95 : 0.52) + finite(speedError) * 0.14, 0, 1);
+      throttle = clamp((straight ? 0.96 : 0.54) + finite(speedError) * 0.15, 0, 1);
     }
 
-    if (speedError < -0.5) {
-      brake = clamp((-finite(speedError) - 0.3) * 0.28, 0, 1);
+    if (speedError < -0.4) {
+      brake = clamp((-finite(speedError) - 0.25) * 0.30, 0, 1);
     }
 
-    // 2. Trail Braking Modulation
-    // As vehicle enters corner and lateral G builds, smoothly trail off brake pressure
+    // 2. High-Precision Trail Braking Modulation
     let trailBrakingActive = false;
-    if (brake > 0.05 && friction.latUtilization > 0.15) {
+    if (brake > 0.04 && friction.latUtilization > 0.12) {
       trailBrakingActive = true;
-      const trailFactor = Math.sqrt(Math.max(0, 1.0 - (this.trailBrakingSkill * friction.latUtilization) ** 2));
-      brake *= clamp(trailFactor, 0.15, 1.0);
+      const trailExp = defending ? 1.4 : 1.8;
+      const latFactor = clamp(this.trailBrakingSkill * friction.latUtilization, 0, 0.98);
+      const trailFactor = Math.pow(Math.max(0.01, 1.0 - Math.pow(latFactor, 2)), 1.0 / trailExp);
+      brake *= clamp(trailFactor, 0.10, 1.0);
     }
 
-    // 3. Corner Exit Throttle Unwind Controller
-    // Modulate throttle as steering angle unwinds on corner exit to prevent wheelspin / snap oversteer
-    if (throttle > 0.05 && !straight) {
+    // 3. Defensive Exit Throttle Unwind & Traction Ellipse Controller
+    if (throttle > 0.04 && !straight) {
       const steerMagnitude = saturate(Math.abs(finite(steerAngle, 0)));
+      const latUtil = friction.latUtilization;
+      const tractionBudget = Math.sqrt(Math.max(0.04, 1.0 - Math.pow(latUtil, 2)));
       const unwindGain = clamp(
-        1.0 - this.unwindFactor * steerMagnitude * friction.latUtilization,
-        0.25,
+        tractionBudget * (1.0 - this.unwindFactor * steerMagnitude * 0.65),
+        0.18,
         1.0
       );
       throttle *= unwindGain;
@@ -247,11 +273,11 @@ export class PaceOptimizer {
     // 4. Oversteer / Lateral Instability Control
     const slip = Math.abs(finite(slipAngle, 0));
     const yaw = Math.abs(finite(yawRate, 0));
-    const instability = saturate(Math.max((slip - 0.13) / 0.20, (yaw - 1.1) / 1.2));
+    const instability = saturate(Math.max((slip - 0.12) / 0.18, (yaw - 1.05) / 1.15));
 
     if (instability > 0) {
-      throttle *= 1.0 - instability * 0.7;
-      brake *= 1.0 - instability * 0.75;
+      throttle *= (1.0 - instability * 0.80);
+      brake *= (1.0 - instability * 0.70);
     }
 
     return {

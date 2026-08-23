@@ -371,13 +371,17 @@ export class ResearchAIController {
     const maxTireWear = Math.max(0, ...(vehicle.wheels ?? []).map((w) => finite(w.wear, 0)));
     const tireGripFactor = clamp(1.0 - maxTireWear * 0.50, 0.80, 1.0);
 
-    // Compute speed envelope via backward integration
+    // Compute speed envelope via backward integration with defensive offset and threat parameters
     const physicalTargetSpeed = this.paceOptimizer.computeSpeedEnvelope({
       vehicle,
       track,
       tireGripFactor,
       skill: this.skill,
-      aggression: this._aggression
+      aggression: this._aggression,
+      defending,
+      threatScore: defDecision.threatScore || 0,
+      closingSpeed: defDecision.closingSpeed || 0,
+      insideLineOffset: targetOffset
     });
 
     this.trajectoryPlan = this.trajectoryPlanner.plan({
@@ -496,6 +500,7 @@ export class ResearchAIController {
       straight,
       recovering,
       emergency,
+      defending,
       tireGripFactor
     });
 
@@ -595,6 +600,8 @@ export class ResearchAIController {
       threat: {
         challengerId: challenger?.other?.id ?? null,
         threatLevel: defDecision.threatLevel ?? 'NONE',
+        threatScore: finite(defDecision.threatScore, 0),
+        attackerIntent: defDecision.attackerIntent ?? 'NONE',
         gapM: finite(challenger?.delta, 99),
         closingSpeedMps: finite(challenger?.relativeLongitudinalVelocity, 0),
         ttc: finite(challenger?.ttc, 99)
@@ -602,11 +609,13 @@ export class ResearchAIController {
 
       // Human-readable tactical thought summary
       thought: {
-        maneuver: tacticalMode === 'ATTACK' ? attDecision.phase : tacticalMode,
+        maneuver: tacticalMode === 'ATTACK' ? attDecision.phase : (tacticalMode === 'DEFEND' ? defDecision.phase : tacticalMode),
         deployedOffsetM: finite(targetOffset),
         targetId: target?.other?.id ?? null,
         committed: Boolean(attDecision.committed),
         defending: Boolean(defDecision.defending),
+        defensivePhase: defDecision.phase ?? 'NONE',
+        attackerIntent: defDecision.attackerIntent ?? 'NONE',
         straightSend: Boolean(attDecision.straightSend),
         divebombing: Boolean(attDecision.divebombing),
         switchbacking: Boolean(attDecision.switchbacking),

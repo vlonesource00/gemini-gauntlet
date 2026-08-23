@@ -548,11 +548,14 @@ export class TelemetryHUD {
     ).toUpperCase();
     this.el.modeTag.textContent = activeMode;
 
-    if (activeMode.includes('ATTACK') || activeMode.includes('PASS')) {
+    if (activeMode.includes('ATTACK') || activeMode.includes('PASS') || activeMode.includes('DIVEBOMB') || activeMode.includes('SWITCHBACK')) {
       this.el.modeTag.style.background = '#00ff88';
       this.el.modeTag.style.color = '#000';
-    } else if (activeMode.includes('DEFEND')) {
-      this.el.modeTag.style.background = '#f05cff';
+    } else if (activeMode.includes('APEX_SHIELD') || activeMode.includes('DIAMOND') || activeMode.includes('DEFEND') || activeMode.includes('SQUEEZE') || activeMode.includes('LOCK_DEFENSIVE') || activeMode.includes('ONE_MOVE')) {
+      this.el.modeTag.style.background = '#d500f9';
+      this.el.modeTag.style.color = '#fff';
+    } else if (activeMode.includes('BREAK_TOW')) {
+      this.el.modeTag.style.background = '#ff6d00';
       this.el.modeTag.style.color = '#000';
     } else if (activeMode.includes('BRAKE')) {
       this.el.modeTag.style.background = '#ffe15a';
