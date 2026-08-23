@@ -131,6 +131,19 @@
             <i><em style="transform: scaleX(0.5);"></em></i>
           </div>
         </div>
+        <div class="track-width-bar-container" style="margin-top: 8px; padding: 6px 8px; background: rgba(0,0,0,0.4); border-radius: 4px; border: 1px solid rgba(0,240,255,0.25);">
+          <div style="display: flex; justify-content: space-between; font-size: 10px; color: #00f0ff; font-weight: 700; margin-bottom: 3px;">
+            <span>TRACK WIDTH USED</span>
+            <span id="motec-width-pct">0%</span>
+          </div>
+          <div style="height: 6px; background: rgba(255,255,255,0.1); border-radius: 3px; overflow: hidden;">
+            <div id="motec-width-bar" style="height: 100%; width: 0%; background: linear-gradient(90deg, #00ff88, #ffd600, #ff3355); transition: width 0.05s linear;"></div>
+          </div>
+          <div style="display: flex; justify-content: space-between; font-size: 9px; color: rgba(255,255,255,0.7); margin-top: 4px;">
+            <span id="motec-line-phase" style="color: #ffd600; font-weight: bold;">STRAIGHT_SPEED</span>
+            <span id="motec-curb-dist">L: 7.6m · R: 7.6m</span>
+          </div>
+        </div>
       </section>
 
       <!-- Driver Cluster (Bottom Left) -->

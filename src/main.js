@@ -249,6 +249,10 @@ const elLatG = document.querySelector('[data-hud="lat-g"]');
 const elLongG = document.querySelector('[data-hud="long-g"]');
 const elSlip = document.querySelector('[data-hud="slip-angle"]');
 const elGGDot = document.querySelector('#gg-dot');
+const elMotecWidthPct = document.querySelector('#motec-width-pct');
+const elMotecWidthBar = document.querySelector('#motec-width-bar');
+const elMotecLinePhase = document.querySelector('#motec-line-phase');
+const elMotecCurbDist = document.querySelector('#motec-curb-dist');
 const elBtnMute = document.querySelector('#btn-mute');
 
 // Mute button click
@@ -477,6 +481,31 @@ function updateHUDReadouts() {
     const dotY = Math.max(-36, Math.min(36, (-localAcc.z / 9.81 / 2.5) * 36));
     elGGDot.style.transform = `translate(${dotX}px, ${dotY}px)`;
   }
+
+  // Live Track Width Utilization & Racing Line Telemetry
+  const pLateral = player.surface?.lateral || 0;
+  const rHalf = track.roadHalfWidth || 7.6;
+  const cWidth = track.curbWidth || 1.35;
+  const totalMargin = rHalf + cWidth;
+  const carHalf = (player.trackWidth || 1.8) * 0.5;
+  const widthPct = Math.min(100, Math.max(0, ((Math.abs(pLateral) + carHalf) / totalMargin) * 100));
+  const distL = (totalMargin + pLateral).toFixed(1);
+  const distR = (totalMargin - pLateral).toFixed(1);
+
+  const curTrackPt = track.atDistance ? track.atDistance(player.distance || 0) : { curvature: 0, turnSign: 0 };
+  const linePhase = lapRecorder._classifyRacingLinePhase(
+    player.distance || 0,
+    pLateral,
+    curTrackPt.curvature || 0,
+    curTrackPt.turnSign || 0,
+    player.controls?.throttle || 0,
+    player.controls?.brake || 0
+  );
+
+  if (elMotecWidthPct) elMotecWidthPct.textContent = `${widthPct.toFixed(1)}%`;
+  if (elMotecWidthBar) elMotecWidthBar.style.width = `${widthPct.toFixed(1)}%`;
+  if (elMotecLinePhase) elMotecLinePhase.textContent = linePhase;
+  if (elMotecCurbDist) elMotecCurbDist.textContent = `L: ${distL}m · R: ${distR}m`;
 
   // Update AI Thought HUD from AI Controller telemetry
   const aiTelemetry = aiController.telemetry || {};
