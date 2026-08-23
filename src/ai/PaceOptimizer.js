@@ -170,31 +170,20 @@ export class PaceOptimizer {
     recovering = false,
     yielding = false
   } = {}) {
-    const headingGain = recovering ? 2.85 : committed ? 3.5 : 2.3;
-    const lateralGain = recovering ? 0.085 : committed ? 0.08 : 0.055;
-    const yawDamping = committed ? 0.14 : 0.18;
+    const headingGain = recovering ? 2.80 : committed ? 3.45 : 2.25;
+    const lateralGain = recovering ? 0.085 : committed ? 0.080 : 0.055;
+    const yawDamping = committed ? 0.12 : 0.17;
 
-    // Nominal kinematic turn yaw rate at current speed: omega_kin = v * kappa
-    const kinYawRate = finite(speed, 0) * finite(currentCurvature, 0);
-    const excessYawRate = finite(yawRate, 0) - kinYawRate;
-    const chassisSlip = finite(slipAngle, 0);
-
-    // Baseline pursuit tracking steering target
-    let target = finite(headingError) * headingGain - finite(lateralError) * lateralGain - excessYawRate * yawDamping;
-
-    // Active Proactive Counter-Steering in Oversteer Slides:
-    // When rear axle breaks loose (|chassisSlip| > 0.035 rad / 2.0 deg), counter-steer into the slide
-    const slideIntensity = saturate((Math.abs(chassisSlip) - 0.035) / 0.07);
-    if (slideIntensity > 0) {
-      // Counter-steering term opposing body slide angle and excess spin yaw velocity
-      const counterTerm = -chassisSlip * 3.2 - excessYawRate * 0.26;
-      // Dynamically blend between path pursuit and slide catch priority
-      target = target * (1.0 - slideIntensity * 0.75) + counterTerm * slideIntensity;
-    }
+    // Direct pure-pursuit trajectory tracking with lateral error trim and yaw rate damping
+    let target = clamp(
+      finite(headingError) * headingGain - finite(lateralError) * lateralGain - finite(yawRate) * yawDamping,
+      -1,
+      1
+    );
 
     if (yielding) target = clamp(target, -0.3, 0.3);
 
-    const rate = committed ? 8.2 : recovering ? 7.0 : 6.0;
+    const rate = committed ? 7.5 : recovering ? 6.0 : 5.2;
     const maxDelta = rate * clamp(finite(dt, 0.016), 0, 0.1);
 
     return clamp(
@@ -297,7 +286,7 @@ export class PaceOptimizer {
       }
     }
 
-    // 4. Oversteer / Lateral Instability Control (Kinematic Ackerman Slip Compensation)
+    // 4. Oversteer / Lateral Instability Control (Phase-Aware Yaw & Slip Evaluation)
     const rawSlip = finite(slipAngle, 0);
     const vSpeed = finite(vehicle?.speed, 0);
     // Kinematic geometric body slip from steering lock at low-to-medium speeds
@@ -305,18 +294,27 @@ export class PaceOptimizer {
     const dynamicExcessSlip = Math.abs(rawSlip - kinematicSlip);
 
     const kinYawRate = vSpeed * finite(currentCurvature, 0);
-    const excessYaw = Math.abs(finite(yawRate, 0) - kinYawRate);
+    // Phase-aware yaw rate excess: in high-speed direction changes (esses/chicanes),
+    // yaw rate lag behind curvature reversal is normal dynamic response, not a spin.
+    let excessYaw = 0;
+    if (Math.sign(yawRate) === Math.sign(kinYawRate) || Math.abs(kinYawRate) < 0.15) {
+      excessYaw = Math.max(0, Math.abs(finite(yawRate, 0)) - Math.abs(kinYawRate) - 0.35);
+    } else if (dynamicExcessSlip > 0.085) {
+      // If slipping significantly while yawing against curvature, evaluate counter-spin
+      excessYaw = Math.abs(finite(yawRate, 0));
+    }
     
-    // Dynamic instability triggers on genuine tire breakaway slides, not low-speed Ackerman steering
-    const speedWeight = saturate(vSpeed / 10.0);
+    // Dynamic instability triggers on genuine tire breakaway slides
+    const speedWeight = saturate(vSpeed / 8.0);
     const instability = saturate(Math.max(
-      (dynamicExcessSlip - 0.060) / 0.08,
-      (excessYaw - 0.70) / 0.80
+      (dynamicExcessSlip - 0.065) / 0.08,
+      (excessYaw - 0.65) / 0.75
     )) * speedWeight;
 
     if (instability > 0) {
-      // Cut throttle progressively to restore rear tire traction
-      throttle *= Math.max(0, 1.0 - instability * 0.85);
+      // Cut throttle progressively to restore rear tire traction, preserving minimum maintenance drive
+      const minMaintenanceThrottle = (vSpeed > 15.0 && !straight) ? 0.25 : 0;
+      throttle = Math.max(minMaintenanceThrottle, throttle * (1.0 - instability * 0.75));
       // Soften brake during oversteer slides to prevent rear lockup
       brake *= Math.max(0.1, 1.0 - instability * 0.55);
     }

@@ -295,43 +295,66 @@ export class TelemetryHUD {
     this.root.innerHTML = `
       <div class="ai-telemetry-header">
         <div class="ai-telemetry-title">
-          <span>AI TACTICAL TELEMETRY</span>
-          <span class="ai-telemetry-badge" id="ai-hud-vehicle-tag">AI // GT</span>
+          <span>🧠 AI TELEMETRY HUD</span>
+          <span class="ai-telemetry-badge" id="ai-hud-vehicle-tag">PROTOTYPE #1</span>
         </div>
-        <div style="font-size: 9px; color: #00f0ff;" id="ai-hud-status-badge">ONLINE</div>
+        <div style="display: flex; gap: 6px; align-items: center;">
+          <button id="ai-hud-flag-btn" style="background: rgba(255, 234, 0, 0.2); border: 1px solid #ffea00; color: #ffea00; border-radius: 4px; padding: 2px 6px; font-size: 9px; cursor: pointer; font-weight: 700;">🚩 Flag (M)</button>
+          <button id="ai-hud-incidents-toggle-btn" style="background: rgba(0, 240, 255, 0.2); border: 1px solid #00f0ff; color: #00f0ff; border-radius: 4px; padding: 2px 6px; font-size: 9px; cursor: pointer; font-weight: 700;">Hotspots (<span id="ai-hud-incidents-count">0</span>)</button>
+          <div class="ai-telemetry-badge" id="ai-hud-status-badge" style="background: rgba(0, 255, 136, 0.15); border-color: #00ff88; color: #00ff88;">OPTIMIZING</div>
+        </div>
+      </div>
+
+      <!-- Incident Hotspot Drawer -->
+      <div id="ai-incident-drawer" style="display: none; background: rgba(12, 18, 24, 0.96); border: 1px solid #ffea00; border-radius: 6px; padding: 8px; flex-direction: column; gap: 6px; max-height: 180px; overflow-y: auto;">
+        <div style="display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid rgba(255, 234, 0, 0.3); padding-bottom: 4px;">
+          <span style="font-weight: 800; color: #ffea00; font-size: 10px;">🚩 FLAGGED INCIDENTS & HOTSPOTS</span>
+          <div style="display: flex; gap: 4px;">
+            <button id="ai-incident-export-btn" style="background: #00e5ff; color: #000; border: none; border-radius: 3px; font-size: 8.5px; font-weight: 800; padding: 2px 5px; cursor: pointer;">📥 EXPORT JSON</button>
+            <button id="ai-incident-clear-btn" style="background: rgba(255, 82, 82, 0.3); color: #ff5252; border: 1px solid #ff5252; border-radius: 3px; font-size: 8.5px; font-weight: 800; padding: 2px 5px; cursor: pointer;">CLEAR</button>
+          </div>
+        </div>
+        <div id="ai-incident-list" style="display: flex; flex-direction: column; gap: 4px; font-size: 9px;">
+          <span style="color: #90a4ae;">No incidents flagged yet. Press [M] or click Flag to mark any hesitation/slide.</span>
+        </div>
       </div>
 
       <div class="ai-telemetry-grid-top">
         <div class="ai-gg-panel">
-          <canvas class="ai-gg-canvas" id="ai-gg-canvas" width="256" height="256"></canvas>
-          <div class="ai-gg-readout" id="ai-gg-readout">+0.00 LAT · +0.00 LONG</div>
+          <canvas class="ai-gg-canvas" id="ai-gg-canvas" width="128" height="128"></canvas>
+          <div class="ai-gg-readout" id="ai-gg-readout">0.00G LAT | 0.00G LONG</div>
         </div>
 
         <div class="ai-thought-box">
           <div class="ai-mode-row">
             <span class="ai-mode-tag" id="ai-thought-mode">PACE</span>
-            <span style="font-size: 9px; color: #90a4ae;" id="ai-thought-target">TGT: CLEAR</span>
+            <span id="ai-thought-target" style="color: #90a4ae; font-size: 9.5px;">TARGET: OPTIMAL_RACING_LINE</span>
           </div>
-          <div class="ai-reason-text" id="ai-thought-reason">OPEN_RACING_LINE</div>
+          <div class="ai-reason-text" id="ai-thought-reason">Tracking racing line baseline with minimum jerk lateral dynamics</div>
+          
           <div class="ai-thought-metrics">
+            <div><span>TRACK POS:</span> <b id="ai-metric-dist">0.0 m</b></div>
+            <div><span>TARGET SPD:</span> <b id="ai-metric-tgt-spd">0 KM/H</b></div>
             <div><span>GAP:</span> <b id="ai-metric-gap">-- m</b></div>
             <div><span>CLOSING:</span> <b id="ai-metric-closing">-- km/h</b></div>
             <div><span>TTC:</span> <b id="ai-metric-ttc">-- s</b></div>
             <div><span>CLEARANCE:</span> <b id="ai-metric-clearance">-- m</b></div>
+            <div><span>TCS BUDGET:</span> <b id="ai-metric-tcs" style="color: #00ff88;">100%</b></div>
+            <div><span>STABILITY:</span> <b id="ai-metric-stab" style="color: #00f0ff;">100%</b></div>
           </div>
         </div>
       </div>
 
       <div class="ai-cost-table-panel">
-        <div class="ai-table-title">Frenet Trajectory Lattice (Top 3 Candidates)</div>
+        <div class="ai-table-title">FRENET LATTICE TRAJECTORY COST MATRIX (24 CANDIDATES)</div>
         <table class="ai-cost-table">
           <thead>
             <tr>
-              <th>RANK</th>
+              <th>CANDIDATE</th>
               <th>OFFSET</th>
               <th>TIME</th>
               <th>CLEAR</th>
-              <th>COST</th>
+              <th>SCORE</th>
               <th>STATUS</th>
             </tr>
           </thead>
@@ -398,14 +421,25 @@ export class TelemetryHUD {
     this.el = {
       vehicleTag: this.root.querySelector('#ai-hud-vehicle-tag'),
       statusBadge: this.root.querySelector('#ai-hud-status-badge'),
+      flagBtn: this.root.querySelector('#ai-hud-flag-btn'),
+      incidentsToggleBtn: this.root.querySelector('#ai-hud-incidents-toggle-btn'),
+      incidentsCount: this.root.querySelector('#ai-hud-incidents-count'),
+      incidentDrawer: this.root.querySelector('#ai-incident-drawer'),
+      incidentList: this.root.querySelector('#ai-incident-list'),
+      incidentExportBtn: this.root.querySelector('#ai-incident-export-btn'),
+      incidentClearBtn: this.root.querySelector('#ai-incident-clear-btn'),
       ggReadout: this.root.querySelector('#ai-gg-readout'),
       modeTag: this.root.querySelector('#ai-thought-mode'),
       targetTag: this.root.querySelector('#ai-thought-target'),
       reasonText: this.root.querySelector('#ai-thought-reason'),
+      metricDist: this.root.querySelector('#ai-metric-dist'),
+      metricTgtSpd: this.root.querySelector('#ai-metric-tgt-spd'),
       metricGap: this.root.querySelector('#ai-metric-gap'),
       metricClosing: this.root.querySelector('#ai-metric-closing'),
       metricTTC: this.root.querySelector('#ai-metric-ttc'),
       metricClearance: this.root.querySelector('#ai-metric-clearance'),
+      metricTcs: this.root.querySelector('#ai-metric-tcs'),
+      metricStab: this.root.querySelector('#ai-metric-stab'),
       costTableBody: this.root.querySelector('#ai-cost-table-body'),
       barRpm: this.root.querySelector('#ai-bar-rpm'),
       valSpd: this.root.querySelector('#ai-val-spd'),
@@ -418,6 +452,26 @@ export class TelemetryHUD {
       barErs: this.root.querySelector('#ai-bar-ers'),
       valErs: this.root.querySelector('#ai-val-ers')
     };
+
+    // Attach incident button listeners
+    this.el.flagBtn?.addEventListener('click', () => {
+      this.onMarkIncident?.('User clicked Flag button');
+    });
+
+    this.el.incidentsToggleBtn?.addEventListener('click', () => {
+      if (this.el.incidentDrawer) {
+        const isHidden = this.el.incidentDrawer.style.display === 'none';
+        this.el.incidentDrawer.style.display = isHidden ? 'flex' : 'none';
+      }
+    });
+
+    this.el.incidentExportBtn?.addEventListener('click', () => {
+      this.onExportIncidents?.();
+    });
+
+    this.el.incidentClearBtn?.addEventListener('click', () => {
+      this.onClearIncidents?.();
+    });
   }
 
   _initCanvas() {
@@ -576,6 +630,11 @@ export class TelemetryHUD {
     this.el.reasonText.textContent = String(reason);
 
     // 4. Metrics
+    const trackLen = finite(track?.length, 3061.7);
+    const trackDist = ((finite(vehicle.distance, 0) % trackLen) + trackLen) % trackLen;
+    if (this.el.metricDist) this.el.metricDist.textContent = `${trackDist.toFixed(1)} m`;
+    if (this.el.metricTgtSpd) this.el.metricTgtSpd.textContent = `${Math.round(finite(state.targetSpeed, 0) * 3.6)} KM/H`;
+
     const traffic = state.traffic ?? controller?.awareness?.lastScan;
     const targetEntry = traffic?.entries?.find?.(e => e.other?.id === targetId) ?? null;
 
@@ -591,6 +650,21 @@ export class TelemetryHUD {
 
     const clearance = finite(thought.trajectoryMinimumClearanceM, finite(state.trajectoryMinimumClearanceM, 99));
     this.el.metricClearance.textContent = clearance < 90 ? `${clearance.toFixed(1)} m` : '> 10 m';
+
+    // Control Limiters (TCS & Stability)
+    const telem = vehicle.telemetry ?? {};
+    const latG = Math.abs(finite(telem.lateralG, 0));
+    const tcsPct = Math.round(Math.sqrt(Math.max(0.1, 1.0 - Math.pow(latG / 2.7 * 0.90, 2))) * 100);
+    if (this.el.metricTcs) {
+      this.el.metricTcs.textContent = `${tcsPct}%`;
+      this.el.metricTcs.style.color = tcsPct < 60 ? '#ffea00' : '#00ff88';
+    }
+    const slipAngle = Math.abs(finite(vehicle.localVelocity?.x, 0)) / Math.max(1, Math.abs(finite(vehicle.localVelocity?.z, 1)));
+    const stabPct = Math.round(clamp(1.0 - Math.max(0, slipAngle - 0.04) / 0.12, 0, 1) * 100);
+    if (this.el.metricStab) {
+      this.el.metricStab.textContent = `${stabPct}%`;
+      this.el.metricStab.style.color = stabPct < 70 ? '#ff3355' : '#00f0ff';
+    }
 
     // 5. Candidate Trajectory Cost Table
     this._updateCandidateTable(controller, state);
@@ -687,6 +761,43 @@ export class TelemetryHUD {
     }
 
     this.el.costTableBody.innerHTML = rowsHtml;
+  }
+
+  updateIncidents(incidents = []) {
+    if (!this.el?.incidentList) return;
+
+    if (this.el.incidentsCount) {
+      this.el.incidentsCount.textContent = String(incidents.length);
+    }
+
+    if (!Array.isArray(incidents) || incidents.length === 0) {
+      this.el.incidentList.innerHTML = `
+        <span style="color: #90a4ae;">No incidents flagged yet. Press [M] or click Flag to mark any hesitation/slide.</span>
+      `;
+      return;
+    }
+
+    // Render latest 6 incidents
+    const latest = [...incidents].reverse().slice(0, 6);
+    let html = '';
+    for (const inc of latest) {
+      const typeColor = inc.type === 'SPIN_LOSS_OF_CONTROL' ? '#ff1744'
+        : inc.type === 'THROTTLE_HESITATION' ? '#ffea00'
+        : inc.type === 'OFF_TRACK_EXCURSION' ? '#ff9100' : '#00e5ff';
+
+      html += `
+        <div style="background: rgba(255, 255, 255, 0.05); border-left: 3px solid ${typeColor}; padding: 4px 6px; border-radius: 2px;">
+          <div style="display: flex; justify-content: space-between; align-items: center;">
+            <b style="color: ${typeColor}; font-size: 9px;">${inc.type}</b>
+            <span style="color: #80deea; font-size: 8.5px;">@ ${inc.distanceM}m (Lap ${inc.lap})</span>
+          </div>
+          <div style="color: #cfd8dc; font-size: 8.5px; margin-top: 2px;">${inc.diagnosis}</div>
+          <div style="color: #78909c; font-size: 8px; margin-top: 1px;">Spd: ${inc.speedKmh} km/h (Tgt: ${inc.targetSpeedKmh}) | Thr: ${(inc.throttle * 100).toFixed(0)}% | Yaw: ${inc.yawRateRps} r/s</div>
+        </div>
+      `;
+    }
+
+    this.el.incidentList.innerHTML = html;
   }
 
   setVisible(visible) {

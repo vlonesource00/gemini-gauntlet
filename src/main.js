@@ -354,8 +354,16 @@ function processActions() {
     aiDebug.group.visible = aiDebug.visible;
   }
   if (input.consume('KeyM')) {
+    if (aiDebug.markIncident) {
+      const inc = aiDebug.markIncident(aiVehicle, aiController, track, 'MANUAL_FLAG', 'Flagged via [M] hotkey');
+      if (inc) {
+        scenarioDeck?.showNotification?.(`🚩 Incident Marked @ ${inc.distanceM}m (Lap ${inc.lap})`);
+      }
+    }
+  }
+  if (input.consume('KeyU')) {
     const muted = audio.toggleMute();
-    if (elBtnMute) elBtnMute.textContent = muted ? 'AUDIO [MUTED]' : 'AUDIO [M]';
+    if (elBtnMute) elBtnMute.textContent = muted ? 'AUDIO [MUTED]' : 'AUDIO [U]';
   }
   if (input.consume('KeyJ')) {
     scenarioDeck.onExportJSON();
