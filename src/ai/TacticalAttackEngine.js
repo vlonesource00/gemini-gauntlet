@@ -409,11 +409,11 @@ export class TacticalAttackEngine {
       const isLeftDive = isLeftInside && divebomb.feasible;
       const isLeftSwitch = !isLeftInside && inCorner && switchback.feasible;
 
-      let leftAttackOffset = clamp(leadLateral - 3.4, -roadMargin + 0.6, roadMargin - 0.6);
+      let leftAttackOffset = clamp(leadLateral - 4.2, -roadMargin + 0.65, roadMargin - 0.65);
       if (leadLateral > 0) {
-        leftAttackOffset = Math.min(-1.8, Math.max(-roadMargin * 0.70, leadLateral - spaceOnLeft * 0.65));
+        leftAttackOffset = Math.min(-2.4, Math.max(-roadMargin * 0.75, leadLateral - spaceOnLeft * 0.72));
       } else if (spaceOnLeft >= 3.6) {
-        leftAttackOffset = clamp(leadLateral - Math.max(3.2, spaceOnLeft * 0.55), -roadMargin + 0.6, roadMargin - 0.6);
+        leftAttackOffset = clamp(leadLateral - Math.max(3.8, spaceOnLeft * 0.68), -roadMargin + 0.65, roadMargin - 0.65);
       }
 
       const leftTargetOffset = isLeftDive
@@ -465,11 +465,11 @@ export class TacticalAttackEngine {
       const isRightDive = isRightInside && divebomb.feasible;
       const isRightSwitch = !isRightInside && inCorner && switchback.feasible;
 
-      let rightAttackOffset = clamp(leadLateral + 3.4, -roadMargin + 0.6, roadMargin - 0.6);
+      let rightAttackOffset = clamp(leadLateral + 4.2, -roadMargin + 0.65, roadMargin - 0.65);
       if (leadLateral < 0) {
-        rightAttackOffset = Math.max(1.8, Math.min(roadMargin * 0.70, leadLateral + spaceOnRight * 0.65));
+        rightAttackOffset = Math.max(2.4, Math.min(roadMargin * 0.75, leadLateral + spaceOnRight * 0.72));
       } else if (spaceOnRight >= 3.6) {
-        rightAttackOffset = clamp(leadLateral + Math.max(3.2, spaceOnRight * 0.55), -roadMargin + 0.6, roadMargin - 0.6);
+        rightAttackOffset = clamp(leadLateral + Math.max(3.8, spaceOnRight * 0.68), -roadMargin + 0.65, roadMargin - 0.65);
       }
 
       const rightTargetOffset = isRightDive

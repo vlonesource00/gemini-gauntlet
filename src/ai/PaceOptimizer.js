@@ -53,7 +53,7 @@ export class PaceOptimizer {
   } = {}) {
     const kappa = Math.max(1e-5, Math.abs(finite(curvature, 0)));
     // Base G limits calibrated to aerodynamic downforce & tire grip for maximum pace without off-track excursions
-    const classBaseG = vehicleClass === 'prototype' ? 2.25 : vehicleClass === 'gt' ? 1.38 : 1.15;
+    const classBaseG = vehicleClass === 'prototype' ? 2.25 : vehicleClass === 'gt' ? 1.28 : 1.10;
     const peakG = classBaseG * tireGripFactor * (0.85 + skill * 0.12);
     const g = 9.81;
 
@@ -250,12 +250,12 @@ export class PaceOptimizer {
 
     // 2. High-Precision Trail Braking Modulation
     let trailBrakingActive = false;
-    if (brake > 0.04 && friction.latUtilization > 0.12) {
+    if (brake > 0.04 && friction.latUtilization > 0.12 && speedError > -4.5) {
       trailBrakingActive = true;
       const trailExp = defending ? 1.4 : 1.8;
       const latFactor = clamp(this.trailBrakingSkill * friction.latUtilization, 0, 0.98);
       const trailFactor = Math.pow(Math.max(0.01, 1.0 - Math.pow(latFactor, 2)), 1.0 / trailExp);
-      brake *= clamp(trailFactor, 0.10, 1.0);
+      brake *= clamp(trailFactor, 0.25, 1.0);
     }
 
     // 3. Defensive Exit Throttle Unwind & Traction Ellipse Controller
@@ -278,7 +278,9 @@ export class PaceOptimizer {
 
     if (instability > 0) {
       throttle *= (1.0 - instability * 0.80);
-      brake *= (1.0 - instability * 0.70);
+      if (speedError > -3.0) {
+        brake *= (1.0 - instability * 0.40);
+      }
     }
 
     return {

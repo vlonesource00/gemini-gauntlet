@@ -287,7 +287,10 @@ export class ResearchAIController {
     }
 
     // 2. Tactical Evaluation (Defense -> Attack -> Pace)
-    const referenceLine = this.referenceProfile?.paceAtDistance?.(vehicle.distance + 24)?.lineLateral ?? 0;
+    const upcomingPoint = track?.atDistance ? track.atDistance(vehicle.distance + 24) : { curvature: 0 };
+    const upcomingCurv = finite(upcomingPoint.curvature, 0);
+    const fallbackGeometricLine = clamp(-Math.sign(upcomingCurv) * Math.min(2.5, Math.abs(upcomingCurv) * 600), -baseRoadMargin, baseRoadMargin);
+    const referenceLine = this.referenceProfile?.paceAtDistance?.(vehicle.distance + 24)?.lineLateral ?? fallbackGeometricLine;
     const paceLine = clamp(referenceLine, -baseRoadMargin, baseRoadMargin);
 
     const defDecision = this.defenseEngine.update({
@@ -444,23 +447,25 @@ export class ResearchAIController {
     desiredSpeed = Math.min(desiredSpeed, trajectorySpeedLimit);
 
     // Synchronize pace with user baseline reference profile if available
-    const refSpeed = this.referenceProfile?.paceAtDistance?.(vehicle.distance)?.speed;
+    const refData = this.referenceProfile?.paceAtDistance?.(vehicle.distance);
+    const refSpeed = refData?.targetSpeed;
     if (Number.isFinite(refSpeed) && refSpeed > 10.0 && tacticalMode === 'PACE') {
-      desiredSpeed = Math.min(desiredSpeed, Math.max(desiredSpeed * 0.92, refSpeed * (1.0 + (this._aggression - 0.5) * 0.08)));
+      desiredSpeed = Math.min(physicalTargetSpeed, Math.max(desiredSpeed, refSpeed * (1.0 + (this._aggression - 0.5) * 0.08)));
     }
 
-    // Overtake speed adjustments
+    // Overtake speed adjustments (Aggressive closing velocity & acceleration)
     const passTarget = attDecision.target;
     const actualSeparation = passTarget
       ? Math.abs(finite(current?.lateral, 0) - finite(passTarget.otherLateral, 0))
       : 99;
 
     if (committed && passTarget) {
-      const closingFloor = straightSend ? 8.0 : 3.5;
+      const isCornerApproach = Boolean(attDecision.inCorner) || (attDecision.distToCorner != null && attDecision.distToCorner < 85) || turnCurvature > 0.003;
+      const closingFloor = (straightSend && !isCornerApproach) ? 14.0 : 3.5;
       const isSlowObstacle = passTarget.other.speed < 16.0;
       const obstacleFloor = isSlowObstacle ? Math.min(physicalTargetSpeed, Math.max(14.0, passTarget.other.speed + 10.0)) : 0;
 
-      if (straightSend) {
+      if (straightSend && !isCornerApproach) {
         desiredSpeed = Math.min(physicalTargetSpeed, Math.max(desiredSpeed, passTarget.other.speed + closingFloor));
       } else {
         // In corners / braking zones, cap desiredSpeed to physicalTargetSpeed to ensure staying on legal track!

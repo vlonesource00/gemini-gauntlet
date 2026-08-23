@@ -202,6 +202,15 @@ const scenarioDeck = new ScenarioDeck({
       setTimeout(() => { notice.style.display = 'none'; }, 3000);
     }
   },
+  onExportJSON: () => {
+    const ok = lapRecorder.downloadTelemetryFile();
+    const notice = document.querySelector('[data-hud="notice"]');
+    if (notice) {
+      notice.textContent = ok ? 'TELEMETRY JSON EXPORTED SUCCESSFULLY [DOWNLOAD STARTED]' : 'NO RECORDED LAP DATA TO EXPORT YET';
+      notice.style.display = 'block';
+      setTimeout(() => { notice.style.display = 'none'; }, 3500);
+    }
+  },
   onAutopilotToggle: (active) => {
     autopilotActive = active;
     const notice = document.querySelector('[data-hud="notice"]');
@@ -343,6 +352,9 @@ function processActions() {
   if (input.consume('KeyM')) {
     const muted = audio.toggleMute();
     if (elBtnMute) elBtnMute.textContent = muted ? 'AUDIO [MUTED]' : 'AUDIO [M]';
+  }
+  if (input.consume('KeyJ')) {
+    scenarioDeck.onExportJSON();
   }
   if (input.consume('Digit1')) scenarioDeck.selectScenario('A1');
   if (input.consume('Digit2')) scenarioDeck.selectScenario('A2');

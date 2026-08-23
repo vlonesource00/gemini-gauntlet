@@ -332,7 +332,7 @@ export class TacticalDefenseEngine {
       } else if (inCorner) {
         // Apex Shielding: pin inner kerb to shut the inside door completely
         this.phase = 'APEX_SHIELD';
-        this.targetOffset = clamp(committedSign * Math.min(4.6, roadMargin * 0.85), -roadMargin + 0.35, roadMargin - 0.35);
+        this.targetOffset = clamp(committedSign * Math.min(4.2, roadMargin * 0.78), -roadMargin + 0.55, roadMargin - 0.55);
       }
 
       return {

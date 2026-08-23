@@ -30,6 +30,7 @@ export class ScenarioDeck {
     onCameraChange = () => {},
     onSetBaseline = () => {},
     onClearBaseline = () => {},
+    onExportJSON = () => {},
     onAutopilotToggle = () => {}
   } = {}) {
     this.container = document.querySelector('#scenario-deck');
@@ -42,6 +43,7 @@ export class ScenarioDeck {
     this.onCameraChange = onCameraChange;
     this.onSetBaseline = onSetBaseline;
     this.onClearBaseline = onClearBaseline;
+    this.onExportJSON = onExportJSON;
     this.onAutopilotToggle = onAutopilotToggle;
 
     this.activeCategory = 'attack';
@@ -203,6 +205,11 @@ export class ScenarioDeck {
             <div class="action-grid" style="margin-top: 8px;">
               <button class="deck-btn" id="btn-set-baseline" type="button" style="border-color: #ffd600; color: #ffd600;">SET LIVE LAP AS BASELINE</button>
               <button class="deck-btn" id="btn-clear-baseline" type="button">CLEAR BASELINE</button>
+            </div>
+            <div style="margin-top: 6px;">
+              <button class="deck-btn" id="btn-export-json" type="button" style="width: 100%; border-color: #00ff88; color: #00ff88; font-weight: 700; padding: 6px;">
+                EXPORT TELEMETRY JSON [J]
+              </button>
             </div>
           </div>
         </div>
@@ -383,6 +390,11 @@ export class ScenarioDeck {
     const clearBaselineBtn = this.container.querySelector('#btn-clear-baseline');
     clearBaselineBtn?.addEventListener('click', () => {
       this.onClearBaseline();
+    });
+
+    const exportJsonBtn = this.container.querySelector('#btn-export-json');
+    exportJsonBtn?.addEventListener('click', () => {
+      this.onExportJSON();
     });
   }
 
