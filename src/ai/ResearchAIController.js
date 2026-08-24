@@ -471,10 +471,13 @@ export class ResearchAIController {
       Math.atan2(targetPos.x - vehicle.position.x, targetPos.z - vehicle.position.z) - vehicle.yaw
     );
 
-    // Orientation-aware shallow rejoin when off-track
+    // Orientation-aware rejoin when off-track: direct vector to track centerline ahead
     if (recovering || isOffTrack) {
-      const rejoinHeading = trackHeadingAtCar - clamp(currentLateralVal * 0.12, -0.42, 0.42);
-      headingError = wrapAngle(rejoinHeading - vehicle.yaw);
+      const rejoinPt = track?.atDistance ? track.atDistance(vehicle.distance + 14.0) : trackPointAtCar;
+      const toTrackFwdX = finite(rejoinPt.x, 0) - vehicle.position.x;
+      const toTrackFwdZ = finite(rejoinPt.z, 0) - vehicle.position.z;
+      const targetRejoinAngle = Math.atan2(toTrackFwdX, toTrackFwdZ);
+      headingError = wrapAngle(targetRejoinAngle - vehicle.yaw);
     }
 
     // If spun backwards, command decisive turn-around lock
