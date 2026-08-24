@@ -1,8 +1,9 @@
 /**
  * FrenetLatticePlanner.js
  * Multi-candidate Frenet-space trajectory generation and lattice evaluation engine.
- * Computes minimum-jerk spatial trajectories, curvature profiles, G-limits,
- * collision risks, track limit compliance, and multi-objective cost optimization.
+ * Computes smooth C2 quintic minimum-jerk spatial trajectories, curvature profiles,
+ * G-limits, spatial bounding-capsule collision checking, track limit compliance,
+ * candidate selection hysteresis (-22.0 bonus), and deduplicated visual candidates.
  */
 
 const finite = (value, fallback = 0) => (Number.isFinite(value) ? value : fallback);
@@ -16,14 +17,40 @@ const wrapAngle = (angle) => {
 };
 
 /**
- * Quintic polynomial minimum-jerk lateral transition curve.
- * Ensures continuous lateral position, velocity, and acceleration at boundaries.
+ * Quintic polynomial minimum-jerk lateral transition curve: S(u) = 10u^3 - 15u^4 + 6u^5.
+ * Ensures continuous lateral position, velocity, and acceleration (C2 continuity)
+ * with zero first and second derivatives at boundaries u=0 and u=1.
+ * @param {number} value - Normalized progress parameter u in [0, 1]
+ * @returns {number} Minimum-jerk blend value in [0, 1]
  */
 export const minimumJerk = (value) => {
   const u = clamp(value, 0, 1);
   return u * u * u * (10 + u * (-15 + u * 6));
 };
 
+/**
+ * First derivative of the quintic minimum-jerk polynomial: S'(u) = 30u^2(1 - u)^2.
+ * @param {number} value - Normalized progress parameter u in [0, 1]
+ * @returns {number} First derivative rate of change
+ */
+export const minimumJerkDerivative = (value) => {
+  const u = clamp(value, 0, 1);
+  return 30 * u * u * (1 - u) * (1 - u);
+};
+
+/**
+ * Second derivative of the quintic minimum-jerk polynomial: S''(u) = 60u(1 - u)(1 - 2u).
+ * @param {number} value - Normalized progress parameter u in [0, 1]
+ * @returns {number} Second derivative (acceleration)
+ */
+export const minimumJerkSecondDerivative = (value) => {
+  const u = clamp(value, 0, 1);
+  return 60 * u * (1 - u) * (1 - 2 * u);
+};
+
+/**
+ * Filter unique lateral offset values within [min, max] clamped bounds.
+ */
 const uniqueOffsets = (values, min, max, tolerance = 0.08) => {
   const result = [];
   for (const val of values) {
@@ -38,9 +65,24 @@ const uniqueOffsets = (values, min, max, tolerance = 0.08) => {
 
 const worldHeading = (a, b) => Math.atan2(b.x - a.x, b.z - a.z);
 
+/**
+ * Extract collision half-extents from vehicle instance or specifications.
+ */
+const getVehicleBoundingExtents = (v) => {
+  const halfLength = finite(
+    v?.collisionHalfLength,
+    finite(v?.spec?.wheelBase, 2.7) * 0.5 + finite(v?.spec?.collision?.overhangM, 0.56)
+  );
+  const halfWidth = finite(
+    v?.collisionHalfWidth,
+    finite(v?.spec?.trackWidth, 1.6) * 0.5 + finite(v?.spec?.collision?.bodyMarginM, 0.15)
+  );
+  return { halfLength: Math.max(1.5, halfLength), halfWidth: Math.max(0.75, halfWidth) };
+};
+
 export class FrenetLatticePlanner {
   /**
-   * @param {Object} options
+   * @param {Object} [options]
    * @param {number} [options.pointCount=24] - Number of discretized trajectory points
    * @param {number} [options.horizonS=3.4] - Planning time horizon in seconds
    */
@@ -48,6 +90,15 @@ export class FrenetLatticePlanner {
     this.pointCount = Math.max(12, Math.trunc(pointCount));
     this.horizonS = Math.max(2.8, finite(horizonS, 3.4));
     this.lastSelectedOffset = null;
+    this.lastCandidates = [];
+  }
+
+  /**
+   * Reset internal planner state (e.g. on race restart or teleport).
+   */
+  reset() {
+    this.lastSelectedOffset = null;
+    this.lastCandidates = [];
   }
 
   /**
@@ -75,8 +126,10 @@ export class FrenetLatticePlanner {
     weights = {}
   }) {
     const points = [];
-    const startSpeed = Math.max(0, finite(vehicle.speed, 0));
+    const startSpeed = Math.max(0, finite(vehicle?.speed, 0));
     const acceleration = clamp((finite(targetSpeed, startSpeed) - startSpeed) * 0.42, -7.0, 5.0);
+
+    const egoExtents = getVehicleBoundingExtents(vehicle);
 
     let roadViolation = 0;
     let edgeRisk = 0;
@@ -98,7 +151,7 @@ export class FrenetLatticePlanner {
       const forwardDistance = Math.max(0, startSpeed * time + 0.5 * acceleration * time * time);
       const blend = minimumJerk(time / Math.max(0.2, transitionTime));
 
-      const currentDistance = finite(vehicle.distance, 0) + forwardDistance;
+      const currentDistance = finite(vehicle?.distance, 0) + forwardDistance;
       const reference = track?.atDistance
         ? track.atDistance(currentDistance)
         : { s: currentDistance, x: 0, y: 0, z: 0 };
@@ -140,12 +193,13 @@ export class FrenetLatticePlanner {
       const edgeBuffer = Math.max(0.12, 0.40 - aggression * 0.22 - (kerbAllowance > 0 ? 0.12 : 0));
       edgeRisk += Math.max(0, Math.abs(lateral) - (surfaceLimit - edgeBuffer)) ** 2;
 
-      // Traffic proximity and collision evaluation
+      // Spatial bounding-capsule collision checking against traffic entries
       for (const entry of trafficEntries || []) {
         if (!entry?.other || entry.other.finished || entry.other.despawned || entry.other.trafficGhost) {
           continue;
         }
 
+        const opponentExtents = getVehicleBoundingExtents(entry.other);
         const opponentProgress = Math.max(0, finite(entry.other.speed, 0) * time);
         const longitudinalGap = finite(entry.delta, 0) + opponentProgress - forwardDistance;
         const opponentStart = finite(entry.otherLateral, finite(entry.other.surface?.lateral, 0));
@@ -153,8 +207,13 @@ export class FrenetLatticePlanner {
         const opponentLateral = opponentStart + (opponentTarget - opponentStart) * minimumJerk(time / 1.35);
 
         const lateralGap = Math.abs(lateral - opponentLateral);
-        const longitudinalClearance = Math.abs(longitudinalGap) - 5.2;
-        const lateralClearance = lateralGap - 3.0;
+
+        // Spatial capsule collision geometry
+        const longitudinalEnvelope = egoExtents.halfLength + opponentExtents.halfLength + 0.40;
+        const lateralEnvelope = egoExtents.halfWidth + opponentExtents.halfWidth + 0.90;
+
+        const longitudinalClearance = Math.abs(longitudinalGap) - longitudinalEnvelope;
+        const lateralClearance = lateralGap - lateralEnvelope;
         const combinedClearance = Math.max(longitudinalClearance, lateralClearance);
 
         minimumClearance = Math.min(minimumClearance, combinedClearance);
@@ -231,7 +290,7 @@ export class FrenetLatticePlanner {
     const avgSpeed = speedSum / this.pointCount;
 
     // Reward clipping inside apex curb during cornering
-    const trackPoint = track?.atDistance ? track.atDistance(vehicle.distance) : { curvature: 0 };
+    const trackPoint = track?.atDistance ? track.atDistance(vehicle?.distance ?? 0) : { curvature: 0 };
     const trackCurv = finite(trackPoint?.curvature, 0);
     const isInsideApex = (trackCurv > 0.003 && terminalLateral < 0) || (trackCurv < -0.003 && terminalLateral > 0);
     const kerbReward = (kerbAllowance > 0 && isInsideApex) ? (0.6 + aggression * 0.8) : 0;
@@ -276,7 +335,8 @@ export class FrenetLatticePlanner {
         jerk: costJerk,
         intent: costIntent,
         progressReward: rewardProgress,
-        trackWidthReward: rewardWidth
+        trackWidthReward: rewardWidth,
+        hysteresisBonus: costHysteresis
       }
     };
   }
@@ -434,12 +494,16 @@ export class FrenetLatticePlanner {
     this.lastSelectedOffset = selected.terminalLateral;
 
     // Filter diagnostic candidates for 3D visualization: keep 1 best candidate per distinct lateral corridor
-    const visualCandidates = [];
+    const visualCandidates = [selected];
+    selected.selected = true;
     for (const cand of candidateTrajectories) {
+      if (cand === selected) continue;
+      cand.selected = false;
       if (!visualCandidates.some((v) => Math.abs(v.terminalLateral - cand.terminalLateral) < 0.35)) {
         visualCandidates.push(cand);
       }
     }
+    this.lastCandidates = visualCandidates;
 
     // Compute pursuit tracking target point
     const pursuitDist = clamp(

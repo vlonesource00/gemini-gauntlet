@@ -7,6 +7,7 @@ import { HARBOR_RING } from './scenarios/HarborRing.js';
 import { ENDURANCE_PARK } from './scenarios/EndurancePark.js';
 import { ScenarioEngine } from './scenarios/ScenarioEngine.js';
 import { ResearchAIController } from './ai/ResearchAIController.js';
+import { NextGenAIController } from './ai/v2/NextGenAIController.js';
 import { CircuitEnvironment } from './render/Environment.js';
 import { CarVisual } from './render/CarVisual.js';
 import { AssetLibrary } from './render/AssetLibrary.js';
@@ -518,12 +519,13 @@ function updateHUDReadouts() {
   if (elMotecCurbDist) elMotecCurbDist.textContent = `L: ${distL}m · R: ${distR}m`;
 
   // Update AI Thought HUD from AI Controller telemetry
-  const aiTelemetry = aiController.telemetry || {};
+  const aiTelemetry = aiController.telemetry || aiController.debugState?.telemetry || {};
+  const aiDebugState = aiController.debugState || {};
   scenarioDeck.updateAIThoughtHUD({
-    state: aiTelemetry.state || aiTelemetry.maneuver || 'TRAJECTORY_FOLLOW',
+    state: aiTelemetry.state || aiDebugState.mode || aiTelemetry.maneuver || 'TRAJECTORY_FOLLOW',
     action: aiTelemetry.action || (aiVehicle.speed > 50 ? 'ATTACK DRAFT' : 'CRUISE'),
-    reason: aiTelemetry.reason || 'Optimal corridor tracking at 120Hz',
-    threat: aiTelemetry.threatLevel || 'LOW',
+    reason: aiTelemetry.reason || aiDebugState.reason || 'Optimal corridor tracking at 120Hz',
+    threat: aiTelemetry.threatLevel || aiDebugState.threat?.threatLevel || 'LOW',
     aggression: Math.round((aiController._aggression || 0.75) * 100),
     diveMargin: (aiController._diveMargin || 0.45),
     defense: Math.round((aiController._defenseReactivity || 0.8) * 100),
@@ -533,8 +535,8 @@ function updateHUDReadouts() {
     brake: aiVehicle.controls?.brake || 0,
     steer: aiVehicle.controls?.steer || 0,
     tactic: aiTelemetry.tactic || 'Dynamic Frenet Lattice Evaluation',
-    prediction: aiTelemetry.prediction || 'Clear inside apex window',
-    decision: aiTelemetry.decision || 'Hold tactical spacing'
+    prediction: aiTelemetry.prediction || `Clearance: ${finite(aiDebugState.trajectoryMinimumClearanceM, 99).toFixed(1)}m`,
+    decision: aiTelemetry.decision || aiDebugState.decisionReason || 'Hold tactical spacing'
   });
 
   // Update Lap Telemetry & User Baseline HUD
@@ -572,6 +574,9 @@ window.__GEMINI_GAUNTLET__ = {
   player,
   aiVehicle,
   aiController,
+  playerPaceAI,
+  ResearchAIController,
+  NextGenAIController,
   scenarioEngine,
   aiDebug,
   scenarioDeck,

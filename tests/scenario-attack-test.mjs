@@ -3,12 +3,12 @@ import { Circuit } from '../src/simulation/Track.js';
 import { ENDURANCE_PARK } from '../src/scenarios/EndurancePark.js';
 import { Vehicle } from '../src/simulation/Vehicle.js';
 import { ResearchAIController } from '../src/ai/ResearchAIController.js';
+import { NextGenAIController } from '../src/ai/v2/NextGenAIController.js';
 import { updateAerodynamicWakes, resolveVehicleCollisions } from '../src/simulation/VehicleInteractions.js';
-import { SCENARIOS } from '../src/scenarios/ScenarioDefinitions.js';
 
 const DT = 1 / 120;
 
-console.log('=== [3/5] Running Tactical Attack Scenarios Test Suite (A1 & A2) ===');
+console.log('=== [3/5] Running Tactical Attack Scenarios Test Suite (A1, A2, A3) ===');
 
 const setForwardSpeed = (vehicle, speedMs, track) => {
   const p = track.atDistance(vehicle.distance);
@@ -185,6 +185,78 @@ console.log('  -> Simulating Attack Scenario A2 (Quarry Chicane Inside Attack)..
   assert.equal(deepOverlapFrames, 0, 'Chicane attack must never produce deep overlap');
   assert.ok(offTrackSeconds < 0.25, 'AI must stay within legal boundaries through chicane');
   console.log('    [PASS] Scenario A2: Inside chicane dive attack verified.');
+}
+
+// ---------------------------------------------------------------------------
+// 3. Attack Scenario A3: NextGen AI Game-Theoretic Slingshot & IBR Pass
+// ---------------------------------------------------------------------------
+console.log('  -> Simulating Attack Scenario A3 (NextGen AI Game-Theoretic Pass)...');
+{
+  const track = new Circuit(ENDURANCE_PARK);
+  const target = new Vehicle({ id: 'target-a3', spec: 'gt', player: true });
+  const attacker = new Vehicle({ id: 'attacker-a3', spec: 'prototype' });
+
+  target.resetTo(track, 120, 0.5);
+  attacker.resetTo(track, 95, -0.5);
+
+  setForwardSpeed(target, 25, track);
+  setForwardSpeed(attacker, 33, track);
+
+  const targetAI = new NextGenAIController('target-ai-a3', { aggression: 0.60 });
+  const attackerAI = new NextGenAIController('attacker-ai-a3', { aggression: 0.95, diveMargin: 0.85 });
+
+  const vehicles = [target, attacker];
+  const race = {
+    phase: 'racing',
+    raceTime: 10.0,
+    elapsed: 10.0,
+    statusFor: (v) => ({ position: v === target ? 1 : 2 })
+  };
+
+  let contactFrames = 0;
+  let deepOverlapFrames = 0;
+  let offTrackSeconds = 0;
+  let completedAt = null;
+  let minimumSeparation = Infinity;
+  const simDurationS = 15.0;
+  const totalSteps = Math.round(simDurationS / DT);
+
+  for (let step = 0; step < totalSteps; step += 1) {
+    race.raceTime += DT;
+    race.elapsed += DT;
+
+    targetAI.update(target, vehicles, track, race, DT);
+    attackerAI.update(attacker, vehicles, track, race, DT);
+    updateAerodynamicWakes(vehicles);
+
+    target.step(DT, track, true);
+    attacker.step(DT, track, true);
+
+    const collision = resolveVehicleCollisions(vehicles, 3);
+    if (collision.contacts > 0) contactFrames += 1;
+    if (collision.deepOverlaps > 0) deepOverlapFrames += 1;
+
+    const sep = Math.hypot(attacker.position.x - target.position.x, attacker.position.z - target.position.z);
+    minimumSeparation = Math.min(minimumSeparation, sep);
+
+    if (attacker.surface?.zone === 'grass' || attacker.surface?.zone === 'runoff') {
+      offTrackSeconds += DT;
+    }
+
+    if (completedAt === null && attacker.distance > target.distance + 4.0) {
+      completedAt = race.raceTime - 10.0;
+    }
+  }
+
+  const finalGap = attacker.distance - target.distance;
+  console.log(`    A3 Result: completedAt=${completedAt ? completedAt.toFixed(2) + 's' : 'N/A'}, minSep=${minimumSeparation.toFixed(2)}m, contacts=${contactFrames}, deepOverlaps=${deepOverlapFrames}, finalGap=${finalGap.toFixed(1)}m, offTrack=${offTrackSeconds.toFixed(2)}s`);
+
+  assert.ok(completedAt !== null, 'NextGen AI must complete overtake in Scenario A3');
+  assert.ok(completedAt < simDurationS, 'NextGen overtake must complete within 15 seconds');
+  assert.equal(deepOverlapFrames, 0, 'NextGen overtake must never produce deep overlap');
+  assert.ok(offTrackSeconds < 0.25, 'NextGen AI must stay on legal track');
+  assert.ok(finalGap > 4.0, 'NextGen AI must establish clear lead gap');
+  console.log('    [PASS] Scenario A3: NextGen AI Game-Theoretic overtake verified.');
 }
 
 console.log('=== Tactical Attack Scenarios Test Suite: ALL ASSERTIONS PASSED ===\n');

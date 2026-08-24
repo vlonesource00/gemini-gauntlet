@@ -3,11 +3,12 @@ import { Circuit } from '../src/simulation/Track.js';
 import { ENDURANCE_PARK } from '../src/scenarios/EndurancePark.js';
 import { Vehicle } from '../src/simulation/Vehicle.js';
 import { ResearchAIController } from '../src/ai/ResearchAIController.js';
+import { NextGenAIController } from '../src/ai/v2/NextGenAIController.js';
 import { updateAerodynamicWakes, resolveVehicleCollisions } from '../src/simulation/VehicleInteractions.js';
 
 const DT = 1 / 120;
 
-console.log('=== [4/5] Running Tactical Defense Scenarios Test Suite (D1 & D2) ===');
+console.log('=== [4/5] Running Tactical Defense Scenarios Test Suite (D1, D2, D3) ===');
 
 const setForwardSpeed = (vehicle, speedMs, track) => {
   const p = track.atDistance(vehicle.distance);
@@ -188,6 +189,87 @@ console.log('  -> Testing Blocked Defensive Corridor Adaptation...');
     'Defender must adapt to alternative legal corridor rather than steering into inside blocker'
   );
   console.log('    [PASS] Blocked corridor defense adaptation verified.');
+}
+
+// ---------------------------------------------------------------------------
+// 4. Defense Scenario D3: NextGen AI Game-Theoretic Stackelberg Defense
+// ---------------------------------------------------------------------------
+console.log('  -> Simulating Defense Scenario D3 (NextGen AI Stackelberg Leader Defense)...');
+{
+  const track = new Circuit(ENDURANCE_PARK);
+  const leader = new Vehicle({ id: 'leader-d3', spec: 'gt' });
+  const challenger = new Vehicle({ id: 'challenger-d3', spec: 'gt' });
+
+  leader.resetTo(track, 150, 0.0);
+  challenger.resetTo(track, 130, 2.5);
+
+  setForwardSpeed(leader, 25, track);
+  setForwardSpeed(challenger, 31, track);
+
+  const leaderAI = new NextGenAIController('leader-ai-d3', { defenseReactivity: 0.92 });
+  const challengerAI = new NextGenAIController('challenger-ai-d3', { aggression: 0.90 });
+
+  const vehicles = [leader, challenger];
+  const race = {
+    phase: 'racing',
+    raceTime: 10.0,
+    elapsed: 10.0,
+    statusFor: (v) => ({ position: v === leader ? 1 : 2 })
+  };
+
+  let defenseFrames = 0;
+  let deepOverlapFrames = 0;
+  let offTrackFrames = 0;
+  let reversals = 0;
+  let priorSign = 0;
+  const simDurationS = 8.0;
+  const totalSteps = Math.round(simDurationS / DT);
+
+  for (let step = 0; step < totalSteps; step += 1) {
+    race.raceTime += DT;
+    race.elapsed += DT;
+
+    leaderAI.update(leader, vehicles, track, race, DT);
+    challengerAI.update(challenger, vehicles, track, race, DT);
+    updateAerodynamicWakes(vehicles);
+
+    leader.step(DT, track, true);
+    challenger.step(DT, track, true);
+
+    const collision = resolveVehicleCollisions(vehicles, 3);
+    if (collision.deepOverlaps > 0) deepOverlapFrames += 1;
+
+    if (vehicles.some((v) => v.surface?.zone === 'grass' || v.surface?.zone === 'runoff')) {
+      offTrackFrames += 1;
+    }
+
+    const isDefending = leaderAI.debugState?.telemetry?.state === 'DEFEND'
+      || leaderAI.debugState?.thought?.defending === true
+      || leaderAI.combatEngine?.defenseMode !== 'PACE';
+
+    if (isDefending) {
+      defenseFrames += 1;
+      const targetLat = leaderAI.debugState?.thought?.deployedOffsetM
+        ?? leaderAI.debugState?.thought?.trajectorySelectedOffsetM
+        ?? leaderAI.debugState?.targetLateral
+        ?? 0;
+      const sign = Math.sign(targetLat);
+      if (priorSign && sign && priorSign !== sign) {
+        reversals += 1;
+      }
+      if (sign) priorSign = sign;
+    }
+  }
+
+  const defenseTimeS = defenseFrames * DT;
+  const offTrackTimeS = offTrackFrames * DT;
+  console.log(`    D3 Result: defenseTime=${defenseTimeS.toFixed(2)}s, reversals=${reversals}, deepOverlaps=${deepOverlapFrames}, offTrack=${offTrackTimeS.toFixed(2)}s`);
+
+  assert.ok(defenseTimeS > 0.5, 'NextGen AI must detect challenger and trigger Stackelberg defense');
+  assert.equal(deepOverlapFrames, 0, 'NextGen Stackelberg defense must never produce deep overlap');
+  assert.equal(offTrackTimeS, 0, 'NextGen defense must keep vehicles on track');
+  assert.ok(reversals <= 1, 'NextGen defender must not weave across track');
+  console.log('    [PASS] Scenario D3: NextGen Stackelberg defense verified.');
 }
 
 console.log('=== Tactical Defense Scenarios Test Suite: ALL ASSERTIONS PASSED ===\n');

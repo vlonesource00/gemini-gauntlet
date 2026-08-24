@@ -16,31 +16,37 @@ const TEST_SUITES = [
     id: 'trajectory-eval',
     name: 'Trajectory Lattice & Cost Evaluation Suite',
     file: 'trajectory-eval-test.mjs',
-    description: 'Frenet lattice candidate generation, quintic minimum-jerk curves, road-violation penalties, and collision risk scoring'
+    description: 'Frenet lattice generation, quintic minimum-jerk curves, GlobalTimeOptimal, GameTheoreticCombat, CoupledMPCC, and CombatDynamics'
   },
   {
     id: 'scenario-attack',
-    name: 'Tactical Attack Scenarios (A1 & A2)',
+    name: 'Tactical Attack Scenarios (A1, A2, A3)',
     file: 'scenario-attack-test.mjs',
-    description: 'Headless simulation of Straight Slipstream Divebomb (A1) and Quarry Chicane Inside Attack (A2) with 0 contacts'
+    description: 'Headless simulation of Slipstream Divebomb (A1), Chicane Inside Attack (A2), and NextGen Game-Theoretic Pass (A3)'
   },
   {
     id: 'scenario-defense',
-    name: 'Tactical Defense Scenarios (D1 & D2)',
+    name: 'Tactical Defense Scenarios (D1, D2, D3)',
     file: 'scenario-defense-test.mjs',
-    description: 'Headless simulation of Straight Line Defense (D1) and Chicane Inside Line Defense (D2) obeying FIA one-move rule'
+    description: 'Headless simulation of Straight Defense (D1), Chicane Inside Defense (D2), and NextGen Stackelberg Defense (D3)'
   },
   {
     id: 'harbor-ring-contract',
     name: 'Harbor Ring Circuit Contract Suite',
     file: 'harbor-ring-contract.mjs',
     description: 'Purpose-built flat circuit geometry (2704m), zero banking/elevation invariants, and 3-class AI multi-lap execution'
+  },
+  {
+    id: 'coupled-dynamics',
+    name: 'Coupled Dynamics & Stanley Suite',
+    file: 'coupled-dynamics-test.mjs',
+    description: 'Curvature-feedforward, Stanley steering, 2D G-G friction-circle trail braking, and zero-GC horizon benchmark'
   }
 ];
 
-console.log('\n' + '='.repeat(80));
-console.log('       GEMINI GAUNTLET: AUTOMATED VERIFICATION TEST SUITE RUNNER');
-console.log('='.repeat(80));
+console.log('\n' + '='.repeat(90));
+console.log('            GEMINI GAUNTLET: AUTOMATED VERIFICATION TEST SUITE RUNNER');
+console.log('='.repeat(90));
 console.log(`Running ${TEST_SUITES.length} verification test suites...\n`);
 
 const results = [];
@@ -52,7 +58,7 @@ for (let i = 0; i < TEST_SUITES.length; i += 1) {
   const suitePath = join(__dirname, suite.file);
   console.log(`\n[${i + 1}/${TEST_SUITES.length}] Executing: ${suite.name} (${suite.file})`);
   console.log(`    Scope: ${suite.description}`);
-  console.log('-'.repeat(80));
+  console.log('-'.repeat(90));
 
   const startTime = Date.now();
   const child = spawnSync(process.execPath, [suitePath], {
@@ -80,33 +86,33 @@ const totalDurationMs = Date.now() - globalStartTime;
 // ---------------------------------------------------------------------------
 // Formatted Test Results Summary Table
 // ---------------------------------------------------------------------------
-console.log('\n' + '='.repeat(80));
-console.log('                          TEST SUITE RESULTS SUMMARY');
-console.log('='.repeat(80));
+console.log('\n' + '='.repeat(90));
+console.log('                               TEST SUITE RESULTS SUMMARY');
+console.log('='.repeat(90));
 console.log(
-  'Suite'.padEnd(35) +
-  'Status'.padEnd(12) +
+  'Suite'.padEnd(46) +
+  'Status'.padEnd(16) +
   'Exit Code'.padEnd(14) +
-  'Duration (s)'.padEnd(15)
+  'Duration (s)'.padEnd(14)
 );
-console.log('-'.repeat(80));
+console.log('-'.repeat(90));
 
 for (const res of results) {
   const statusStr = res.passed ? 'PASSED [OK]' : 'FAILED [ERR]';
   const durationStr = (res.durationMs / 1000).toFixed(2) + 's';
   console.log(
-    res.name.padEnd(35) +
-    statusStr.padEnd(12) +
+    res.name.padEnd(46) +
+    statusStr.padEnd(16) +
     String(res.status).padEnd(14) +
-    durationStr.padEnd(15)
+    durationStr.padEnd(14)
   );
 }
 
-console.log('-'.repeat(80));
+console.log('-'.repeat(90));
 const passCount = results.filter((r) => r.passed).length;
 const failCount = results.filter((r) => !r.passed).length;
 console.log(`Total Suites: ${results.length} | Passed: ${passCount} | Failed: ${failCount} | Total Duration: ${(totalDurationMs / 1000).toFixed(2)}s`);
-console.log('='.repeat(80));
+console.log('='.repeat(90));
 
 if (allPassed) {
   console.log('\n>>> SUCCESS: ALL VERIFICATION TEST SUITES PASSED CLEANLY (Exit 0) <<<\n');

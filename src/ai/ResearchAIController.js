@@ -2,11 +2,13 @@
  * ResearchAIController.js
  * Complete AI Research Heuristics Controller for High-Performance Three.js Racing Simulation.
  * Integrates:
+ * - Layer 1: GlobalTimeOptimalEngine (2D free-boundary time-optimal racing line & velocity envelopes)
  * - TrafficAwareness (predictive perception & swept corridor evaluation)
  * - FrenetLatticePlanner (multi-candidate trajectory lattice & weighted optimization)
  * - TacticalAttackEngine (slipstream, dynamic divebomb, switchback, kerb exploitation)
  * - TacticalDefenseEngine (threat monitoring, FIA one-move inside line protection, tow breaking)
  * - PaceOptimizer (G-G friction circle, trail braking, backward reachable speed, throttle unwind)
+ * - CombatDynamicsEngine (elastic contact rubbing equilibrium & slip-slope micro countersteer)
  */
 
 import { TrafficAwareness } from './TrafficAwareness.js';
@@ -15,6 +17,7 @@ import { TacticalAttackEngine } from './TacticalAttackEngine.js';
 import { TacticalDefenseEngine } from './TacticalDefenseEngine.js';
 import { PaceOptimizer } from './PaceOptimizer.js';
 import { CombatDynamicsEngine } from './v2/CombatDynamicsEngine.js';
+import { GlobalTimeOptimalEngine } from './v2/GlobalTimeOptimalEngine.js';
 
 const finite = (value, fallback = 0) => (Number.isFinite(value) ? value : fallback);
 
@@ -40,6 +43,7 @@ export class ResearchAIController {
    */
   constructor(index = 1, options = {}) {
     this.index = index;
+    this.id = typeof index === 'string' ? index : `ai-${index}`;
 
     // Tunable Heuristic Parameters (Calibrated for aggressive 1:00 flat benchmark pace & stubborn defense)
     this._aggression = clamp(finite(options.aggression, 0.95), 0, 1);
@@ -52,8 +56,9 @@ export class ResearchAIController {
 
     this.skill = clamp(finite(options.skill, 0.98), 0.5, 1.0);
 
-    // AI Core Modules
+    // AI Core Modules & Hybrid Layers
     this.awareness = new TrafficAwareness();
+    this.optimalEngine = null;
     this.trajectoryPlanner = new FrenetLatticePlanner();
     this.attackEngine = new TacticalAttackEngine({
       index,
@@ -70,6 +75,19 @@ export class ResearchAIController {
       unwindFactor: 0.60
     });
     this.combatDynamics = new CombatDynamicsEngine();
+
+    // Scenario Engine & Racecraft state handles
+    this.draftTargetId = null;
+    this.passTargetId = null;
+    this.defenseTargetId = null;
+    this.passPhase = 'NONE';
+    this.racecraft = {
+      phase: 'NONE',
+      targetId: null,
+      defenseTargetId: null,
+      side: 0,
+      targetOffset: 0
+    };
 
     // Runtime state
     this.trajectoryPlan = null;
@@ -149,10 +167,6 @@ export class ResearchAIController {
     this._ersAttackMode = Boolean(val);
   }
 
-  setReferenceProfile(profile) {
-    this.referenceProfile = profile;
-  }
-
   get telemetry() {
     return this.debugState?.telemetry ?? null;
   }
@@ -167,7 +181,9 @@ export class ResearchAIController {
   }
 
   setReferenceProfile(profile = null) {
-    this.referenceProfile = profile && typeof profile.targetAtDistance === 'function' ? profile : null;
+    this.referenceProfile = profile && typeof profile.targetAtDistance === 'function'
+      ? profile
+      : (profile && typeof profile.paceAtDistance === 'function' ? profile : null);
     return Boolean(this.referenceProfile);
   }
 
@@ -189,6 +205,17 @@ export class ResearchAIController {
     this.lastDistance = null;
     this.stallTime = 0;
     this.recoveryTimer = 0;
+    this.draftTargetId = null;
+    this.passTargetId = null;
+    this.defenseTargetId = null;
+    this.passPhase = 'NONE';
+    if (this.racecraft) {
+      this.racecraft.phase = 'NONE';
+      this.racecraft.targetId = null;
+      this.racecraft.defenseTargetId = null;
+      this.racecraft.side = 0;
+      this.racecraft.targetOffset = 0;
+    }
     this.ersPlan = {
       previousDistance: null,
       travelledM: 0,
@@ -254,6 +281,8 @@ export class ResearchAIController {
    * @param {number} dt - Timestep delta in seconds
    */
   update(vehicle, vehicles, track, race = null, dt = 1 / 120) {
+    if (!vehicle || !track) return;
+
     const racePhase = race?.phase ?? 'racing';
     if (racePhase !== 'racing') {
       vehicle.controls = { throttle: 0, brake: 1, steer: 0, handbrake: 0 };
@@ -265,7 +294,12 @@ export class ResearchAIController {
       return;
     }
 
-    // 1. Perception
+    // 1. Layer 1 Global Time Optimal Engine instantiation if track changes
+    if (!this.optimalEngine || this.optimalEngine.track !== track) {
+      this.optimalEngine = new GlobalTimeOptimalEngine({ track });
+    }
+
+    // 2. Perception & Multi-Agent Awareness
     const traffic = this.awareness.scan(vehicle, vehicles, track);
     const current = traffic.current;
     const roadHalfWidth = finite(track?.roadHalfWidth, 6.5);
@@ -302,7 +336,7 @@ export class ResearchAIController {
       return;
     }
 
-    // 2. Tactical Evaluation (Defense -> Attack -> Pace)
+    // 3. Tactical Evaluation (Defense -> Attack -> Pace)
     const turns = [0, 8, 16, 28, 45, 65].map((d) =>
       track?.atDistance ? track.atDistance(vehicle.distance + d) : { curvature: 0, turnSign: 1 }
     );
@@ -314,20 +348,19 @@ export class ResearchAIController {
     const signedCurv = finite(currentPoint?.curvature, 0);
     const currentCurv = Math.abs(signedCurv);
 
-    // Curvature-Adaptive Apex Lookahead Horizon:
-    // lookahead(v, kappa) = clamp((v * 0.36) / (1.0 + 90.0 * Math.abs(kappa)), 7.5, 26.0)
-    // Tightens to 7.5m-10m in chicanes/hairpins, expands on straights
+    // Curvature-Adaptive Apex Lookahead Horizon
     const dynamicLookahead = this.computeLookahead(vehicle.speed, currentCurv);
 
     const upcomingPoint = track?.atDistance ? track.atDistance(vehicle.distance + Math.max(18.0, dynamicLookahead)) : { curvature: 0 };
     const upcomingCurv = finite(upcomingPoint.curvature, 0);
-    // Smooth geometric apex line capped to safe inner corridor (|lat| <= 2.5m)
-    const fallbackGeometricLine = clamp(-Math.sign(upcomingCurv) * Math.min(2.4, Math.abs(upcomingCurv) * 80.0), -2.5, 2.5);
+    
+    // Globally time-optimal baseline trajectory
     const isMatchingTrack = Boolean(this.referenceProfile) && (
       this.referenceProfile.trackId
         ? this.referenceProfile.trackId === track?.id
         : Math.abs((this.referenceProfile?.trackLength || 3061.7) - (track?.length || 1000)) < 100
     );
+    const fallbackGeometricLine = clamp(-Math.sign(upcomingCurv) * Math.min(2.4, Math.abs(upcomingCurv) * 80.0), -2.5, 2.5);
     const referenceLine = (isMatchingTrack && typeof this.referenceProfile?.paceAtDistance === 'function')
       ? (this.referenceProfile.paceAtDistance(vehicle.distance + Math.max(18.0, dynamicLookahead))?.lineLateral ?? fallbackGeometricLine)
       : fallbackGeometricLine;
@@ -399,8 +432,7 @@ export class ResearchAIController {
       tacticalReason = 'OVERTAKE_COMPLETE_RETURN';
     }
 
-    // 3. Multi-Candidate Frenet Trajectory Planning
-    // Tactical candidate variations for lattice sampling (only sampled during tactical combat)
+    // 4. Multi-Candidate Frenet Trajectory Planning
     const tacticalCandidates = (tacticalMode === 'PACE' || recovering) ? [] : [
       { offset: targetOffset, intentType: 'TACTICAL_TARGET', transitionScales: [0.75, 1.0, 1.3] },
       { offset: paceLine, intentType: 'RACING_LINE', transitionScales: [1.0, 1.5] },
@@ -468,7 +500,7 @@ export class ResearchAIController {
       lateral: plannedTargetOffset
     };
 
-    // 4. Lateral Pursuit Steering & Orientation-Aware Rejoin
+    // 5. Lateral Pursuit Steering & Orientation-Aware Rejoin
     const trackPointAtCar = track?.atDistance ? track.atDistance(vehicle.distance) : { tangent: { x: 0, z: 1 } };
     const trackHeadingAtCar = Math.atan2(trackPointAtCar.tangent.x, trackPointAtCar.tangent.z);
     const yawAlignment = wrapAngle(vehicle.yaw - trackHeadingAtCar);
@@ -479,7 +511,6 @@ export class ResearchAIController {
       Math.atan2(targetPos.x - vehicle.position.x, targetPos.z - vehicle.position.z) - vehicle.yaw
     );
 
-    // Orientation-aware rejoin when off-track: direct vector to track centerline ahead
     if (recovering || isOffTrack) {
       const rejoinPt = track?.atDistance ? track.atDistance(vehicle.distance + 14.0) : trackPointAtCar;
       const toTrackFwdX = finite(rejoinPt.x, 0) - vehicle.position.x;
@@ -488,7 +519,6 @@ export class ResearchAIController {
       headingError = wrapAngle(targetRejoinAngle - vehicle.yaw);
     }
 
-    // If genuinely spun backwards (> 140 deg), command decisive turn-around lock
     if (isFacingBackwards) {
       headingError = Math.sign(yawAlignment) * -1.2;
     }
@@ -513,10 +543,9 @@ export class ResearchAIController {
       recovering
     });
 
-    // 5. Longitudinal Target Speed & Dynamic Adjustments
+    // 6. Longitudinal Target Speed & Dynamic Adjustments
     let desiredSpeed = physicalTargetSpeed;
 
-    // Cap speed based on chosen trajectory curvature with backward deceleration propagation
     const speedAero = vehicle.classKey === 'prototype' ? clamp((vehicle.speed - 16.0) / 32.0, 0, 1) : 0;
     const baseClassG = (vehicle.classKey === 'prototype' ? (1.80 + 0.85 * speedAero) : vehicle.classKey === 'gt' ? 1.25 : 0.98) * 9.81;
     const lateralAccelBudget = baseClassG * tireGripFactor * (committed ? 1.08 : 1.0);
@@ -533,7 +562,6 @@ export class ResearchAIController {
 
     desiredSpeed = Math.min(desiredSpeed, trajectorySpeedLimit);
 
-    // Synchronize pace with user baseline reference profile if available (57s pace baseline for Prototype on matching track)
     const refData = (isMatchingTrack && typeof this.referenceProfile?.paceAtDistance === 'function')
       ? this.referenceProfile.paceAtDistance(vehicle.distance)
       : null;
@@ -543,7 +571,6 @@ export class ResearchAIController {
       desiredSpeed = Math.max(desiredSpeed, Math.min(physicalTargetSpeed * 1.05, scaledRef));
     }
 
-    // Overtake speed adjustments (Aggressive closing velocity & acceleration)
     const passTarget = attDecision.target;
     const actualSeparation = passTarget
       ? Math.abs(finite(current?.lateral, 0) - finite(passTarget.otherLateral, 0))
@@ -551,7 +578,7 @@ export class ResearchAIController {
 
     if (committed && passTarget) {
       const isCornerApproach = Boolean(attDecision.inCorner) || (attDecision.distToCorner != null && attDecision.distToCorner < 85) || Math.abs(currentCurv) > 0.003;
-      const straightClosingFloor = 14.0 + clamp(this._aggression, 0, 1) * 4.0; // Up to +18.0 m/s closing floor on straights
+      const straightClosingFloor = 14.0 + clamp(this._aggression, 0, 1) * 4.0;
       const cornerClosingFloor = Math.max(4.5, 7.5 * this._aggression);
       const isOverlappingLane = actualSeparation < 1.6 && passTarget.delta < 14.0;
       const closingFloor = (straightSend && !isCornerApproach && !isOverlappingLane) ? straightClosingFloor : cornerClosingFloor;
@@ -561,7 +588,6 @@ export class ResearchAIController {
       if (straightSend && !isCornerApproach && !isOverlappingLane) {
         desiredSpeed = Math.min(physicalTargetSpeed, Math.max(desiredSpeed, passTarget.other.speed + closingFloor));
       } else {
-        // In corners / braking zones, cap desiredSpeed strictly to physicalTargetSpeed to prevent sliding off-track
         if (isOverlappingLane) {
           const followFloor = Math.max(obstacleFloor, passTarget.other.speed + clamp((passTarget.delta - 6.5) * 0.75, -6.0, 3.0));
           desiredSpeed = Math.min(desiredSpeed, followFloor);
@@ -593,7 +619,7 @@ export class ResearchAIController {
 
     if (recovering) desiredSpeed = isOffTrack ? (isFacingBackwards ? 5.0 : 8.5) : 14.0;
 
-    // 6. Emergency Hazard Avoidance
+    // 7. Hazard Avoidance
     const hazard = this.awareness.forwardHazard(traffic);
     const passTargetCombat = (committed || defending) && hazard?.other?.id === (passTarget?.other?.id ?? this.defenseEngine.defenseTargetId);
     const emergency = Boolean(hazard && !passTargetCombat && (hazard.ttc < 2.2 || (hazard.longitudinal < 6.0 && Math.abs(finite(current?.lateral, 0) - finite(hazard.otherLateral, 0)) < 1.6)));
@@ -602,11 +628,9 @@ export class ResearchAIController {
       desiredSpeed = Math.min(desiredSpeed, Math.max(0, hazard.other.speed - 2.5));
     }
 
-    // 7. Low-Level Pedal Control & Trail Braking
+    // 8. Low-Level Pedal Control & Trail Braking
     const speedError = desiredSpeed - vehicle.speed;
     const straight = Math.abs(signedCurv) < 0.0030;
-
-    // Live physical lateral acceleration experienced right now (v * yawRate)
     const liveLatAccel = Math.abs(finite(vehicle.speed, 0) * finite(vehicle.yawRate, 0));
 
     const pedals = this.paceOptimizer.computePedals({
@@ -646,9 +670,19 @@ export class ResearchAIController {
     };
     this.steerCommand = dynamicControls.steer;
 
+    // Set target and tactical state handles on vehicle
     vehicle.aiTarget = { x: targetPos.x, z: targetPos.z, lateral: plannedTargetOffset };
+    vehicle.aiTactical = {
+      targetLaneOffsetM: plannedTargetOffset,
+      racecraftPhase: defending ? defDecision.phase : (attDecision.phase !== 'NONE' ? attDecision.phase : tacticalMode),
+      passPhase: attDecision.phase,
+      passTargetId: targetId,
+      defending,
+      defenseTargetId: defDecision.target?.other?.id ?? null,
+      desiredSpeed
+    };
 
-    // 8. ERS Deployment
+    // 9. ERS Deployment
     const ersMode = vehicle.classKey === 'prototype'
       ? this._planERS(vehicle, track, {
           committed,
@@ -661,7 +695,7 @@ export class ResearchAIController {
 
     if (vehicle.classKey === 'prototype') vehicle.setERSMode?.(ersMode);
 
-    // 9. Diagnostics and Debug State Recording
+    // 10. Diagnostics and Debug State Recording
     this._recordDebugState(vehicle, {
       tacticalMode,
       tacticalReason,
@@ -708,21 +742,32 @@ export class ResearchAIController {
 
     const challenger = traffic.behind;
     const target = attDecision.target || defDecision.target;
+    const clearance = finite(this.trajectoryPlan?.minimumClearanceM, 99);
+    const isSafe = Boolean(this.trajectoryPlan?.collisionFree ?? true);
+    const speedError = finite(desiredSpeed - vehicle.speed);
+    const defending = Boolean(defDecision.defending);
+    const attacking = tacticalMode === 'ATTACK';
 
     this.debugState = {
+      controllerVersion: 'Research-V1-Hybrid',
       vehicleId: vehicle.id,
       name: vehicle.name,
       classKey: vehicle.classKey,
       mode: tacticalMode,
-      racecraftPhase: attDecision.phase,
+      racecraftPhase: defending ? defDecision.phase : attDecision.phase,
       reason: tacticalReason,
+      decisionReason: tacticalReason,
       targetId: target?.other?.id ?? null,
+      passTargetId: attDecision.target?.other?.id ?? null,
+      draftTargetId: attDecision.draftTarget?.other?.id ?? null,
+      defenseTargetId: defDecision.target?.other?.id ?? null,
       desiredOffset: finite(targetOffset),
+      targetOffset: finite(targetOffset),
       desiredSpeed: finite(desiredSpeed),
       targetSpeed: finite(desiredSpeed),
       currentSpeed: finite(vehicle.speed),
       speedKmh: finite(vehicle.speed * 3.6),
-      speedError: finite(desiredSpeed - vehicle.speed),
+      speedError,
       headingError: finite(headingError),
       lateralError: finite(lateralError),
       recovering: Boolean(recovering),
@@ -730,25 +775,38 @@ export class ResearchAIController {
       // Candidate Trajectory Lattice
       candidates: this.trajectoryPlan?.candidates ?? [],
       bestCandidate: this.trajectoryPlan,
+      trajectory: this.trajectoryPlan,
+      trajectoryMinimumClearanceM: clearance,
+      trajectoryCollisionFree: isSafe,
+      trajectoryRoadLegal: Boolean(this.trajectoryPlan?.roadLegal ?? true),
+      trajectorySelectedOffsetM: finite(this.trajectoryPlan?.selectedOffset, finite(targetOffset, 0)),
+      trajectoryScore: finite(this.trajectoryPlan?.score, 0),
+
+      // Multi-Agent Awareness
+      traffic,
+      hazard,
       
-      // Threat & Challenger Perception
+      // Threat Perception
       threat: {
         challengerId: challenger?.other?.id ?? null,
-        threatLevel: defDecision.threatLevel ?? 'NONE',
-        threatScore: finite(defDecision.threatScore, 0),
+        threatLevel: defDecision.threatLevel ?? (defending ? 'HIGH' : 'NONE'),
+        threatScore: finite(defDecision.threatScore, defending ? 0.85 : 0),
         attackerIntent: defDecision.attackerIntent ?? 'NONE',
         gapM: finite(challenger?.delta, 99),
         closingSpeedMps: finite(challenger?.relativeLongitudinalVelocity, 0),
         ttc: finite(challenger?.ttc, 99)
       },
 
-      // Human-readable tactical thought summary
+      // Floating Thought Billboard & Summary
       thought: {
-        maneuver: tacticalMode === 'ATTACK' ? attDecision.phase : (tacticalMode === 'DEFEND' ? defDecision.phase : tacticalMode),
+        requestedManeuver: tacticalMode === 'ATTACK' ? attDecision.phase : (tacticalMode === 'DEFEND' ? defDecision.phase : tacticalMode),
+        deployedManeuver: tacticalMode === 'ATTACK' ? attDecision.phase : (tacticalMode === 'DEFEND' ? defDecision.phase : tacticalMode),
         deployedOffsetM: finite(targetOffset),
-        targetId: target?.other?.id ?? null,
+        targetId: target?.other?.id ?? 'CLEAR',
+        abortReason: 'CLEAR',
+        waitReason: 'CLEAR',
         committed: Boolean(attDecision.committed),
-        defending: Boolean(defDecision.defending),
+        defending,
         defensivePhase: defDecision.phase ?? 'NONE',
         attackerIntent: defDecision.attackerIntent ?? 'NONE',
         straightSend: Boolean(attDecision.straightSend),
@@ -759,16 +817,17 @@ export class ResearchAIController {
         kerbAllowanceM: finite(attDecision.kerbAllowance, 0),
         corridorCollisionFree: Boolean(attDecision.corridor?.collisionFree ?? true),
         corridorMinimumClearanceM: finite(attDecision.corridor?.minimumClearanceM, 99),
-        trajectoryCollisionFree: Boolean(this.trajectoryPlan?.collisionFree),
-        trajectoryRoadLegal: Boolean(this.trajectoryPlan?.roadLegal),
-        trajectorySelectedOffsetM: finite(this.trajectoryPlan?.selectedOffset)
+        trajectoryCollisionFree: isSafe,
+        trajectoryRoadLegal: Boolean(this.trajectoryPlan?.roadLegal ?? true),
+        trajectorySelectedOffsetM: finite(this.trajectoryPlan?.selectedOffset, finite(targetOffset, 0)),
+        trajectoryMinimumClearanceM: clearance
       },
 
-      // G-G Friction circle & controls telemetry
+      // G-G Friction Circle & Real-Time Control Telemetry
       telemetry: {
         lateralAccelMps2: finite(latAccel),
-        lateralUtilization: finite(pedals.friction?.latUtilization),
-        maxG: finite(pedals.friction?.maxTotalAccel / 9.81, 1.5),
+        lateralUtilization: finite(pedals.friction?.latUtilization ?? 0),
+        maxG: finite(pedals.friction?.maxTotalAccel ? pedals.friction.maxTotalAccel / 9.81 : 2.70, 2.70),
         trailBrakingActive: Boolean(pedals.trailBraking),
         throttle: finite(pedals.throttle),
         brake: finite(pedals.brake),
@@ -776,7 +835,20 @@ export class ResearchAIController {
         ersMode,
         ersSoc: finite(vehicle.ers?.soc, 0),
         yawRate: finite(vehicle.yawRate, 0),
-        emergency: Boolean(emergency)
+        emergency: Boolean(emergency),
+        rubbingActive: Boolean(this.combatDynamics?.rubbingActive),
+        powerSlideActive: Boolean(this.combatDynamics?.powerSlideActive),
+        state: tacticalMode,
+        action: attacking ? (attDecision.divebombing ? 'DIVEBOMB ATTACK' : 'SLINGSHOT PASS') : (defending ? `DEFEND (${defDecision.phase})` : 'PACE CRUISE'),
+        reason: tacticalReason,
+        threatLevel: defDecision.threatLevel ?? (defending ? 'HIGH' : 'LOW'),
+        tactic: attacking ? 'Iterative Best Response (IBR)' : (defending ? 'Stackelberg Apex Shield' : 'Coupled Friction-Circle Pace'),
+        prediction: `Clearance: ${clearance < 90 ? clearance.toFixed(1) + 'm' : 'CLEAR'} // Safe: ${isSafe}`,
+        decision: tacticalReason,
+        latUtilization: finite(pedals.friction?.latUtilization ?? 0),
+        remainingLongBudget: finite(pedals.friction?.remainingLongBudget ?? 1),
+        liveLatG: finite(latAccel / 9.81),
+        peakLatG: finite(pedals.friction?.peakG ?? 2.70, 2.70)
       }
     };
   }
