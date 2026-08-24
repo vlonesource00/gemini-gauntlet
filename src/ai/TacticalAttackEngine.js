@@ -246,8 +246,8 @@ export class TacticalAttackEngine {
 
     const leadLateral = finite(target.otherLateral, 0);
 
-    // Defender has committed heavily to the inside line
-    const defenderHuggingInside = (leadLateral * turnSign) > (roadMargin * 0.35);
+    // Defender has committed heavily to the inside line (inside = -turnSign)
+    const defenderHuggingInside = (leadLateral * (-turnSign)) > (roadMargin * 0.30);
     const speedAdvantage = vehicle.speed - target.other.speed;
     const closingSpeed = target.relativeLongitudinalVelocity;
 
@@ -257,16 +257,16 @@ export class TacticalAttackEngine {
     const defenderOverslowed = target.other.speed < estApexSpeed * 0.88 || (speedAdvantage > 3.0 && closingSpeed > 2.0);
 
     if (defenderHuggingInside && defenderOverslowed && target.delta < 28) {
-      // 1. Setup wide entry on the outside to square off corner entry
+      // 1. Setup wide entry on the outside (+turnSign) to square off corner entry
       const outsideEntryOffset = clamp(
-        -turnSign * Math.min(3.2, roadMargin * 0.55),
+        turnSign * Math.min(3.2, roadMargin * 0.55),
         -3.6,
         3.6
       );
 
-      // 2. Sharp late-apex diamond undercut offset cutting across inside exit
+      // 2. Sharp late-apex diamond undercut offset cutting across inside exit (-turnSign)
       const undercutApexOffset = clamp(
-        turnSign * Math.min(2.4, roadMargin * 0.42),
+        -turnSign * Math.min(2.4, roadMargin * 0.42),
         -3.6,
         3.6
       );

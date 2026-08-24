@@ -261,7 +261,8 @@ export class PaceOptimizer {
     const brakeThreshold = isCornering ? -1.80 : -0.70;
 
     if (speedError > brakeThreshold + 0.30) {
-      throttle = clamp((straight ? 1.0 : 0.85) + finite(speedError) * 0.25, 0, 1.0);
+      const exitBonus = (!straight && Math.abs(finite(steerAngle, 0)) < 0.28) ? 0.15 : 0;
+      throttle = clamp((straight ? 1.0 : (0.88 + exitBonus)) + finite(speedError) * 0.40, 0, 1.0);
       brake = 0;
     } else {
       throttle = 0;
