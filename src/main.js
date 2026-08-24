@@ -3,6 +3,7 @@ import './style.css';
 import { Circuit } from './simulation/Track.js';
 import { Vehicle } from './simulation/Vehicle.js';
 import { updateAerodynamicWakes, resolveVehicleCollisions } from './simulation/VehicleInteractions.js';
+import { HARBOR_RING } from './scenarios/HarborRing.js';
 import { ENDURANCE_PARK } from './scenarios/EndurancePark.js';
 import { ScenarioEngine } from './scenarios/ScenarioEngine.js';
 import { ResearchAIController } from './ai/ResearchAIController.js';
@@ -43,8 +44,9 @@ const scene = new THREE.Scene();
 const camera = new THREE.PerspectiveCamera(58, window.innerWidth / window.innerHeight, 0.035, 1800);
 const cameraRig = new CameraRig(camera);
 
-// Track & Environment
-const track = new Circuit(ENDURANCE_PARK);
+// Track & Environment: Default to Harbor Ring
+const ACTIVE_TRACK_DEF = HARBOR_RING;
+const track = new Circuit(ACTIVE_TRACK_DEF);
 const environment = new CircuitEnvironment(scene, track);
 
 // Audio & Input

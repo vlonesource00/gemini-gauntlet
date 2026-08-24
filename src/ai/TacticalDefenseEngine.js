@@ -345,31 +345,31 @@ export class TacticalDefenseEngine {
       } else if ((attackerIntent === 'ATTACK_OUTSIDE_MOMENTUM' || isOutsideCommitted) && (inCorner || distToCorner <= 45)) {
         // Outside Defense Squeeze: Smoothly drift out to leave exactly 1 car width (2.2m) at the track boundary
         this.phase = 'EXIT_SQUEEZE';
-        const outsideSqueezeOffset = clamp(committedSign * Math.min(3.2, roadMargin - 2.2), -roadMargin + 0.6, roadMargin - 0.6);
+        const outsideSqueezeOffset = clamp(committedSign * Math.min(2.8, roadMargin - 2.4), -roadMargin + 1.0, roadMargin - 1.0);
         this.targetOffset = outsideSqueezeOffset;
         this.committedDefensiveOffset = outsideSqueezeOffset;
       } else if (distToCorner <= 65 && distToCorner > 28 && !isOutsideCommitted) {
         // Proactive Inside Lane Lock on braking approach - Claim preferred defensive inside lane with zero hesitation
         this.phase = 'LOCK_DEFENSIVE_LANE';
-        const insideLockOffset = clamp(committedSign * Math.min(4.2, roadMargin * 0.78), -roadMargin + 0.4, roadMargin - 0.4);
+        const insideLockOffset = clamp(committedSign * Math.min(3.5, roadMargin * 0.65), -roadMargin + 1.0, roadMargin - 1.0);
         this.targetOffset = insideLockOffset;
         this.committedDefensiveOffset = insideLockOffset;
       } else if (distToCorner <= 28 && distToCorner > 14 && attackerIntent !== 'ATTACK_DIVEBOMB_INSIDE' && !isOutsideCommitted) {
         // FIA One-Move Return toward racing line leaving 2.2m margin on track edge
         this.phase = 'ONE_MOVE_RETURN';
-        const returnOffset = clamp(committedSign * Math.min(2.0, roadMargin - 2.2), -roadMargin + 0.6, roadMargin - 0.6);
+        const returnOffset = clamp(committedSign * Math.min(1.8, roadMargin - 2.4), -roadMargin + 1.0, roadMargin - 1.0);
         this.targetOffset = returnOffset;
         this.committedDefensiveOffset = returnOffset;
       } else if (inCorner && (attackerIntent === 'EXIT_CUTBACK' || attackerIntent === 'DUMMY_FEINT_AND_SWITCH')) {
         // Diamond Defense: Squaring off corner exit to block cutback acceleration lane
         this.phase = 'DIAMOND_DEFENSE';
-        this.targetOffset = clamp(committedSign * 0.50, -roadMargin + 0.6, roadMargin - 0.6);
+        this.targetOffset = clamp(committedSign * 0.50, -roadMargin + 1.0, roadMargin - 1.0);
         this.committedDefensiveOffset = this.targetOffset;
       } else if (inCorner || distToCorner <= 14) {
-        // Physical Apex Shielding: On corner approach, turn-in, and apex, pin inside line tight to apex curb (0.35m margin)
-        // Completely denying challenger inside room
+        // Physical Apex Shielding: Pin inside line tight to apex curb (0.35m margin)
+        // Completely denying challenger inside room through corner apexes
         this.phase = 'APEX_SHIELD';
-        const apexShieldOffset = clamp(committedSign * Math.min(4.2, roadMargin * 0.78), -roadMargin + 0.55, roadMargin - 0.55);
+        const apexShieldOffset = clamp(insideSign * Math.min(2.8, roadMargin * 0.50), -roadMargin + 1.0, roadMargin - 1.0);
         this.targetOffset = apexShieldOffset;
         this.committedDefensiveOffset = apexShieldOffset;
       }
@@ -466,25 +466,25 @@ export class TacticalDefenseEngine {
 
     if (attackerIntent === 'ATTACK_OUTSIDE_MOMENTUM') {
       // Outside Defense Squeeze: Smoothly drift out to leave exactly 1 car width (2.2m) at the track boundary
-      defensiveOffset = clamp(outsideSign * Math.min(3.2, roadMargin - 2.2), -roadMargin + 0.8, roadMargin - 0.8);
+      defensiveOffset = clamp(outsideSign * Math.min(2.8, roadMargin - 2.4), -roadMargin + 1.0, roadMargin - 1.0);
       phase = 'OUTSIDE_DEFENSE_SQUEEZE';
       reason = 'SQUEEZE_OUTSIDE_MOMENTUM_CORRIDOR';
     } else if (inCorner) {
       // Physical Apex Shielding: Pin inside line tight to apex curb (0.6m margin), completely denying inside room
-      defensiveOffset = clamp(turnSign * Math.min(3.4, roadMargin * 0.65), -roadMargin + 0.6, roadMargin - 0.6);
+      defensiveOffset = clamp(insideSign * Math.min(3.4, roadMargin * 0.65), -roadMargin + 1.0, roadMargin - 1.0);
       phase = 'APEX_SHIELD';
       reason = 'PHYSICAL_APEX_SHIELDING';
     } else if (gap > 18.0 && inDirectTow && distToCorner > 65) {
-      // Stepped lateral tow break (shifts 2.2m off draft line to destroy >66% follower tow)
-      const breakSide = distToCorner < 140 ? turnSign : (currentLateral > 0 ? -1 : 1);
-      const breakShift = 2.2 * breakSide;
-      defensiveOffset = clamp(currentLateral + breakShift, -roadMargin + 0.8, roadMargin - 0.8);
+      // Stepped lateral tow break (shifts 2.0m off draft line to destroy >66% follower tow)
+      const breakSide = distToCorner < 140 ? insideSign : (currentLateral > 0 ? -1 : 1);
+      const breakShift = 2.0 * breakSide;
+      defensiveOffset = clamp(currentLateral + breakShift, -roadMargin + 1.0, roadMargin - 1.0);
       phase = 'BREAK_TOW';
       reason = 'AERODYNAMIC_TOW_BREAK';
       this.towBreakTimer = 2.2;
     } else {
       // Proactive Door Shutting: Claim preferred defensive inside lane with zero hesitation
-      defensiveOffset = clamp(turnSign * Math.min(3.2, roadMargin * 0.60), -roadMargin + 0.6, roadMargin - 0.6);
+      defensiveOffset = clamp(insideSign * Math.min(3.2, roadMargin * 0.60), -roadMargin + 1.0, roadMargin - 1.0);
       phase = 'LOCK_DEFENSIVE_LANE';
       reason = 'PROACTIVE_SHUT_INSIDE_DOOR';
     }

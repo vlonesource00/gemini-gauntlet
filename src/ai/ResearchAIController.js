@@ -367,9 +367,7 @@ export class ResearchAIController {
       tacticalReason = isOffTrack ? 'OFF_TRACK_RECOVERY' : 'STALL_RECOVERY';
     } else if (attDecision.committed || (attDecision.phase !== 'NONE' && attDecision.phase !== 'RETURN')) {
       tacticalMode = 'ATTACK';
-      targetOffset = (currentCurv > 0.005)
-        ? clamp(paceLine + Math.sign(finite(attDecision.desiredOffset, 1)) * 0.65, -plannedRoadMargin, plannedRoadMargin)
-        : attDecision.desiredOffset;
+      targetOffset = attDecision.desiredOffset;
       targetId = attDecision.target?.other?.id ?? null;
       committed = attDecision.committed;
       straightSend = attDecision.straightSend;
@@ -487,12 +485,12 @@ export class ResearchAIController {
     // Cap speed based on chosen trajectory curvature (prototype aero downforce reaches 26.5 m/s² lateral budget)
     const lateralAccelBudget = (vehicle.classKey === 'prototype' ? 26.5 : vehicle.classKey === 'gt' ? 17.5 : 13.5) * tireGripFactor;
     const trajectorySpeedLimit = this.trajectoryPlan.points.reduce((limit, p) => {
+      if ((p.forwardDistance ?? 0) < 4.0) return limit;
       const curv = Math.max(0, finite(p.curvature, 0));
-      if (curv < 1e-5) return limit;
+      if (curv < 1e-4) return limit;
       const cornerSpeed = Math.sqrt(lateralAccelBudget / curv);
-      const reachableSpeed = Math.sqrt(cornerSpeed * cornerSpeed + 2.0 * 8.5 * Math.max(0, finite(p.forwardDistance, 0)));
-      return Math.min(limit, reachableSpeed);
-    }, 95.0);
+      return Math.min(limit, cornerSpeed);
+    }, physicalTargetSpeed);
 
     desiredSpeed = Math.min(desiredSpeed, trajectorySpeedLimit);
 
@@ -521,8 +519,9 @@ export class ResearchAIController {
       if (straightSend && !isCornerApproach) {
         desiredSpeed = Math.min(physicalTargetSpeed, Math.max(desiredSpeed, passTarget.other.speed + closingFloor));
       } else {
-        // In corners / braking zones, cap desiredSpeed to physicalTargetSpeed to ensure staying on legal track!
-        desiredSpeed = Math.min(physicalTargetSpeed, Math.max(obstacleFloor, passTarget.other.speed + closingFloor));
+        // In corners / braking zones, cap desiredSpeed strictly to physicalTargetSpeed to prevent sliding off-track
+        const cornerFloor = Math.min(physicalTargetSpeed, passTarget.other.speed + cornerClosingFloor);
+        desiredSpeed = Math.min(physicalTargetSpeed, Math.max(obstacleFloor, cornerFloor));
       }
     } else if (passTarget && passTarget.delta > 0 && passTarget.delta < 45 && !defending) {
       const isSlowObstacle = passTarget.other.speed < 16.0;

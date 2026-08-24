@@ -99,9 +99,11 @@ export class PaceOptimizer {
       const point = track?.atDistance ? track.atDistance(sampleDist) : { curvature: 0, banking: 0 };
       
       let rawCurvature = Math.abs(finite(point.curvature, 0));
-      // Effective racing line curvature: realistic apex clipping geometry without over-flattening tight hairpins/chicanes
+      // Effective racing line curvature: prototype downforce flattens curvature; GT/Touring use true physical radius
       const roadWidth = finite(track?.roadHalfWidth, 6.5) + finite(track?.curbWidth, 1.05);
-      const flattenFactor = clamp(1.0 + 0.45 * roadWidth * Math.min(0.035, rawCurvature), 1.0, 1.35);
+      const flattenFactor = (vClass === 'prototype')
+        ? clamp(1.0 + 0.45 * roadWidth * Math.min(0.035, rawCurvature), 1.0, 1.35)
+        : 1.0;
       let curvature = rawCurvature / flattenFactor;
 
       if (Math.abs(insideLineOffset) > 0.5 && curvature > 1e-4) {
@@ -174,9 +176,8 @@ export class PaceOptimizer {
     recovering = false,
     yielding = false
   } = {}) {
-    const headingGain = recovering ? 2.80 : committed ? 3.20 : 2.25;
-    const lateralGain = recovering ? 0.085 : committed ? 0.095 : 0.065;
-    const yawDamping = committed ? 0.12 : 0.17;
+    const headingGain = recovering ? 2.80 : committed ? 2.60 : 2.25;
+    const yawDamping = recovering ? 0.25 : (committed ? 0.38 : 0.42);
 
     const vSpeed = finite(speed, 0);
     // Speed-dependent steering limit prevents destructive front tire saturation scrub and low-speed plow stalls
@@ -184,7 +185,7 @@ export class PaceOptimizer {
       ? 0.75
       : (committed ? clamp(14.0 / Math.max(6.0, vSpeed), 0.16, 0.45) : clamp(12.0 / Math.max(8.0, vSpeed), 0.10, 0.38));
 
-    // Direct pure-pursuit trajectory tracking with yaw rate damping
+    // Direct pure-pursuit trajectory tracking with active yaw rate damping
     let target = clamp(
       finite(headingError) * headingGain - finite(yawRate) * yawDamping,
       -maxUsableSteer,
@@ -193,7 +194,9 @@ export class PaceOptimizer {
 
     if (yielding) target = clamp(target, -0.3, 0.3);
 
-    const rate = committed ? 7.5 : recovering ? 6.0 : 5.2;
+    // Fast unwind rate when returning to center prevents yaw overshoots
+    const isUnwinding = Math.sign(target) !== Math.sign(finite(previous)) || Math.abs(target) < Math.abs(finite(previous));
+    const rate = isUnwinding ? 18.0 : (committed ? 10.0 : 8.0);
     const maxDelta = rate * clamp(finite(dt, 0.016), 0, 0.1);
 
     return clamp(

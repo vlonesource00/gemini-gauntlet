@@ -193,7 +193,7 @@ export class TacticalAttackEngine {
 
     // Target inside line for the dive (firmly claiming inside apex line)
     const targetInsideOffset = clamp(
-      turnSign * Math.min(3.4, roadMargin * 0.60),
+      -turnSign * Math.min(3.4, roadMargin * 0.60),
       -roadMargin + 0.65,
       roadMargin - 0.65
     );
@@ -482,10 +482,10 @@ export class TacticalAttackEngine {
       this.draftAge = Math.max(0, this.draftAge - dt);
     }
 
-    // Calculate available track space to the left and right of the lead vehicle
+    // Calculate available track space to the left (positive lateral) and right (negative lateral) of the lead vehicle
     const leadLateral = finite(target.otherLateral, 0);
-    const spaceOnLeft = leadLateral - (-roadMargin); // Distance from left boundary to target
-    const spaceOnRight = roadMargin - leadLateral;   // Distance from target to right boundary
+    const spaceOnLeft = roadMargin - leadLateral;   // Distance from target to left boundary (+margin)
+    const spaceOnRight = leadLateral + roadMargin;  // Distance from target to right boundary (-margin)
 
     // 2. Dynamic Divebomb & Switchback checks in corners
     const divebomb = inCorner ? this.evaluateDivebomb({
@@ -510,20 +510,21 @@ export class TacticalAttackEngine {
     const targetSpeed = Math.max(vehicle.speed, target.other.speed + 18.0);
     const candidates = [];
 
-    // Attack Swoops: Command clean lateral separation (3.2m to 4.0m) when pulling out from slipstream
-    const lateralSwoop = clamp(3.2 + this.aggression * 0.6, 3.2, 4.0);
+    // Attack Swoops: Clean, stable lateral separation (2.35m to 2.65m) for slipstream pull-out
+    // Prevents extreme lateral jumps that scrub speed or upset car balance at high velocity
+    const lateralSwoop = clamp(2.35 + this.aggression * 0.30, 2.35, 2.65);
 
-    // Left Attack Lane Candidate: lateral separation to the left of lead car
+    // Left Attack Lane Candidate: lateral separation to the left (+lateral) of lead car
     if (spaceOnLeft >= 2.2) {
       const isLeftInside = inCorner && turnSign < 0;
       const isLeftDive = isLeftInside && divebomb.feasible;
       const isLeftSwitch = !isLeftInside && inCorner && switchback.feasible;
 
-      const leftSwoopOffset = clamp(leadLateral - lateralSwoop, -baseRoadMargin, baseRoadMargin);
+      const leftSwoopOffset = clamp(leadLateral + lateralSwoop, -baseRoadMargin + 0.8, baseRoadMargin - 0.8);
       const leftTargetOffset = isLeftDive
-        ? clamp(divebomb.insideOffset, -baseRoadMargin, baseRoadMargin)
-        : (isLeftInside ? clamp(turnSign * Math.min(3.2, baseRoadMargin * 0.70), -baseRoadMargin, baseRoadMargin)
-          : (isLeftSwitch ? clamp(switchback.outsideOffset, -baseRoadMargin, baseRoadMargin) : leftSwoopOffset));
+        ? clamp(divebomb.insideOffset, -baseRoadMargin + 0.8, baseRoadMargin - 0.8)
+        : (isLeftInside ? clamp(Math.min(3.2, baseRoadMargin * 0.70), -baseRoadMargin + 0.8, baseRoadMargin - 0.8)
+          : (isLeftSwitch ? clamp(switchback.outsideOffset, -baseRoadMargin + 0.8, baseRoadMargin - 0.8) : leftSwoopOffset));
 
       const leftCorridor = awareness.evaluateCorridor({
         vehicle,
@@ -557,7 +558,7 @@ export class TacticalAttackEngine {
 
         candidates.push({
           phase,
-          side: -1,
+          side: 1,
           offset: leftTargetOffset,
           corridor: leftCorridor,
           score: leftCorridor.collisionFree ? score : score - 15,
@@ -568,17 +569,17 @@ export class TacticalAttackEngine {
       }
     }
 
-    // Right Attack Lane Candidate: lateral separation to the right of lead car
+    // Right Attack Lane Candidate: lateral separation to the right (-lateral) of lead car
     if (spaceOnRight >= 2.2) {
       const isRightInside = inCorner && turnSign > 0;
       const isRightDive = isRightInside && divebomb.feasible;
       const isRightSwitch = !isRightInside && inCorner && switchback.feasible;
 
-      const rightSwoopOffset = clamp(leadLateral + lateralSwoop, -baseRoadMargin, baseRoadMargin);
+      const rightSwoopOffset = clamp(leadLateral - lateralSwoop, -baseRoadMargin + 0.8, baseRoadMargin - 0.8);
       const rightTargetOffset = isRightDive
-        ? clamp(divebomb.insideOffset, -baseRoadMargin, baseRoadMargin)
-        : (isRightInside ? clamp(turnSign * Math.min(3.2, baseRoadMargin * 0.70), -baseRoadMargin, baseRoadMargin)
-          : (isRightSwitch ? clamp(switchback.outsideOffset, -baseRoadMargin, baseRoadMargin) : rightSwoopOffset));
+        ? clamp(divebomb.insideOffset, -baseRoadMargin + 0.8, baseRoadMargin - 0.8)
+        : (isRightInside ? clamp(-Math.min(3.2, baseRoadMargin * 0.70), -baseRoadMargin + 0.8, baseRoadMargin - 0.8)
+          : (isRightSwitch ? clamp(switchback.outsideOffset, -baseRoadMargin + 0.8, baseRoadMargin - 0.8) : rightSwoopOffset));
 
       const rightCorridor = awareness.evaluateCorridor({
         vehicle,
@@ -612,7 +613,7 @@ export class TacticalAttackEngine {
 
         candidates.push({
           phase,
-          side: 1,
+          side: -1,
           offset: rightTargetOffset,
           corridor: rightCorridor,
           score: rightCorridor.collisionFree ? score : score - 15,
@@ -623,6 +624,18 @@ export class TacticalAttackEngine {
       }
     }
 
+    // Apply lane commitment hysteresis: once committed to an overtaking side (left vs right),
+    // penalize sudden opposite-side flipping unless the current lane is blocked
+    if (this.phase !== 'NONE' && this.phase !== 'RETURN' && this.side != null) {
+      for (const cand of candidates) {
+        if (cand.side === this.side) {
+          cand.score += 5.0;
+        } else {
+          cand.score -= 6.0;
+        }
+      }
+    }
+
     candidates.sort((a, b) => b.score - a.score);
     const chosen = candidates[0] ?? null;
 
@@ -630,11 +643,13 @@ export class TacticalAttackEngine {
     const attackRange = 28 + aggression * 10; // up to 38m
 
     const straightSend = !inCorner && (chosen?.timeGainS ?? 0) > 0.02 && target.delta < attackRange;
-    const attackTrigger = (target.delta < attackRange && (chosen?.timeGainS ?? 0) > 0.02)
+    const attackTrigger = Boolean(chosen) && (
+      (target.delta < attackRange && (chosen.timeGainS ?? 0) > 0.02)
       || slipstream.shouldPullOut
       || isSlowObstacle
       || chosen.isDive
-      || chosen.isSwitchback;
+      || chosen.isSwitchback
+    );
 
     if (chosen && attackTrigger) {
       this.phase = chosen.phase;

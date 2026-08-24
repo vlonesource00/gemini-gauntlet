@@ -231,10 +231,12 @@ export class FrenetLatticePlanner {
     const intentError = Math.abs(terminalLateral - desiredOffset);
     const avgSpeed = speedSum / this.pointCount;
 
-    // Reward bold candidate trajectories that utilize full track width and kerbs
-    const trackWidthRatio = clamp(Math.abs(terminalLateral) / Math.max(1.0, effectiveRoadMargin), 0, 1);
-    const kerbReward = (kerbAllowance > 0 && Math.abs(terminalLateral) > roadMargin * 0.75) ? (0.6 + aggression * 0.8) : 0;
-    const rewardWidth = -(trackWidthRatio * (0.5 + aggression * 0.7) + kerbReward) * (intentType === 'RACING_LINE' || intentType === 'TACTICAL_TARGET' || intentType === 'PRIMARY_INTENT' ? 1.4 : 1.0);
+    // Reward clipping inside apex curb during cornering
+    const trackPoint = track?.atDistance ? track.atDistance(vehicle.distance) : { curvature: 0 };
+    const trackCurv = finite(trackPoint?.curvature, 0);
+    const isInsideApex = (trackCurv > 0.003 && terminalLateral < 0) || (trackCurv < -0.003 && terminalLateral > 0);
+    const kerbReward = (kerbAllowance > 0 && isInsideApex) ? (0.6 + aggression * 0.8) : 0;
+    const rewardWidth = isInsideApex ? -(kerbReward + 0.5) : 0;
 
     const costRoadViolation = roadViolation * 1e6;
     const costCollision = collisionRisk * wColl;
@@ -346,11 +348,13 @@ export class FrenetLatticePlanner {
     const lateralDelta = Math.abs(intendedOffset - currentLateral);
     const availableLatAccel = 7.5 + clamp(finite(aggression, 0.5), 0, 1) * 5.0;
     const physicalMinTime = Math.sqrt(5.8 * lateralDelta / Math.max(2.0, availableLatAccel));
+    const vSpeed = finite(vehicle?.speed, 10);
+    const speedTransitionFloor = vSpeed > 40.0 ? 1.25 : (urgentManeuver ? 0.75 : 1.05);
 
     const nominalTransition = clamp(
-      physicalMinTime * (urgentManeuver ? 0.98 : 1.08) + (urgentManeuver ? 0.05 : 0.28),
-      urgentManeuver ? 0.65 : 1.15,
-      urgentManeuver ? 2.2 : 3.0
+      physicalMinTime * (urgentManeuver ? 0.98 : 1.08) + (urgentManeuver ? 0.15 : 0.28),
+      speedTransitionFloor,
+      urgentManeuver ? 2.4 : 3.0
     );
 
     const defaultScales = urgentManeuver ? [0.75, 1.0, 1.25] : [0.85, 1.0, 1.35];
