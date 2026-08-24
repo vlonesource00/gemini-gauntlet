@@ -21,6 +21,7 @@ import { ReferenceLapManager } from './simulation/ReferenceLap.js';
 // Simulation Consts
 const FIXED_TIMESTEP = 1 / 120;
 const MAX_STEPS_PER_FRAME = 14;
+const finite = (val, fallback = 0) => (Number.isFinite(val) ? val : fallback);
 
 // App Containers
 const app = document.querySelector('#app');
