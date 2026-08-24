@@ -480,8 +480,8 @@ export class ResearchAIController {
     // 5. Longitudinal Target Speed & Dynamic Adjustments
     let desiredSpeed = physicalTargetSpeed;
 
-    // Cap speed based on chosen trajectory curvature
-    const lateralAccelBudget = (vehicle.classKey === 'prototype' ? 24.0 : vehicle.classKey === 'gt' ? 17.5 : 13.5) * tireGripFactor;
+    // Cap speed based on chosen trajectory curvature (prototype aero downforce reaches 26.5 m/s² lateral budget)
+    const lateralAccelBudget = (vehicle.classKey === 'prototype' ? 26.5 : vehicle.classKey === 'gt' ? 17.5 : 13.5) * tireGripFactor;
     const trajectorySpeedLimit = this.trajectoryPlan.points.reduce((limit, p) => {
       const curv = Math.max(0, finite(p.curvature, 0));
       if (curv < 1e-5) return limit;
@@ -496,8 +496,8 @@ export class ResearchAIController {
     const refData = this.referenceProfile?.paceAtDistance?.(vehicle.distance);
     const refSpeed = refData?.targetSpeed;
     if (Number.isFinite(refSpeed) && refSpeed > 10.0 && tacticalMode === 'PACE' && (vehicle.classKey === 'prototype' || !vehicle.classKey)) {
-      const scaledRef = refSpeed * (1.0 + (this._aggression - 0.5) * 0.06);
-      desiredSpeed = Math.min(physicalTargetSpeed, Math.max(desiredSpeed, scaledRef));
+      const scaledRef = refSpeed * (1.0 + (this._aggression - 0.5) * 0.08);
+      desiredSpeed = Math.max(desiredSpeed, Math.min(physicalTargetSpeed * 1.05, scaledRef));
     }
 
     // Overtake speed adjustments (Aggressive closing velocity & acceleration)

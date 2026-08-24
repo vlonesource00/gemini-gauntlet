@@ -98,12 +98,16 @@ export class PaceOptimizer {
       const sampleDist = finite(vehicle?.distance, 0) + dist;
       const point = track?.atDistance ? track.atDistance(sampleDist) : { curvature: 0, banking: 0 };
       
-      let curvature = Math.abs(finite(point.curvature, 0));
+      let rawCurvature = Math.abs(finite(point.curvature, 0));
+      // Effective racing line curvature: exploiting track width and apex clipping flattens corner radius (e.g. Turns 1-6)
+      const roadWidth = finite(track?.roadHalfWidth, 6.5) + finite(track?.curbWidth, 1.05);
+      let curvature = rawCurvature / (1.0 + 2.65 * roadWidth * rawCurvature);
+
       if (Math.abs(insideLineOffset) > 0.5 && curvature > 1e-4) {
         curvature = curvature / Math.max(0.40, 1.0 - Math.abs(insideLineOffset) * curvature);
       }
 
-      const safetyFactor = defending ? 0.94 : (aggression > 0.8 ? 0.99 : 0.96);
+      const safetyFactor = defending ? 0.94 : (aggression > 0.8 ? 1.00 : 0.97);
       const physLimit = this.calculateCornerSpeed({
         curvature,
         banking: point.banking,
@@ -283,28 +287,7 @@ export class PaceOptimizer {
       brake *= clamp(trailFactor, 0.05, 1.0);
     }
 
-    // 3. Traction Control (TCS) & Corner-Exit Throttle Modulation
-    // Intervenes ONLY in tight high-load cornering (|steer| > 0.25 AND latUtil > 0.72)
-    const isHardCornering = !straight && (steerMagnitude > 0.25 && latUtil > 0.72);
-
-    if (throttle > 0.03 && isHardCornering && brake < 0.05) {
-      const tractionBudget = Math.sqrt(Math.max(0.20, 1.0 - Math.pow(latUtil * 0.85, 2)));
-      const vSpeed = finite(vehicle?.speed, 0);
-      const lowSpeedBoost = clamp((20.0 - vSpeed) / 12.0, 0, 0.45);
-      const unwindGain = clamp(
-        tractionBudget * (1.0 - this.unwindFactor * Math.pow(steerMagnitude, 1.2) * 0.25) + lowSpeedBoost,
-        0.60,
-        1.0
-      );
-      throttle = clamp(throttle * unwindGain, 0, 1);
-    }
-
-    // Instant 100% full throttle pickup as soon as steering unwinds or on straights
-    if (speedError > 0.2 && steerMagnitude < 0.18 && brake < 0.05 && Math.abs(finite(slipAngle, 0)) < 0.06) {
-      throttle = 1.0;
-    }
-
-    // 4. Oversteer / Lateral Instability Control (Phase-Aware Yaw & Real Breakaway Slip)
+    // 3. Oversteer / Lateral Instability Control (Phase-Aware Yaw & Real Breakaway Slip)
     const rawSlip = finite(slipAngle, 0);
     const vSpeed = finite(vehicle?.speed, 0);
     // Kinematic geometric body slip from steering lock at low-to-medium speeds
@@ -328,6 +311,31 @@ export class PaceOptimizer {
       (dynamicExcessSlip - 0.130) / 0.09,
       (excessYaw - 0.85) / 0.90
     )) * speedWeight;
+
+    // 4. Traction Control (TCS) & Corner-Exit Throttle Modulation
+    // Intervenes ONLY in tight high-load cornering (|steer| > 0.25 AND latUtil > 0.72)
+    const isHardCornering = !straight && (steerMagnitude > 0.25 && latUtil > 0.72);
+
+    if (throttle > 0.03 && isHardCornering && brake < 0.05) {
+      const tractionBudget = Math.sqrt(Math.max(0.20, 1.0 - Math.pow(latUtil * 0.85, 2)));
+      const lowSpeedBoost = clamp((20.0 - vSpeed) / 12.0, 0, 0.45);
+      const unwindGain = clamp(
+        tractionBudget * (1.0 - this.unwindFactor * Math.pow(steerMagnitude, 1.2) * 0.25) + lowSpeedBoost,
+        0.60,
+        1.0
+      );
+      throttle = clamp(throttle * unwindGain, 0, 1);
+    }
+
+    // High-speed direction change & apex drive: maintain positive rear axle load to prevent lift-off snap oversteer
+    if (throttle > 0.05 && isCornering && vSpeed > 16.0 && brake < 0.05 && instability < 0.15) {
+      throttle = Math.max(throttle, 0.42);
+    }
+
+    // Instant 100% full throttle pickup as soon as steering unwinds or on straights
+    if (speedError > 0.2 && steerMagnitude < 0.18 && brake < 0.05 && Math.abs(finite(slipAngle, 0)) < 0.06) {
+      throttle = 1.0;
+    }
 
     if (instability > 0) {
       if (brake > 0.03 || speedError < -0.30) {
