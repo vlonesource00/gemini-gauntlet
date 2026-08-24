@@ -129,11 +129,13 @@ export class TacticalAttackEngine {
     // Up to 38% aerodynamic drag reduction in direct slipstream wake
     const dragReduction = wakeStrength * 0.38;
 
-    // Slingshot pull-out criteria: aggressively punch out when closing in behind lead car
+    // Velocity-Differential Slingshot pull-out timing:
+    // Rides the tow pocket to maximize speed delta, then punches out at exact mathematical threshold
     const closingSpeed = target.relativeLongitudinalVelocity;
-    const shouldPullOut = (target.delta < 28 && closingSpeed > 0.6)
-      || (target.ttc < 2.2 && target.delta < 36)
-      || (target.delta < 18);
+    const dynamicPulloutDist = clamp(closingSpeed * 1.15 + 4.8, 6.5, 28.0);
+    const shouldPullOut = (target.delta <= dynamicPulloutDist && closingSpeed > 0.4)
+      || (target.ttc < 1.8 && target.delta < 32)
+      || (target.delta < 8.0);
 
     return {
       wakeStrength,

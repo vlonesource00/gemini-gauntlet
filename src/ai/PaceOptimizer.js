@@ -53,11 +53,16 @@ export class PaceOptimizer {
     skill = 0.85
   } = {}) {
     const kappa = Math.max(1e-5, Math.abs(finite(curvature, 0)));
-    // Speed-dependent aerodynamic downforce: mechanical grip base (1.85G) + downforce scaling up to 2.70G at speed
+    // Speed-dependent aerodynamic downforce: mechanical grip base + dynamic aero downforce scaling (Fz proportional to v^2)
     const vEst = Math.sqrt(9.81 * 1.85 / kappa);
     const downforceFactor = vehicleClass === 'prototype' ? saturate((vEst - 18.0) / 35.0) : 0;
+    const aeroDownforceMultiplier = vehicleClass === 'prototype'
+      ? clamp(1.0 + 0.00022 * vEst * vEst, 1.0, 1.55)
+      : vehicleClass === 'gt'
+        ? clamp(1.0 + 0.00008 * vEst * vEst, 1.0, 1.20)
+        : 1.0;
     const classBaseG = vehicleClass === 'prototype' ? (1.80 + 0.90 * downforceFactor) : vehicleClass === 'gt' ? 1.30 : 1.10;
-    const peakG = classBaseG * tireGripFactor * (0.86 + skill * 0.14);
+    const peakG = classBaseG * tireGripFactor * aeroDownforceMultiplier * (0.86 + skill * 0.14);
     const g = 9.81;
 
     // Banking bonus: a_lat_eff = g * (peakG * cos(theta) + sin(theta))
