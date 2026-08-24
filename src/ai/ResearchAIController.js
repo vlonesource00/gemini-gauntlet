@@ -354,15 +354,19 @@ export class ResearchAIController {
     const upcomingPoint = track?.atDistance ? track.atDistance(vehicle.distance + Math.max(18.0, dynamicLookahead)) : { curvature: 0 };
     const upcomingCurv = finite(upcomingPoint.curvature, 0);
     
-    // Globally time-optimal baseline trajectory
+    // Globally time-optimal baseline trajectory (Layer 1 GlobalTimeOptimalEngine)
+    if (!this.optimalEngine || this.optimalEngine.track !== track) {
+      this.optimalEngine = new GlobalTimeOptimalEngine({ track });
+    }
     const isMatchingTrack = Boolean(this.referenceProfile) && (
       this.referenceProfile.trackId
         ? this.referenceProfile.trackId === track?.id
         : Math.abs((this.referenceProfile?.trackLength || 3061.7) - (track?.length || 1000)) < 100
     );
+    const activeProfile = (this.referenceProfile && isMatchingTrack) ? this.referenceProfile : this.optimalEngine;
     const fallbackGeometricLine = clamp(-Math.sign(upcomingCurv) * Math.min(2.4, Math.abs(upcomingCurv) * 80.0), -2.5, 2.5);
-    const referenceLine = (isMatchingTrack && typeof this.referenceProfile?.paceAtDistance === 'function')
-      ? (this.referenceProfile.paceAtDistance(vehicle.distance + Math.max(18.0, dynamicLookahead))?.lineLateral ?? fallbackGeometricLine)
+    const referenceLine = (activeProfile && typeof activeProfile.paceAtDistance === 'function')
+      ? (activeProfile.paceAtDistance(vehicle.distance + Math.max(18.0, dynamicLookahead))?.lineLateral ?? fallbackGeometricLine)
       : fallbackGeometricLine;
     const paceLine = clamp(referenceLine, -baseRoadMargin, baseRoadMargin);
 
@@ -428,9 +432,21 @@ export class ResearchAIController {
       tacticalReason = defDecision.reason;
     } else if (attDecision.phase === 'RETURN') {
       tacticalMode = 'PACE';
-      targetOffset = attDecision.desiredOffset;
+      targetOffset = paceLine;
       tacticalReason = 'OVERTAKE_COMPLETE_RETURN';
     }
+
+    // Universal continuous targetOffset rate-limiter: guarantees zero lateral jump artifacts
+    const currentCarLat = finite(current?.lateral, 0);
+    const maxLateralRate = (recovering || isOffTrack) ? 6.0 : (committed ? 4.5 : 3.2);
+    const maxShiftThisFrame = maxLateralRate * dt;
+    this.smoothedTargetOffset = clamp(
+      (this.smoothedTargetOffset != null ? this.smoothedTargetOffset : currentCarLat) +
+        clamp(targetOffset - (this.smoothedTargetOffset != null ? this.smoothedTargetOffset : currentCarLat), -maxShiftThisFrame, maxShiftThisFrame),
+      -plannedRoadMargin,
+      plannedRoadMargin
+    );
+    targetOffset = this.smoothedTargetOffset;
 
     // 4. Multi-Candidate Frenet Trajectory Planning
     const tacticalCandidates = (tacticalMode === 'PACE' || recovering) ? [] : [
@@ -562,12 +578,17 @@ export class ResearchAIController {
 
     desiredSpeed = Math.min(desiredSpeed, trajectorySpeedLimit);
 
-    const refData = (isMatchingTrack && typeof this.referenceProfile?.paceAtDistance === 'function')
-      ? this.referenceProfile.paceAtDistance(vehicle.distance)
+    const refData = (activeProfile && typeof activeProfile.paceAtDistance === 'function')
+      ? activeProfile.paceAtDistance(vehicle.distance)
       : null;
-    const refSpeed = refData?.targetSpeed;
-    if (Number.isFinite(refSpeed) && refSpeed > 10.0 && tacticalMode === 'PACE' && (vehicle.classKey === 'prototype' || !vehicle.classKey)) {
-      const scaledRef = refSpeed * (1.0 + (this._aggression - 0.5) * 0.08);
+    const classFactor = (vehicle.classKey === 'gt') ? 0.82 : (vehicle.classKey === 'touring' ? 0.70 : 1.0);
+    const rawRefSpeed = refData?.targetSpeed;
+    const refSpeed = Number.isFinite(rawRefSpeed) ? rawRefSpeed * classFactor : null;
+    const scaledRef = (refSpeed != null && refSpeed > 8.0)
+      ? refSpeed * (1.0 + (this._aggression - 0.5) * 0.08)
+      : null;
+
+    if (scaledRef != null && tacticalMode === 'PACE') {
       desiredSpeed = Math.max(desiredSpeed, Math.min(physicalTargetSpeed * 1.05, scaledRef));
     }
 
@@ -626,6 +647,14 @@ export class ResearchAIController {
 
     if (emergency) {
       desiredSpeed = Math.min(desiredSpeed, Math.max(0, hazard.other.speed - 2.5));
+    }
+
+    // Never exceed physical cornering limit or global braking envelope
+    desiredSpeed = Math.min(desiredSpeed, trajectorySpeedLimit);
+    if (scaledRef != null) {
+      const diveBonus = (committed || attDecision.divebombing || straightSend) ? 1.25 : 1.02;
+      const envelopeCap = scaledRef * diveBonus;
+      desiredSpeed = Math.min(desiredSpeed, envelopeCap);
     }
 
     // 8. Low-Level Pedal Control & Trail Braking

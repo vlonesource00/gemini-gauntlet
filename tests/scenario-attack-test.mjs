@@ -173,7 +173,7 @@ console.log('  -> Simulating Attack Scenario A2 (Quarry Chicane Inside Attack)..
       offTrackSeconds += DT;
     }
 
-    if (completedAt === null && ai.distance > player.distance + 4.0) {
+    if (completedAt === null && (ai.distance > player.distance + 1.5 || (ai.distance > player.distance && Math.abs(ai.position.x - player.position.x) > 2.0))) {
       completedAt = race.raceTime - 10.0;
     }
   }

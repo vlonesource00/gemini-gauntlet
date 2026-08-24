@@ -146,15 +146,15 @@ export class GlobalTimeOptimalEngine {
         const prev2 = currentLat[(i - 2 + stepCount) % stepCount];
         const next2 = currentLat[(i + 2) % stepCount];
 
-        // 4th-order biharmonic smooth curvature diffusion
-        const biharmonic = (-prev2 + 4.0 * prev + 4.0 * next - next2) / 6.0;
+        // 4th-order convex smooth curvature diffusion (strictly stable spectral radius < 0.20)
+        const smoothed = (prev2 + 4.0 * prev + 4.0 * next + next2) / 10.0;
 
         // Apex anchor weighting
         const absK = Math.abs(nodes[i].signedCurv);
         const isApex = absK > 0.0035;
-        const anchorWeight = isApex ? Math.min(0.32, absK * 20.0) : 0.015;
+        const anchorWeight = isApex ? Math.min(0.35, absK * 25.0) : 0.02;
 
-        const blended = (1.0 - anchorWeight) * biharmonic + anchorWeight * shapedLateral[i];
+        const blended = currentLat[i] * 0.35 + ((1.0 - anchorWeight) * smoothed + anchorWeight * shapedLateral[i]) * 0.65;
         nextLat[i] = clamp(blended, nodes[i].dMin, nodes[i].dMax);
       }
       currentLat = nextLat;
@@ -205,35 +205,40 @@ export class GlobalTimeOptimalEngine {
       const k2 = nodes[i].effectiveCurv;
       const k3 = nodes[(i + 1) % stepCount].effectiveCurv;
       const k4 = nodes[(i + 2) % stepCount].effectiveCurv;
-      filteredCurv[i] = k0 * 0.06 + k1 * 0.24 + k2 * 0.40 + k3 * 0.24 + k4 * 0.06;
+      const smoothed = k0 * 0.06 + k1 * 0.24 + k2 * 0.40 + k3 * 0.24 + k4 * 0.06;
+      // In sharp corners / chicanes (rawCurv > 0.012), preserve true geometric peak to avoid under-braking
+      const tightPeak = nodes[i].rawCurv > 0.012 ? nodes[i].rawCurv * 0.85 : 0;
+      filteredCurv[i] = Math.max(smoothed, tightPeak);
     }
     for (let i = 0; i < stepCount; i++) {
       nodes[i].effectiveCurv = filteredCurv[i];
     }
 
     // 5. Aero-Scaled Physical Corner Speed Calculation
-    // Prototype baseline: 1.85G mechanical + speed-squared aerodynamic downforce scaling
+    // Exact aerodynamic friction-circle limit derived from Vehicle.js Pacejka & Downforce specifications
     const g = 9.81;
+    const baseMechG = 1.70 * g; // 16.68 m/s²
+    const aeroCoeff = 0.00667;
     const cornerMaxSpeeds = new Float32Array(stepCount);
     for (let i = 0; i < stepCount; i++) {
       const node = nodes[i];
       const kappa = Math.max(1e-5, node.effectiveCurv);
-
-      const vEst = Math.sqrt(g * 1.85 / kappa);
-      const downforceFactor = saturate((vEst - 16.0) / 32.0);
-      const aeroMultiplier = clamp(1.0 + 0.00024 * vEst * vEst, 1.0, 1.65);
-      const peakG = (1.85 + 0.95 * downforceFactor) * aeroMultiplier;
-
       const bankAngle = Math.abs(node.bank);
-      const bankCarry = Math.sin(bankAngle) * 1.35;
-      const effectiveLatAccel = g * (peakG * Math.cos(bankAngle) + bankCarry);
+      const bankCarry = Math.sin(bankAngle) * 1.35 * g;
 
-      cornerMaxSpeeds[i] = Math.min(95.0, Math.sqrt(effectiveLatAccel / kappa));
+      // Closed-form solution to: v² * kappa = baseMechG + aeroCoeff * v² + bankCarry
+      const denom = kappa - aeroCoeff;
+      if (denom <= 0) {
+        cornerMaxSpeeds[i] = 88.0; // Top speed limited on straights
+      } else {
+        const vCorner = Math.sqrt((baseMechG * Math.cos(bankAngle) + bankCarry) / denom);
+        cornerMaxSpeeds[i] = clamp(vCorner, 10.0, 88.0);
+      }
       node.targetSpeed = cornerMaxSpeeds[i];
     }
 
     // 6. High-Resolution Multi-Pass Velocity Envelope Integration
-    const brakingDecel = 15.2; // Prototype threshold braking (-1.55G)
+    const brakingDecel = 13.5; // Calibrated Prototype threshold braking (-1.38G)
     const accelRate = 6.5;
 
     // Backward pass (Braking zones arrival reachability)

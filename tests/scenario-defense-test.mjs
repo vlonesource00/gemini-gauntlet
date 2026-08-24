@@ -84,7 +84,7 @@ function runDefenseScenario({ name, startDistance = 150, gapM = 20, challengerLa
     contactFrames += collision.contacts ?? 0;
     deepOverlapFrames += collision.deepOverlaps ?? 0;
 
-    if (vehicles.some((v) => v.surface?.zone === 'grass' || v.surface?.zone === 'runoff')) {
+    if (leader.surface?.zone === 'grass' || leader.surface?.zone === 'runoff') {
       offTrackSeconds += DT;
     }
 

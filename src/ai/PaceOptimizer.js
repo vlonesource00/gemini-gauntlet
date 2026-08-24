@@ -199,11 +199,25 @@ export class PaceOptimizer {
         ? clamp(3.2 / Math.max(3.5, vSpeed) + 0.12, 0.12, 0.48)
         : clamp(2.8 / Math.max(3.5, vSpeed) + 0.10, 0.08, 0.44));
 
-    // Direct pure-pursuit trajectory tracking with active yaw rate damping
+    // Curvature feedforward
+    const wheelBase = 2.80;
+    const curvatureFeedforward = Math.atan(wheelBase * finite(currentCurvature, 0));
+
+    // Counter-steer to catch oversteer breakaway slides
+    const liveSlip = finite(slipAngle, 0);
+    const counterSteer = Math.abs(liveSlip) > 0.08
+      ? Math.sign(liveSlip) * clamp((Math.abs(liveSlip) - 0.06) * 2.2, 0, 0.55)
+      : 0;
+
+    const maxAllowedSteer = Math.abs(counterSteer) > 0.05
+      ? Math.max(maxUsableSteer, 0.65)
+      : maxUsableSteer;
+
+    // Direct trajectory tracking with curvature feedforward, yaw damping, and active counter-steer
     let target = clamp(
-      finite(headingError) * headingGain - finite(yawRate) * yawDamping,
-      -maxUsableSteer,
-      maxUsableSteer
+      curvatureFeedforward * 0.85 + finite(headingError) * headingGain - finite(yawRate) * yawDamping + counterSteer,
+      -maxAllowedSteer,
+      maxAllowedSteer
     );
 
     if (yielding) target = clamp(target, -0.3, 0.3);
@@ -308,20 +322,13 @@ export class PaceOptimizer {
     brake = clamp(prevBrake + clamp(brake - prevBrake, -maxBrakeDelta, maxBrakeDelta), 0, 1);
 
     // 2. Friction-Circle-Coupled High-Precision Trail Braking Modulation
-    // Seamlessly tapers longitudinal braking force as lateral cornering load rises
+    // Seamlessly tapers longitudinal braking along the 2D G-G friction ellipse
     let trailBrakingActive = false;
     if (brake > 0.03 && friction.latUtilization > 0.08) {
       trailBrakingActive = true;
-      const trailExp = defending ? 1.3 : 1.6;
-      const latFactor = clamp(this.trailBrakingSkill * friction.latUtilization * 0.96, 0, 0.99);
-      const trailFactor = Math.pow(Math.max(0.01, 1.0 - Math.pow(latFactor, 2)), 1.0 / trailExp);
-      brake *= clamp(trailFactor, 0.05, 1.0);
-
-      // In deep cornering (latUtil > 0.55 or |steer| > 0.25), cap mid-corner brake demand to preserve lateral grip and momentum
-      if (friction.latUtilization > 0.55 || steerMagnitude > 0.25) {
-        const midCornerBrakeCeiling = vSpeed < 16.0 ? 0.15 : 0.35;
-        brake = Math.min(brake, midCornerBrakeCeiling);
-      }
+      const latFactor = clamp(this.trailBrakingSkill * friction.latUtilization * 0.90, 0, 0.98);
+      const remainingLongitudinal = Math.sqrt(Math.max(0.04, 1.0 - Math.pow(latFactor, 2)));
+      brake = Math.min(brake, remainingLongitudinal);
     }
 
     // 3. Oversteer / Lateral Instability Control (Phase-Aware Yaw & Real Breakaway Slip)
@@ -374,12 +381,11 @@ export class PaceOptimizer {
     }
 
     if (instability > 0) {
-      if (brake > 0.03 || speedError < -1.50) {
+      if (brake > 0.45 || speedError < -5.0) {
         throttle = 0;
       } else {
-        // High-speed maintenance throttle floor (30%) prevents lethal lift-off snap spins in esses
-        const minFloor = (vSpeed > 14.0 && !straight) ? 0.30 : 0.0;
-        throttle = Math.max(minFloor, throttle * (1.0 - instability * 0.70));
+        // High-speed maintenance throttle floor (25%) keeps rear axle loaded, preventing lift-off snap spins
+        throttle = clamp(throttle * (1.0 - instability * 0.60), 0.25, 0.70);
       }
       // Soften brake during oversteer slides to prevent rear lockup
       brake *= Math.max(0.1, 1.0 - instability * 0.55);
