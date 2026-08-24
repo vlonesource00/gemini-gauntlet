@@ -88,9 +88,11 @@ export class PaceOptimizer {
   } = {}) {
     const vClass = vehicle?.classKey || 'prototype';
     // Calibrated physical sustained deceleration budget ensuring optimal braking point arrival
-    // Prototype: ~8.8 m/s²; GT: ~7.0 m/s²; Touring: ~5.2 m/s²
-    const brakingDecel = (vClass === 'prototype' ? 8.8 : vClass === 'gt' ? 7.0 : 5.2) * tireGripFactor * (0.92 + (aggression - 0.5) * 0.10);
-    const speedEnvelopeDistances = [0, 4, 8, 12, 16, 22, 28, 36, 46, 58, 72, 88, 108, 132, 160, 200, 250, 310];
+    // Prototype: ~14.5 m/s² (-1.48G); GT: ~8.5 m/s² (-0.87G); Touring: ~6.2 m/s² (-0.63G)
+    const brakingDecel = (vClass === 'prototype' ? 14.5 : vClass === 'gt' ? 8.5 : 6.2) * tireGripFactor * (0.92 + (aggression - 0.5) * 0.10);
+    const speedEnvelopeDistances = [
+      0, 3, 6, 9, 12, 16, 20, 24, 28, 33, 38, 44, 50, 56, 64, 72, 80, 90, 100, 112, 125, 140, 160, 185, 210, 240, 275, 310
+    ];
 
     let speedLimit = 95.0; // max track velocity ceiling
 
@@ -227,7 +229,8 @@ export class PaceOptimizer {
     recovering = false,
     emergency = false,
     defending = false,
-    tireGripFactor = 1.0
+    tireGripFactor = 1.0,
+    dt = 0.016
   }) {
     const friction = this.evaluateFrictionCircle({
       vehicle,
@@ -255,31 +258,43 @@ export class PaceOptimizer {
       return { throttle: 0, brake: 1.0, friction, trailBraking: false, instability: 0 };
     }
 
-    // 1. Dynamic Speed Demand & In-Corner Deceleration vs Straight Threshold Braking
+    // 1. Dynamic Speed Demand & Smooth Progressive Threshold Braking (Zero Oscillation)
     const steerMagnitude = saturate(Math.abs(finite(steerAngle, 0)));
     const latUtil = friction.latUtilization;
     const isCornering = !straight && (steerMagnitude > 0.18 || latUtil > 0.58);
-    // In mid-corner, avoid sudden brake stabbing on minor speed errors; lift throttle and coast instead
-    const brakeThreshold = isCornering ? -1.80 : -0.70;
 
-    if (speedError > brakeThreshold + 0.30) {
-      const exitBonus = (!straight && Math.abs(finite(steerAngle, 0)) < 0.28) ? 0.15 : 0;
-      throttle = clamp((straight ? 1.0 : (0.88 + exitBonus)) + finite(speedError) * 0.40, 0, 1.0);
+    // Deadband: between -0.8 m/s and 0 m/s, vehicle smoothly coasts without stabbing brakes
+    const coastThreshold = isCornering ? -1.40 : -0.80;
+    const fullBrakeThreshold = isCornering ? -2.80 : -2.20;
+
+    if (speedError >= 0) {
+      // Need acceleration: ramp throttle smoothly to full power
+      const exitBonus = (!straight && steerMagnitude < 0.28) ? 0.20 : 0;
+      throttle = clamp((straight ? 1.0 : (0.85 + exitBonus)) + finite(speedError) * 0.35, 0, 1.0);
+      brake = 0;
+    } else if (speedError > coastThreshold) {
+      // Minor speed overshoot: coast with partial throttle or engine drag, ZERO BRAKES
+      const blend = (speedError - coastThreshold) / Math.max(0.01, -coastThreshold);
+      throttle = straight ? clamp(blend * 0.70, 0, 0.70) : 0;
       brake = 0;
     } else {
+      // Genuine braking demand: apply progressive to threshold braking
       throttle = 0;
-    }
-
-    if (speedError < brakeThreshold) {
-      throttle = 0;
-      if (speedError < -2.5) {
+      if (speedError <= fullBrakeThreshold) {
         // High-G threshold braking on corner approach (-3.5G capacity)
-        brake = clamp(0.80 + (-finite(speedError) - 2.5) * 0.30, 0.80, 1.0);
+        brake = clamp(0.85 + (-speedError - Math.abs(fullBrakeThreshold)) * 0.30, 0.85, 1.0);
       } else {
-        // Progressive corner entry brake modulation
-        brake = clamp((-finite(speedError) - Math.abs(brakeThreshold)) * 0.45, 0, 0.75);
+        // Progressive entry braking
+        const brakeFrac = (-speedError - Math.abs(coastThreshold)) / Math.max(0.01, Math.abs(fullBrakeThreshold) - Math.abs(coastThreshold));
+        brake = clamp(brakeFrac * 0.80, 0.10, 0.85);
       }
     }
+
+    // Rate-limit brake changes to prevent on-and-off chatter: fast bite (24/s), smooth release (12/s)
+    const prevBrake = finite(vehicle?.controls?.brake, 0);
+    const maxBrakeRate = brake > prevBrake ? 24.0 : 12.0;
+    const maxBrakeDelta = maxBrakeRate * clamp(finite(dt, 0.016), 0, 0.1);
+    brake = clamp(prevBrake + clamp(brake - prevBrake, -maxBrakeDelta, maxBrakeDelta), 0, 1);
 
     // 2. Friction-Circle-Coupled High-Precision Trail Braking Modulation
     // Seamlessly tapers longitudinal braking force as lateral cornering load rises

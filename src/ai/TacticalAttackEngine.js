@@ -306,8 +306,8 @@ export class TacticalAttackEngine {
     if (this.targetLockTime <= 0) this.passedTargetId = null;
 
     const roadHalfWidth = finite(track?.roadHalfWidth, 6.5);
-    const baseRoadMargin = Math.max(2.1, roadHalfWidth - 1.35);
-    const kerbAllowance = this.kerbUsage * Math.min(0.85, finite(track?.curbWidth, 0.8) * 0.75);
+    const baseRoadMargin = Math.max(2.1, Math.min(5.2, roadHalfWidth - 1.8));
+    const kerbAllowance = this.kerbUsage * Math.min(0.80, finite(track?.curbWidth, 0.8) * 0.60);
     const roadMargin = baseRoadMargin + kerbAllowance;
     const currentLateral = finite(traffic?.current?.lateral, 0);
     const baseOffset = clamp(policyLine, -baseRoadMargin, baseRoadMargin);
@@ -324,8 +324,8 @@ export class TacticalAttackEngine {
       };
     }
 
-    // Analyze upcoming turn geometry across wide horizon
-    const turns = [16, 32, 50, 75, 105, 140].map((dist) =>
+    // Analyze current and upcoming turn geometry across wide horizon
+    const turns = [0, 8, 16, 32, 50, 75, 105, 140].map((dist) =>
       track?.atDistance ? track.atDistance(vehicle.distance + dist) : { curvature: 0, turnSign: 1, s: vehicle.distance + dist }
     );
     const turn = turns.sort((a, b) => Math.abs(b.curvature) - Math.abs(a.curvature))[0];

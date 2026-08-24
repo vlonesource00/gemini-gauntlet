@@ -67,23 +67,22 @@ export class CombatDynamicsEngine {
     // =========================================================================
     // Dynamic breakaway threshold: Prototype tires generate peak lateral load at ~6.5° (0.115 rad).
     // Genuine oversteer breakaway occurs at > 7.5° (0.130 rad).
+    // Oversteer breakaway occurs when rear tire saturation exceeds critical threshold (> 11.5° / 0.20 rad) with diverging yaw rate
     const absSlip = Math.abs(slipAngle);
+    const isSpinBreakaway = absSlip > 0.20 && Math.abs(yawRate) > 0.65;
     this.powerSlideActive = false;
 
-    if (absSlip > 0.115 && vSpeed > 8.0) {
+    if (isSpinBreakaway && vSpeed > 8.0) {
       this.powerSlideActive = true;
-      const excessSlip = absSlip - 0.115;
+      const excessSlip = absSlip - 0.20;
       const slipSign = Math.sign(slipAngle);
 
+      const maxCounterSteer = clamp(4.2 / Math.max(4.0, vSpeed) + 0.08, 0.14, 0.55);
       // Instantaneous active countersteer proportional to yaw velocity and excess slip
-      const counterSteer = slipSign * clamp(excessSlip * 2.5 + Math.abs(yawRate) * 0.18, 0.05, 0.65);
+      const counterSteer = slipSign * clamp(excessSlip * 1.8 + Math.abs(yawRate) * 0.12, 0.04, maxCounterSteer);
       
-      // If critical breakaway (>12 deg / 0.20 rad), completely override turn-in with direct counter-steer lock
-      if (absSlip > 0.20) {
-        steer = clamp(counterSteer, -0.65, 0.65);
-      } else {
-        steer = clamp(steer * 0.35 + counterSteer, -0.55, 0.55);
-      }
+      // Override turn-in with direct counter-steer lock
+      steer = clamp(counterSteer, -maxCounterSteer, maxCounterSteer);
 
       // Stability throttle: maintain positive torque (35%) to keep rear axle loaded and prevent lift-off snap spins
       if (brake < 0.05) {

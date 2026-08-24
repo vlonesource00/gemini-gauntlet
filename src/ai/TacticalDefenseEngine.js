@@ -235,7 +235,7 @@ export class TacticalDefenseEngine {
     this.towBreakTimer = Math.max(0, this.towBreakTimer - dt);
     this.ersDefensiveDeployTimer = Math.max(0, this.ersDefensiveDeployTimer - dt);
 
-    const roadMargin = Math.max(2.1, finite(track?.roadHalfWidth, 6.5) - 1.35);
+    const roadMargin = Math.max(2.1, Math.min(5.2, finite(track?.roadHalfWidth, 6.5) - 1.8));
     const currentLateral = finite(traffic?.current?.lateral, 0);
     const nominalBase = clamp(baseLine, -roadMargin, roadMargin);
 

@@ -303,7 +303,7 @@ export class ResearchAIController {
     }
 
     // 2. Tactical Evaluation (Defense -> Attack -> Pace)
-    const turns = [10, 22, 38, 58].map((d) =>
+    const turns = [0, 8, 16, 28, 45, 65].map((d) =>
       track?.atDistance ? track.atDistance(vehicle.distance + d) : { curvature: 0, turnSign: 1 }
     );
     const turn = turns.sort((a, b) => Math.abs(b.curvature) - Math.abs(a.curvature))[0];
@@ -321,7 +321,8 @@ export class ResearchAIController {
 
     const upcomingPoint = track?.atDistance ? track.atDistance(vehicle.distance + Math.max(18.0, dynamicLookahead)) : { curvature: 0 };
     const upcomingCurv = finite(upcomingPoint.curvature, 0);
-    const fallbackGeometricLine = clamp(-Math.sign(upcomingCurv) * Math.min(2.5, Math.abs(upcomingCurv) * 600), -baseRoadMargin, baseRoadMargin);
+    // Smooth geometric apex line capped to safe inner corridor (|lat| <= 2.5m)
+    const fallbackGeometricLine = clamp(-Math.sign(upcomingCurv) * Math.min(2.4, Math.abs(upcomingCurv) * 80.0), -2.5, 2.5);
     const isMatchingTrack = Boolean(this.referenceProfile) && (
       this.referenceProfile.trackId
         ? this.referenceProfile.trackId === track?.id
@@ -425,7 +426,7 @@ export class ResearchAIController {
       vehicle,
       track,
       desiredOffset: targetOffset,
-      fallbackOffsets: recovering || committed || defending || tacticalMode === 'ATTACK' ? [] : [paceLine, finite(current?.lateral, 0)],
+      fallbackOffsets: recovering ? [] : [paceLine, finite(current?.lateral, 0)],
       tacticalCandidates: recovering ? [] : tacticalCandidates,
       trafficEntries: traffic.entries,
       targetSpeed: physicalTargetSpeed,
@@ -439,9 +440,14 @@ export class ResearchAIController {
       kerbAllowance,
       lookAhead: lookAheadDist,
       trackingDistance: (committed || defending) ? Math.max(trackingDistance, clamp(vehicle.speed * 0.95, 12.0, 24.0)) : trackingDistance,
-      referenceLineAtDistance: (s) => (isMatchingTrack && typeof this.referenceProfile?.paceAtDistance === 'function')
-        ? (this.referenceProfile.paceAtDistance(s)?.lineLateral ?? 0)
-        : 0
+      referenceLineAtDistance: (s) => {
+        if (isMatchingTrack && typeof this.referenceProfile?.paceAtDistance === 'function') {
+          return this.referenceProfile.paceAtDistance(s)?.lineLateral ?? fallbackGeometricLine;
+        }
+        const pt = track?.atDistance ? track.atDistance(s) : { curvature: 0 };
+        const curv = finite(pt.curvature, 0);
+        return clamp(-Math.sign(curv) * Math.min(2.4, Math.abs(curv) * 80.0), -2.5, 2.5);
+      }
     });
 
     const trackingPoint = this.trajectoryPlan.trackingPoint ?? this.trajectoryPlan.points.at(-1);
@@ -491,14 +497,17 @@ export class ResearchAIController {
     // 5. Longitudinal Target Speed & Dynamic Adjustments
     let desiredSpeed = physicalTargetSpeed;
 
-    // Cap speed based on chosen trajectory curvature (prototype aero downforce reaches 26.5 m/s² lateral budget)
+    // Cap speed based on chosen trajectory curvature with backward deceleration propagation
     const lateralAccelBudget = (vehicle.classKey === 'prototype' ? 26.5 : vehicle.classKey === 'gt' ? 17.5 : 13.5) * tireGripFactor;
+    const decelBudget = (vehicle.classKey === 'prototype' ? 14.5 : vehicle.classKey === 'gt' ? 8.5 : 6.2) * tireGripFactor;
     const trajectorySpeedLimit = this.trajectoryPlan.points.reduce((limit, p) => {
-      if ((p.forwardDistance ?? 0) < 4.0) return limit;
+      const fwd = Math.max(0, finite(p.forwardDistance, 0));
+      if (fwd < 2.0) return limit;
       const curv = Math.max(0, finite(p.curvature, 0));
       if (curv < 1e-4) return limit;
       const cornerSpeed = Math.sqrt(lateralAccelBudget / curv);
-      return Math.min(limit, cornerSpeed);
+      const reachableSpeed = Math.sqrt(cornerSpeed * cornerSpeed + 2.0 * decelBudget * fwd);
+      return Math.min(limit, reachableSpeed);
     }, physicalTargetSpeed);
 
     desiredSpeed = Math.min(desiredSpeed, trajectorySpeedLimit);
@@ -520,7 +529,8 @@ export class ResearchAIController {
       : 99;
 
     if (committed && passTarget) {
-      const isCornerApproach = Boolean(attDecision.inCorner) || (attDecision.distToCorner != null && attDecision.distToCorner < 85) || turnCurvature > 0.003;
+      const dynBrakingDist = Math.max(22.0, (vehicle.speed * vehicle.speed - 100) / (2.0 * decelBudget));
+      const isCornerApproach = Boolean(attDecision.inCorner) || (attDecision.distToCorner != null && attDecision.distToCorner < dynBrakingDist) || currentCurv > 0.003;
       const straightClosingFloor = 14.0 + clamp(this._aggression, 0, 1) * 4.0; // Up to +18.0 m/s closing floor on straights
       const cornerClosingFloor = Math.max(4.5, 7.5 * this._aggression);
       const closingFloor = (straightSend && !isCornerApproach) ? straightClosingFloor : cornerClosingFloor;
@@ -530,9 +540,11 @@ export class ResearchAIController {
       if (straightSend && !isCornerApproach) {
         desiredSpeed = Math.min(physicalTargetSpeed, Math.max(desiredSpeed, passTarget.other.speed + closingFloor));
       } else {
-        // In corners / braking zones, cap desiredSpeed strictly to physicalTargetSpeed to prevent sliding off-track
-        const cornerFloor = Math.min(physicalTargetSpeed, passTarget.other.speed + cornerClosingFloor);
-        desiredSpeed = Math.min(physicalTargetSpeed, Math.max(obstacleFloor, cornerFloor));
+        // In corners / braking zones, utilize full physical limit when separated laterally to complete the pass
+        const cornerFloor = (actualSeparation >= 1.8)
+          ? physicalTargetSpeed
+          : Math.min(physicalTargetSpeed, passTarget.other.speed + cornerClosingFloor);
+        desiredSpeed = Math.min(physicalTargetSpeed, Math.max(desiredSpeed, obstacleFloor, cornerFloor));
       }
     } else if (passTarget && passTarget.delta > 0 && passTarget.delta < 45 && !defending) {
       const isSlowObstacle = passTarget.other.speed < 16.0;
@@ -585,7 +597,8 @@ export class ResearchAIController {
       recovering,
       emergency,
       defending,
-      tireGripFactor
+      tireGripFactor,
+      dt
     });
 
     const dynamicControls = this.combatDynamics.process({
