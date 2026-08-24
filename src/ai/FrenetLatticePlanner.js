@@ -47,6 +47,7 @@ export class FrenetLatticePlanner {
   constructor({ pointCount = 24, horizonS = 3.4 } = {}) {
     this.pointCount = Math.max(12, Math.trunc(pointCount));
     this.horizonS = Math.max(2.8, finite(horizonS, 3.4));
+    this.lastSelectedOffset = null;
   }
 
   /**
@@ -102,24 +103,25 @@ export class FrenetLatticePlanner {
         ? track.atDistance(currentDistance)
         : { s: currentDistance, x: 0, y: 0, z: 0 };
 
+      const surfaceLimit = Math.min(
+        effectiveRoadMargin,
+        finite(track?.planningLateralLimit?.(reference.s, terminalLateral), effectiveRoadMargin) + kerbAllowance
+      );
+
+      const clampedTerminal = clamp(terminalLateral, -surfaceLimit, surfaceLimit);
       const followsReference = typeof referenceLineAtDistance === 'function'
-        && intentType === 'PRIMARY_INTENT'
-        && Math.abs(terminalLateral - desiredOffset) < 0.08;
+        && (intentType === 'PRIMARY_INTENT' || intentType === 'RACING_LINE')
+        && Math.abs(desiredOffset) < 0.25;
 
       const guidedLateral = followsReference
-        ? clamp(finite(referenceLineAtDistance(reference.s), terminalLateral), -effectiveRoadMargin, effectiveRoadMargin)
-        : terminalLateral;
+        ? clamp(finite(referenceLineAtDistance(reference.s), clampedTerminal), -surfaceLimit, surfaceLimit)
+        : clampedTerminal;
 
-      const lateral = startLateral + (guidedLateral - startLateral) * blend;
+      const unclampedLateral = startLateral + (guidedLateral - startLateral) * blend;
+      const lateral = clamp(unclampedLateral, -surfaceLimit, surfaceLimit);
 
       let world;
-      if (index === 0) {
-        world = {
-          x: finite(vehicle.position?.x, 0),
-          y: finite(vehicle.position?.y, 0) + 0.08,
-          z: finite(vehicle.position?.z, 0)
-        };
-      } else if (track?.lateralPoint) {
+      if (track?.lateralPoint) {
         world = track.lateralPoint(reference, lateral, 0.08);
       } else {
         world = {
@@ -129,13 +131,8 @@ export class FrenetLatticePlanner {
         };
       }
 
-      const surfaceLimit = Math.min(
-        effectiveRoadMargin,
-        finite(track?.planningLateralLimit?.(reference.s, lateral), effectiveRoadMargin) + kerbAllowance
-      );
-
-      if (Math.abs(lateral) > surfaceLimit) {
-        const excess = Math.abs(lateral) - surfaceLimit;
+      if (Math.abs(unclampedLateral) > surfaceLimit || Math.abs(terminalLateral) > surfaceLimit) {
+        const excess = Math.max(Math.abs(unclampedLateral) - surfaceLimit, Math.abs(terminalLateral) - surfaceLimit);
         roadViolation += excess + 1.0;
       }
 
@@ -247,6 +244,7 @@ export class FrenetLatticePlanner {
     const costJerk = (lateralDelta * 0.20 + (committed ? transitionTime * 1.0 : transitionTime * 0.22)) * wJerk;
     const costIntent = intentError * intentError * wIntent;
     const rewardProgress = -avgSpeed * wProg;
+    const costHysteresis = (this.lastSelectedOffset !== null && Math.abs(terminalLateral - this.lastSelectedOffset) < 0.25) ? -22.0 : 0;
 
     const totalScore = costRoadViolation
       + costCollision
@@ -255,7 +253,8 @@ export class FrenetLatticePlanner {
       + costJerk
       + costIntent
       + rewardProgress
-      + rewardWidth;
+      + rewardWidth
+      + costHysteresis;
 
     return {
       points,
@@ -432,6 +431,16 @@ export class FrenetLatticePlanner {
       b.futureMinimumClearanceM - a.futureMinimumClearanceM || a.score - b.score
     )[0];
 
+    this.lastSelectedOffset = selected.terminalLateral;
+
+    // Filter diagnostic candidates for 3D visualization: keep 1 best candidate per distinct lateral corridor
+    const visualCandidates = [];
+    for (const cand of candidateTrajectories) {
+      if (!visualCandidates.some((v) => Math.abs(v.terminalLateral - cand.terminalLateral) < 0.35)) {
+        visualCandidates.push(cand);
+      }
+    }
+
     // Compute pursuit tracking target point
     const pursuitDist = clamp(
       finite(trackingDistance, finite(lookAhead, 12) * 0.85),
@@ -461,7 +470,7 @@ export class FrenetLatticePlanner {
       maxCurvaturePerM: selected.maxCurvaturePerM,
       maxLateralAccelerationMps2: selected.maxLateralAccelerationMps2,
       intentType: selected.intentType,
-      candidates: candidateTrajectories, // Diagnostic candidate array for 3D visualization
+      candidates: visualCandidates, // Clean deduplicated candidate array for 3D visualization
       committed,
       recovering: Boolean(recovering)
     };

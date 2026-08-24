@@ -341,11 +341,13 @@ export class TacticalAttackEngine {
       const target = traffic.entries.find((e) => e.other.id === this.targetId) ?? null;
       this.age += dt;
 
-      // Completed pass: target is now behind
-      if (!target || target.delta < -4.8) {
+      // Completed pass: target is now cleared behind
+      const isPastLeadingEdge = target && target.delta < -2.2;
+      const passCompleted = !target || target.delta < -3.5 || (isPastLeadingEdge && this.age > 1.2);
+      if (passCompleted) {
         this.passedTargetId = this.targetId;
         this.targetLockTime = 16.0;
-        this._clear('RETURN', 0.4);
+        this._clear('RETURN', 0.5);
         return {
           phase: 'RETURN',
           desiredOffset: baseOffset,
@@ -376,6 +378,13 @@ export class TacticalAttackEngine {
           this.targetOffset = switchbackDecision.undercutOffset;
           this.switchbackStage = 'APEX_UNDERCUT';
         }
+      }
+
+      // When attacking inside or divebombing through a corner sequence, adapt target offset to the active turn sign
+      if ((this.phase === 'ATTACK_INSIDE' || this.divebombActive) && inCorner) {
+        const activeTurnSign = Math.sign(finite(turn?.turnSign, 1)) || 1;
+        const dynamicInsideOffset = clamp(-activeTurnSign * Math.min(3.2, baseRoadMargin * 0.65), -baseRoadMargin + 0.8, baseRoadMargin - 0.8);
+        this.targetOffset = dynamicInsideOffset;
       }
 
       const targetSpeed = Math.max(vehicle.speed, target.other.speed + 18.0);

@@ -94,8 +94,8 @@ export class PaceOptimizer {
   } = {}) {
     const vClass = vehicle?.classKey || 'prototype';
     // Calibrated physical sustained deceleration budget ensuring optimal braking point arrival
-    // Prototype: ~14.0 m/s² (-1.43G); GT: ~8.2 m/s² (-0.84G); Touring: ~5.4 m/s² (-0.55G)
-    const brakingDecel = (vClass === 'prototype' ? 14.0 : vClass === 'gt' ? 8.2 : 5.4) * tireGripFactor * (0.88 + (aggression - 0.5) * 0.10);
+    // Prototype: ~15.0 m/s² (-1.53G); GT: ~10.2 m/s² (-1.04G); Touring: ~6.8 m/s² (-0.69G)
+    const brakingDecel = (vClass === 'prototype' ? 14.8 : vClass === 'gt' ? 10.2 : 6.8) * tireGripFactor * (0.85 + aggression * 0.24);
     const speedEnvelopeDistances = [
       0, 3, 6, 9, 12, 16, 20, 24, 28, 33, 38, 44, 50, 56, 64, 72, 80, 90, 100, 112, 125, 140, 160, 185, 210, 240, 275, 310
     ];
@@ -187,7 +187,7 @@ export class PaceOptimizer {
     recovering = false,
     yielding = false
   } = {}) {
-    const isEmergencyTurnaround = recovering || Math.abs(finite(headingError)) > 0.95;
+    const isEmergencyTurnaround = recovering && Math.abs(finite(headingError)) > 1.8;
     const headingGain = isEmergencyTurnaround ? 2.80 : (committed ? 2.60 : 2.25);
     const yawDamping = isEmergencyTurnaround ? 0.18 : (committed ? 0.38 : 0.42);
 
@@ -196,8 +196,8 @@ export class PaceOptimizer {
     const maxUsableSteer = isEmergencyTurnaround
       ? 0.75
       : (committed
-        ? clamp(3.6 / Math.max(4.0, vSpeed) + 0.12, 0.12, 0.46)
-        : clamp(3.0 / Math.max(4.0, vSpeed) + 0.10, 0.08, 0.40));
+        ? clamp(3.2 / Math.max(3.5, vSpeed) + 0.12, 0.12, 0.48)
+        : clamp(2.8 / Math.max(3.5, vSpeed) + 0.10, 0.08, 0.44));
 
     // Direct pure-pursuit trajectory tracking with active yaw rate damping
     let target = clamp(
@@ -269,6 +269,7 @@ export class PaceOptimizer {
     }
 
     // 1. Dynamic Speed Demand & Smooth Progressive Threshold Braking (Zero Oscillation)
+    const vSpeed = finite(vehicle?.speed, 0);
     const steerMagnitude = saturate(Math.abs(finite(steerAngle, 0)));
     const latUtil = friction.latUtilization;
     const isCornering = !straight && (steerMagnitude > 0.18 || latUtil > 0.58);
@@ -315,11 +316,16 @@ export class PaceOptimizer {
       const latFactor = clamp(this.trailBrakingSkill * friction.latUtilization * 0.96, 0, 0.99);
       const trailFactor = Math.pow(Math.max(0.01, 1.0 - Math.pow(latFactor, 2)), 1.0 / trailExp);
       brake *= clamp(trailFactor, 0.05, 1.0);
+
+      // In deep cornering (latUtil > 0.55 or |steer| > 0.25), cap mid-corner brake demand to preserve lateral grip and momentum
+      if (friction.latUtilization > 0.55 || steerMagnitude > 0.25) {
+        const midCornerBrakeCeiling = vSpeed < 16.0 ? 0.15 : 0.35;
+        brake = Math.min(brake, midCornerBrakeCeiling);
+      }
     }
 
     // 3. Oversteer / Lateral Instability Control (Phase-Aware Yaw & Real Breakaway Slip)
     const rawSlip = finite(slipAngle, 0);
-    const vSpeed = finite(vehicle?.speed, 0);
     // Kinematic geometric body slip from steering lock at low-to-medium speeds
     const kinematicSlip = finite(steerAngle, 0) * 0.42 * saturate((24.0 - vSpeed) / 20.0);
     const dynamicExcessSlip = Math.abs(rawSlip - kinematicSlip);

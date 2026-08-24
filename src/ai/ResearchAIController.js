@@ -340,7 +340,8 @@ export class ResearchAIController {
       awareness: this.awareness,
       dt,
       baseLine: paceLine,
-      recovering
+      recovering,
+      passedTargetId: this.attackEngine.passedTargetId
     });
 
     const attDecision = this.attackEngine.update({
@@ -383,12 +384,19 @@ export class ResearchAIController {
       tacticalReason = attDecision.divebombing ? 'DIVEBOMB_CORNER_ENTRY'
         : attDecision.switchbacking ? 'SWITCHBACK_LATE_APEX'
         : `${attDecision.phase}_MANEUVER`;
+      if (this.defenseEngine.defending) {
+        this.defenseEngine._clear('NONE');
+      }
     } else if (defDecision.defending) {
       tacticalMode = 'DEFEND';
       targetOffset = defDecision.desiredOffset;
       targetId = defDecision.target?.other?.id ?? null;
       defending = true;
       tacticalReason = defDecision.reason;
+    } else if (attDecision.phase === 'RETURN') {
+      tacticalMode = 'PACE';
+      targetOffset = attDecision.desiredOffset;
+      tacticalReason = 'OVERTAKE_COMPLETE_RETURN';
     }
 
     // 3. Multi-Candidate Frenet Trajectory Planning
@@ -509,8 +517,10 @@ export class ResearchAIController {
     let desiredSpeed = physicalTargetSpeed;
 
     // Cap speed based on chosen trajectory curvature with backward deceleration propagation
-    const lateralAccelBudget = (vehicle.classKey === 'prototype' ? 26.5 : vehicle.classKey === 'gt' ? 12.8 : 10.8) * tireGripFactor;
-    const decelBudget = (vehicle.classKey === 'prototype' ? 14.5 : vehicle.classKey === 'gt' ? 8.5 : 6.2) * tireGripFactor;
+    const speedAero = vehicle.classKey === 'prototype' ? clamp((vehicle.speed - 16.0) / 32.0, 0, 1) : 0;
+    const baseClassG = (vehicle.classKey === 'prototype' ? (1.80 + 0.85 * speedAero) : vehicle.classKey === 'gt' ? 1.25 : 0.98) * 9.81;
+    const lateralAccelBudget = baseClassG * tireGripFactor * (committed ? 1.08 : 1.0);
+    const decelBudget = (vehicle.classKey === 'prototype' ? 14.5 : vehicle.classKey === 'gt' ? 9.8 : 6.8) * tireGripFactor;
     const trajectorySpeedLimit = this.trajectoryPlan.points.reduce((limit, p) => {
       const fwd = Math.max(0, finite(p.forwardDistance, 0));
       if (fwd < 2.0) return limit;

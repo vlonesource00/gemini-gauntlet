@@ -93,15 +93,25 @@ export class TacticalDefenseEngine {
   /**
    * Multi-Metric Composite Threat Assessment T(t) in [0.0, 1.0].
    */
-  assessThreat({ vehicle, traffic, track }) {
+  assessThreat({ vehicle, traffic, track, passedTargetId = null }) {
     if (!traffic?.entries?.length) {
       return { challenger: null, threatLevel: 'NONE', threatScore: 0, closingSpeed: 0, ttc: 99, gap: 99, distToCorner: 999, turn: null, turnCurvature: 0 };
     }
 
     const roadMargin = Math.max(2.1, finite(track?.roadHalfWidth, 6.5) - 1.35);
     const challenger = traffic.entries
-      .filter((e) => e.delta < -0.8 && e.delta > -55.0
-        && e.longitudinal < 2.5 && Math.abs(e.side) < roadMargin * 2 + 1.0)
+      .filter((e) => {
+        if (e.delta >= -0.8 || e.delta <= -55.0 || e.longitudinal >= 2.5 || Math.abs(e.side) >= roadMargin * 2 + 1.0) {
+          return false;
+        }
+        if (passedTargetId && e.other.id === passedTargetId) {
+          const closing = e.otherForwardSpeed - traffic.egoForwardSpeed;
+          if (Math.abs(e.delta) > 5.5 || closing <= 0.4) {
+            return false;
+          }
+        }
+        return true;
+      })
       .sort((a, b) => b.delta - a.delta)[0] ?? null;
 
     if (!challenger) {
@@ -132,19 +142,19 @@ export class TacticalDefenseEngine {
     const fLat = 1.0 - saturate((lateralDelta - 1.4) / 10.0);
     const fCorner = Math.exp(-distToCorner / 45.0) * saturate(turnCurvature / 0.0028);
 
-    // Proactive door shutting trigger: within 45m and closing
-    const isClosingIn45m = gap <= 45.0 && (closingSpeed >= -0.25 || gap < 28.0 || distToCorner < 80);
-    const proactiveBoost = isClosingIn45m ? 0.38 : 0;
+    // Proactive door shutting trigger: within striking distance or actively closing
+    const isClosingThreat = (gap < 9.0) || (gap <= 30.0 && closingSpeed >= 0.25) || (gap <= 45.0 && closingSpeed >= 1.2 && distToCorner < 75);
+    const proactiveBoost = isClosingThreat ? 0.30 : 0;
 
-    // Non-linear synergy boost when closing rapidly into a braking zone or inside 45m zone
+    // Non-linear synergy boost when closing rapidly into a braking zone
     const synergy = fClose * fCorner * 0.28 + proactiveBoost;
 
     const rawThreat = 0.20 * fGap + 0.22 * fClose + 0.24 * fTtc + 0.14 * fLat + 0.15 * fCorner + synergy;
     const threatScore = saturate(rawThreat * (0.85 + this.defenseReactivity * 0.35));
 
-    // Schmitt-Trigger Posture Hysteresis with instant critical posture for closing threats within 45m
+    // Schmitt-Trigger Posture Hysteresis with instant critical posture for closing threats within striking distance
     let threatLevel = this.threatLevel;
-    if (threatScore >= 0.65 || (isClosingIn45m && threatScore >= 0.38)) {
+    if (threatScore >= 0.65 || (isClosingThreat && threatScore >= 0.40)) {
       threatLevel = 'CRITICAL';
     } else if (threatScore >= 0.45 && (this.threatLevel !== 'CRITICAL' || threatScore < 0.60)) {
       threatLevel = 'HIGH';
@@ -230,7 +240,8 @@ export class TacticalDefenseEngine {
     awareness,
     dt,
     baseLine = 0,
-    recovering = false
+    recovering = false,
+    passedTargetId = null
   }) {
     this.timer = Math.max(0, this.timer - dt);
     this.cooldown = Math.max(0, this.cooldown - dt);
@@ -263,7 +274,7 @@ export class TacticalDefenseEngine {
     }
 
     const { challenger, threatLevel, threatScore, closingSpeed, ttc, gap, distToCorner, turn, turnCurvature } =
-      this.assessThreat({ vehicle, traffic, track });
+      this.assessThreat({ vehicle, traffic, track, passedTargetId });
     this.threatLevel = threatLevel;
     this.threatScore = threatScore;
 
@@ -308,11 +319,11 @@ export class TacticalDefenseEngine {
 
       // Check if defense completed or challenger backed off
       const passed = target && target.delta > 2.5;
-      const challengerBackedOff = !target || (target.delta < -35.0 && closingSpeed < 0.2);
-      if (passed || challengerBackedOff || (this.age > 18.0 && !isRubbingPressure)) {
-        this._clear('NONE');
+      const challengerBackedOff = !target || (target.delta < -18.0 && closingSpeed < 0.3) || (target.delta < -12.0 && closingSpeed < -0.4);
+      if (passed || challengerBackedOff || (this.age > 6.0 && !isRubbingPressure)) {
+        this._clear('RETURN_PACE', 0.5);
         return {
-          phase: 'NONE',
+          phase: 'RETURN_PACE',
           desiredOffset: nominalBase,
           defending: false,
           target,
@@ -338,12 +349,43 @@ export class TacticalDefenseEngine {
 
       // FIA single-move locked direction (prevent weaving, ignore challenger feints)
       const committedSign = this.defenseDirection || (this.targetOffset !== 0 ? Math.sign(this.targetOffset) : insideSign);
-      const isOutsideCommitted = committedSign === outsideSign;
+      const isOutsideCommitted = this.defenseDirection !== 0 && this.defenseDirection === outsideSign;
 
       // Dynamic Phase Transitions through Corner Phases
-      if (distToCorner > 65 && this.towBreakTimer > 0 && !isRubbingPressure) {
-        // Aerodynamic tow break on long straights
-        this.phase = 'BREAK_TOW';
+      if (distToCorner > 65) {
+        if (this.towBreakTimer > 0 && !isRubbingPressure) {
+          // Aerodynamic tow break on long straights
+          this.phase = 'BREAK_TOW';
+        } else if (gap < 24.0 && (closingSpeed > 0.6 || threatLevel === 'CRITICAL')) {
+          // Proactive inside cover on straight approach
+          this.phase = 'LOCK_DEFENSIVE_LANE';
+          this.targetOffset = clamp(committedSign * Math.min(2.5, roadMargin * 0.50), -roadMargin + 1.0, roadMargin - 1.0);
+          this.committedDefensiveOffset = this.targetOffset;
+        } else {
+          // On open straightaways without immediate dive threat, release defense smoothly
+          this._clear('RETURN_PACE', 0.5);
+          return {
+            phase: 'RETURN_PACE',
+            desiredOffset: nominalBase,
+            defending: false,
+            target,
+            threatLevel: 'NONE',
+            threatScore: 0,
+            attackerIntent: 'NONE',
+            closingSpeed,
+            ttc,
+            gap,
+            lockedLane: false,
+            ersDeployRequested: false,
+            ersDeployReason: 'NONE',
+            rubbingPressure: 0,
+            reason: 'DEFENSE_RELEASE_STRAIGHT'
+          };
+        }
+      } else if (gap > 12.0 && inCorner) {
+        // When challenger is not within immediate striking distance in corner complex, take racing line
+        this.phase = 'PACE_DEFEND';
+        this.targetOffset = nominalBase;
       } else if ((attackerIntent === 'ATTACK_OUTSIDE_MOMENTUM' || isOutsideCommitted) && (inCorner || distToCorner <= 45)) {
         // Outside Defense Squeeze: Smoothly drift out to leave exactly 1 car width (2.2m) at the track boundary
         this.phase = 'EXIT_SQUEEZE';
@@ -368,19 +410,26 @@ export class TacticalDefenseEngine {
         this.targetOffset = clamp(committedSign * 0.50, -roadMargin + 1.0, roadMargin - 1.0);
         this.committedDefensiveOffset = this.targetOffset;
       } else if (inCorner || distToCorner <= 14) {
-        const isCurrentOutside = (currentLateral * outsideSign) > 0.8;
-        if (isCurrentOutside || isOutsideCommitted) {
-          this.phase = 'EXIT_SQUEEZE';
-          const outsideSqueezeOffset = clamp(committedSign * Math.min(2.8, roadMargin - 2.4), -roadMargin + 1.0, roadMargin - 1.0);
-          this.targetOffset = outsideSqueezeOffset;
-          this.committedDefensiveOffset = outsideSqueezeOffset;
-        } else {
-          // Physical Apex Shielding: Pin inside line tight to apex curb (0.35m margin)
-          // Completely denying challenger inside room through corner apexes
+        if (inCorner) {
+          // Physical Apex Shielding through corner sequences & chicanes:
+          // Shield the inside apex of the immediate turn being negotiated
           this.phase = 'APEX_SHIELD';
-          const apexShieldOffset = clamp(committedSign * Math.min(2.8, roadMargin * 0.50), -roadMargin + 1.0, roadMargin - 1.0);
+          const apexShieldOffset = clamp(insideSign * Math.min(2.8, roadMargin * 0.50), -roadMargin + 1.0, roadMargin - 1.0);
           this.targetOffset = apexShieldOffset;
           this.committedDefensiveOffset = apexShieldOffset;
+        } else {
+          const isCurrentOutside = (currentLateral * outsideSign) > 0.8;
+          if (isCurrentOutside || isOutsideCommitted) {
+            this.phase = 'EXIT_SQUEEZE';
+            const outsideSqueezeOffset = clamp(committedSign * Math.min(2.8, roadMargin - 2.4), -roadMargin + 1.0, roadMargin - 1.0);
+            this.targetOffset = outsideSqueezeOffset;
+            this.committedDefensiveOffset = outsideSqueezeOffset;
+          } else {
+            this.phase = 'APEX_SHIELD';
+            const apexShieldOffset = clamp(committedSign * Math.min(2.8, roadMargin * 0.50), -roadMargin + 1.0, roadMargin - 1.0);
+            this.targetOffset = apexShieldOffset;
+            this.committedDefensiveOffset = apexShieldOffset;
+          }
         }
       }
 
@@ -432,13 +481,12 @@ export class TacticalDefenseEngine {
       };
     }
 
-    // Proactive Triggering: When challenger is within 45m and closing (or high threat), defend with zero hesitation
-    const isClosing = closingSpeed >= -0.25;
-    const isWithin45mClosing = challenger && gap <= 45.0 && isClosing;
+    // Proactive Triggering: Only defend against genuine closing threats or close proximity
+    const isThreatening = threatLevel === 'CRITICAL' || threatLevel === 'HIGH' || (gap < 12.0 && closingSpeed > -0.4) || (gap < 24.0 && closingSpeed > 0.6);
     const shouldDefend = challenger
-      && (isWithin45mClosing || threatLevel !== 'NONE' || threatScore >= 0.18 || gap < 30.0)
+      && isThreatening
       && traffic.egoForwardSpeed > 4.0
-      && (isWithin45mClosing || this.cooldown <= 0);
+      && this.cooldown <= 0;
 
     if (!shouldDefend) {
       return {
@@ -460,8 +508,8 @@ export class TacticalDefenseEngine {
       };
     }
 
-    // If within 45m and closing, clear cooldown for immediate zero-hesitation response
-    if (isWithin45mClosing) {
+    // If threatening, clear cooldown for immediate zero-hesitation response
+    if (isThreatening) {
       this.cooldown = 0;
     }
 
