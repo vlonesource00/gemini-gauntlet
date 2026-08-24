@@ -190,13 +190,18 @@ export class PaceOptimizer {
     const headingGain = isEmergencyTurnaround ? 2.80 : (committed ? 2.60 : 2.25);
     const yawDamping = isEmergencyTurnaround ? 0.18 : (committed ? 0.38 : 0.42);
 
-    const vSpeed = finite(speed, 0);
-    // Speed-dependent steering limit prevents destructive front tire saturation scrub and high-speed yaw snaps
+    const vSpeed = Math.max(3.0, finite(speed, 0));
+    // Physical dynamic lateral grip steering limit prevents front tire saturation and snap oversteer:
+    // delta_max = (wheelbase * a_lat_max) / v^2 + slip_budget
+    const classLatG = committed ? 16.8 : 14.2;
+    const wheelbase = 2.75;
+    const physSteerLimit = (wheelbase * classLatG) / (vSpeed * vSpeed) + (committed ? 0.12 : 0.06);
+
     const maxUsableSteer = isEmergencyTurnaround
       ? 0.75
       : (committed
-        ? clamp(3.8 / Math.max(4.0, vSpeed) + 0.06, 0.10, 0.42)
-        : clamp(3.2 / Math.max(4.0, vSpeed) + 0.05, 0.08, 0.38));
+        ? clamp(physSteerLimit, 0.08, 0.45)
+        : clamp(physSteerLimit, 0.05, 0.38));
 
     // Direct pure-pursuit trajectory tracking with active yaw rate damping
     let target = clamp(

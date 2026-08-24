@@ -371,14 +371,14 @@ export class TacticalDefenseEngine {
         const isCurrentOutside = (currentLateral * outsideSign) > 0.8;
         if (isCurrentOutside || isOutsideCommitted) {
           this.phase = 'EXIT_SQUEEZE';
-          const outsideSqueezeOffset = clamp(outsideSign * Math.min(2.8, roadMargin - 2.4), -roadMargin + 1.0, roadMargin - 1.0);
+          const outsideSqueezeOffset = clamp(committedSign * Math.min(2.8, roadMargin - 2.4), -roadMargin + 1.0, roadMargin - 1.0);
           this.targetOffset = outsideSqueezeOffset;
           this.committedDefensiveOffset = outsideSqueezeOffset;
         } else {
           // Physical Apex Shielding: Pin inside line tight to apex curb (0.35m margin)
           // Completely denying challenger inside room through corner apexes
           this.phase = 'APEX_SHIELD';
-          const apexShieldOffset = clamp(insideSign * Math.min(2.8, roadMargin * 0.50), -roadMargin + 1.0, roadMargin - 1.0);
+          const apexShieldOffset = clamp(committedSign * Math.min(2.8, roadMargin * 0.50), -roadMargin + 1.0, roadMargin - 1.0);
           this.targetOffset = apexShieldOffset;
           this.committedDefensiveOffset = apexShieldOffset;
         }
