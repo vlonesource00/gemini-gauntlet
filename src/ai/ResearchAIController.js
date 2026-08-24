@@ -268,9 +268,9 @@ export class ResearchAIController {
     // 1. Perception
     const traffic = this.awareness.scan(vehicle, vehicles, track);
     const current = traffic.current;
-    const isOffTrack = offRoad(current);
-
     const roadHalfWidth = finite(track?.roadHalfWidth, 6.5);
+    const isOffTrack = offRoad(current) || offRoad(vehicle.surface) || Math.abs(finite(current?.lateral, 0)) > (roadHalfWidth + 0.35);
+
     const baseRoadMargin = Math.max(2.1, Math.min(4.8, roadHalfWidth - 2.0));
     const kerbAllowance = this._kerbUsage * Math.min(0.65, finite(track?.curbWidth, 0.8) * 0.5);
     const plannedRoadMargin = baseRoadMargin + kerbAllowance;
@@ -464,7 +464,7 @@ export class ResearchAIController {
     const trackPointAtCar = track?.atDistance ? track.atDistance(vehicle.distance) : { tangent: { x: 0, z: 1 } };
     const trackHeadingAtCar = Math.atan2(trackPointAtCar.tangent.x, trackPointAtCar.tangent.z);
     const yawAlignment = wrapAngle(vehicle.yaw - trackHeadingAtCar);
-    const isFacingBackwards = Math.abs(yawAlignment) > Math.PI * 0.55;
+    const isFacingBackwards = Math.abs(yawAlignment) > Math.PI * 0.78;
 
     const currentLateralVal = finite(current?.lateral, 0);
     let headingError = wrapAngle(
@@ -480,7 +480,7 @@ export class ResearchAIController {
       headingError = wrapAngle(targetRejoinAngle - vehicle.yaw);
     }
 
-    // If spun backwards, command decisive turn-around lock
+    // If genuinely spun backwards (> 140 deg), command decisive turn-around lock
     if (isFacingBackwards) {
       headingError = Math.sign(yawAlignment) * -1.2;
     }
@@ -616,11 +616,6 @@ export class ResearchAIController {
       tireGripFactor,
       dt
     });
-
-    if (isFacingBackwards) {
-      pedals.throttle = Math.min(pedals.throttle, 0.10);
-      pedals.brake = Math.max(pedals.brake, 0.35);
-    }
 
     const dynamicControls = this.combatDynamics.process({
       vehicle,

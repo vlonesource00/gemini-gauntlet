@@ -61,7 +61,7 @@ export class PaceOptimizer {
       : vehicleClass === 'gt'
         ? clamp(1.0 + 0.00008 * vEst * vEst, 1.0, 1.20)
         : 1.0;
-    const classBaseG = vehicleClass === 'prototype' ? (1.80 + 0.90 * downforceFactor) : vehicleClass === 'gt' ? 1.30 : 1.10;
+    const classBaseG = vehicleClass === 'prototype' ? (1.80 + 0.90 * downforceFactor) : vehicleClass === 'gt' ? 1.25 : 0.98;
     const peakG = classBaseG * tireGripFactor * aeroDownforceMultiplier * (0.86 + skill * 0.14);
     const g = 9.81;
 
@@ -71,7 +71,8 @@ export class PaceOptimizer {
     const bankCarry = Math.sin(bankAngle) * (vehicleClass === 'prototype' ? 1.35 : 1.05);
     const effectiveLatAccel = g * (peakG * Math.cos(bankAngle) + bankCarry);
 
-    return Math.sqrt(effectiveLatAccel / kappa);
+    const classMargin = vehicleClass === 'prototype' ? 1.0 : vehicleClass === 'gt' ? 0.96 : 0.88;
+    return Math.sqrt(effectiveLatAccel / kappa) * classMargin;
   }
 
   /**
@@ -93,8 +94,8 @@ export class PaceOptimizer {
   } = {}) {
     const vClass = vehicle?.classKey || 'prototype';
     // Calibrated physical sustained deceleration budget ensuring optimal braking point arrival
-    // Prototype: ~14.5 m/s² (-1.48G); GT: ~8.5 m/s² (-0.87G); Touring: ~6.2 m/s² (-0.63G)
-    const brakingDecel = (vClass === 'prototype' ? 14.5 : vClass === 'gt' ? 8.5 : 6.2) * tireGripFactor * (0.92 + (aggression - 0.5) * 0.10);
+    // Prototype: ~14.0 m/s² (-1.43G); GT: ~8.2 m/s² (-0.84G); Touring: ~5.4 m/s² (-0.55G)
+    const brakingDecel = (vClass === 'prototype' ? 14.0 : vClass === 'gt' ? 8.2 : 5.4) * tireGripFactor * (0.88 + (aggression - 0.5) * 0.10);
     const speedEnvelopeDistances = [
       0, 3, 6, 9, 12, 16, 20, 24, 28, 33, 38, 44, 50, 56, 64, 72, 80, 90, 100, 112, 125, 140, 160, 185, 210, 240, 275, 310
     ];
@@ -191,17 +192,12 @@ export class PaceOptimizer {
     const yawDamping = isEmergencyTurnaround ? 0.18 : (committed ? 0.38 : 0.42);
 
     const vSpeed = Math.max(3.0, finite(speed, 0));
-    // Physical dynamic lateral grip steering limit prevents front tire saturation and snap oversteer:
-    // delta_max = (wheelbase * a_lat_max) / v^2 + slip_budget
-    const classLatG = committed ? 16.8 : 14.2;
-    const wheelbase = 2.75;
-    const physSteerLimit = (wheelbase * classLatG) / (vSpeed * vSpeed) + (committed ? 0.12 : 0.06);
-
+    // Speed-dependent steering limit calibrated for precise line tracking and zero high-speed understeer/snap
     const maxUsableSteer = isEmergencyTurnaround
       ? 0.75
       : (committed
-        ? clamp(physSteerLimit, 0.08, 0.45)
-        : clamp(physSteerLimit, 0.05, 0.38));
+        ? clamp(3.6 / Math.max(4.0, vSpeed) + 0.12, 0.12, 0.46)
+        : clamp(3.0 / Math.max(4.0, vSpeed) + 0.10, 0.08, 0.40));
 
     // Direct pure-pursuit trajectory tracking with active yaw rate damping
     let target = clamp(

@@ -67,25 +67,24 @@ export class CombatDynamicsEngine {
     // =========================================================================
     // Dynamic breakaway threshold: Prototype tires generate peak lateral load at ~6.5° (0.115 rad).
     // Genuine oversteer breakaway occurs at > 7.5° (0.130 rad).
-    // Oversteer breakaway occurs when rear tire saturation exceeds critical threshold (> 11.5° / 0.20 rad) with diverging yaw rate
+    // Oversteer breakaway occurs when rear tire saturation exceeds critical threshold (> 18° / 0.32 rad) with diverging yaw rate
     const absSlip = Math.abs(slipAngle);
-    const isSpinBreakaway = absSlip > 0.20 && Math.abs(yawRate) > 0.60;
+    const isSpinBreakaway = absSlip > 0.32 && Math.abs(yawRate) > 1.25;
     this.powerSlideActive = false;
 
-    if (isSpinBreakaway && vSpeed > 2.0) {
+    if (isSpinBreakaway && vSpeed > 3.0) {
       this.powerSlideActive = true;
-      const excessSlip = absSlip - 0.20;
+      const excessSlip = absSlip - 0.32;
 
-      const maxCounterSteer = clamp(4.2 / Math.max(4.0, vSpeed) + 0.08, 0.14, 0.55);
-      // Active countersteer in direction of yaw rate to arrest yaw angular momentum
-      const counterSteer = Math.sign(yawRate) * clamp(excessSlip * 1.6 + Math.abs(yawRate) * 0.14, 0.04, maxCounterSteer);
+      const maxCounterSteer = clamp(3.6 / Math.max(4.0, vSpeed) + 0.08, 0.12, 0.45);
+      // Active countersteer opposite to yaw rate to arrest yaw angular momentum
+      const counterSteer = -Math.sign(yawRate) * clamp(excessSlip * 1.2 + Math.abs(yawRate) * 0.10, 0.05, maxCounterSteer);
       
-      // Override turn-in with direct counter-steer lock
       steer = clamp(counterSteer, -maxCounterSteer, maxCounterSteer);
 
-      // Stability throttle: modulate torque to allow rear tires to regain lateral adhesion without snap lift-off
+      // Stability throttle: maintain drive torque to prevent snap lift-off oversteer
       if (brake < 0.05) {
-        throttle = absSlip > 0.40 ? Math.min(throttle, 0.15) : clamp(throttle, 0.10, 0.40);
+        throttle = clamp(throttle, 0.25, 0.65);
       }
     }
 
