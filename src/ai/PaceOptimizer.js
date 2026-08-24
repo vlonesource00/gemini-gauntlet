@@ -109,7 +109,10 @@ export class PaceOptimizer {
       let curvature = rawCurvature / flattenFactor;
 
       if (Math.abs(insideLineOffset) > 0.5 && curvature > 1e-4) {
-        curvature = curvature / Math.max(0.40, 1.0 - Math.abs(insideLineOffset) * curvature);
+        const isInsideOffset = (Math.sign(point.curvature) * insideLineOffset) < 0;
+        if (isInsideOffset) {
+          curvature = curvature / Math.max(0.45, 1.0 - Math.min(0.55, Math.abs(insideLineOffset) * curvature));
+        }
       }
 
       const safetyFactor = aggression > 0.80 ? 1.00 : (defending ? 0.95 : 0.97);
@@ -178,12 +181,13 @@ export class PaceOptimizer {
     recovering = false,
     yielding = false
   } = {}) {
-    const headingGain = recovering ? 2.80 : committed ? 2.60 : 2.25;
-    const yawDamping = recovering ? 0.25 : (committed ? 0.38 : 0.42);
+    const isEmergencyTurnaround = recovering || Math.abs(finite(headingError)) > 0.95;
+    const headingGain = isEmergencyTurnaround ? 2.80 : (committed ? 2.60 : 2.25);
+    const yawDamping = isEmergencyTurnaround ? 0.18 : (committed ? 0.38 : 0.42);
 
     const vSpeed = finite(speed, 0);
     // Speed-dependent steering limit prevents destructive front tire saturation scrub and high-speed yaw snaps
-    const maxUsableSteer = recovering
+    const maxUsableSteer = isEmergencyTurnaround
       ? 0.75
       : (committed
         ? clamp(3.8 / Math.max(4.0, vSpeed) + 0.06, 0.10, 0.42)
@@ -200,7 +204,7 @@ export class PaceOptimizer {
 
     // Fast unwind rate when returning to center prevents yaw overshoots
     const isUnwinding = Math.sign(target) !== Math.sign(finite(previous)) || Math.abs(target) < Math.abs(finite(previous));
-    const rate = isUnwinding ? 18.0 : (committed ? 10.0 : 8.0);
+    const rate = isUnwinding ? 18.0 : (isEmergencyTurnaround ? 16.0 : (committed ? 10.0 : 8.0));
     const maxDelta = rate * clamp(finite(dt, 0.016), 0, 0.1);
 
     return clamp(

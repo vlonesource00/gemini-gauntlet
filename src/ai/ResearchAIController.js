@@ -271,8 +271,8 @@ export class ResearchAIController {
     const isOffTrack = offRoad(current);
 
     const roadHalfWidth = finite(track?.roadHalfWidth, 6.5);
-    const baseRoadMargin = Math.max(2.1, Math.min(5.4, roadHalfWidth - 1.6));
-    const kerbAllowance = this._kerbUsage * Math.min(0.8, finite(track?.curbWidth, 0.8) * 0.6);
+    const baseRoadMargin = Math.max(2.1, Math.min(4.8, roadHalfWidth - 2.0));
+    const kerbAllowance = this._kerbUsage * Math.min(0.65, finite(track?.curbWidth, 0.8) * 0.5);
     const plannedRoadMargin = baseRoadMargin + kerbAllowance;
 
     // Track boundary deviation and stall recovery
@@ -404,7 +404,8 @@ export class ResearchAIController {
       ? clamp(10.0 + vehicle.speed * 0.42, 10.0, 20.0)
       : clamp(11.0 + vehicle.speed * 0.58, 12.0, 30.0);
 
-    const trackingDistance = clamp(lookAheadDist * 0.72 / (1.0 + currentCurv * 20.0), 5.5, 24.0);
+    const kappa = Math.abs(finite(currentCurv, 0));
+    const trackingDistance = clamp(lookAheadDist * 0.72 / (1.0 + kappa * 8.0), 8.5, 24.0);
 
     const maxTireWear = Math.max(0, ...(vehicle.wheels ?? []).map((w) => finite(w.wear, 0)));
     const tireGripFactor = clamp(1.0 - maxTireWear * 0.50, 0.80, 1.0);
@@ -435,18 +436,18 @@ export class ResearchAIController {
       targetId,
       recovering,
       pitActive: Boolean(vehicle.pitIntent?.active),
-      urgent: committed || defending,
+      urgent: committed || defending || isOffTrack,
       roadMargin: plannedRoadMargin,
       kerbAllowance,
       lookAhead: lookAheadDist,
-      trackingDistance: (committed || defending) ? Math.max(trackingDistance, clamp(vehicle.speed * 0.95, 12.0, 24.0)) : trackingDistance,
+      trackingDistance,
       referenceLineAtDistance: (s) => {
         if (isMatchingTrack && typeof this.referenceProfile?.paceAtDistance === 'function') {
-          return this.referenceProfile.paceAtDistance(s)?.lineLateral ?? fallbackGeometricLine;
+          return this.referenceProfile.paceAtDistance(s)?.lineLateral ?? 0;
         }
         const pt = track?.atDistance ? track.atDistance(s) : { curvature: 0 };
         const curv = finite(pt.curvature, 0);
-        return clamp(-Math.sign(curv) * Math.min(2.4, Math.abs(curv) * 80.0), -2.5, 2.5);
+        return clamp(-Math.sign(curv) * Math.min(2.4, Math.abs(curv) * 35.0), -2.5, 2.5);
       }
     });
 
@@ -465,16 +466,23 @@ export class ResearchAIController {
     const yawAlignment = wrapAngle(vehicle.yaw - trackHeadingAtCar);
     const isFacingBackwards = Math.abs(yawAlignment) > Math.PI * 0.55;
 
+    const currentLateralVal = finite(current?.lateral, 0);
     let headingError = wrapAngle(
       Math.atan2(targetPos.x - vehicle.position.x, targetPos.z - vehicle.position.z) - vehicle.yaw
     );
 
-    // If spun backwards during off-track recovery, command decisive turn-around lock
-    if (recovering && isFacingBackwards) {
+    // Orientation-aware shallow rejoin when off-track
+    if (recovering || isOffTrack) {
+      const rejoinHeading = trackHeadingAtCar - clamp(currentLateralVal * 0.12, -0.42, 0.42);
+      headingError = wrapAngle(rejoinHeading - vehicle.yaw);
+    }
+
+    // If spun backwards, command decisive turn-around lock
+    if (isFacingBackwards) {
       headingError = Math.sign(yawAlignment) * -1.2;
     }
 
-    const lateralError = finite(current?.lateral, 0) - plannedTargetOffset;
+    const lateralError = currentLateralVal - plannedTargetOffset;
 
     const liveSlip = Math.atan2(
       finite(vehicle.localVelocity?.x, 0),
@@ -498,7 +506,7 @@ export class ResearchAIController {
     let desiredSpeed = physicalTargetSpeed;
 
     // Cap speed based on chosen trajectory curvature with backward deceleration propagation
-    const lateralAccelBudget = (vehicle.classKey === 'prototype' ? 26.5 : vehicle.classKey === 'gt' ? 17.5 : 13.5) * tireGripFactor;
+    const lateralAccelBudget = (vehicle.classKey === 'prototype' ? 26.5 : vehicle.classKey === 'gt' ? 12.8 : 10.8) * tireGripFactor;
     const decelBudget = (vehicle.classKey === 'prototype' ? 14.5 : vehicle.classKey === 'gt' ? 8.5 : 6.2) * tireGripFactor;
     const trajectorySpeedLimit = this.trajectoryPlan.points.reduce((limit, p) => {
       const fwd = Math.max(0, finite(p.forwardDistance, 0));
@@ -529,27 +537,32 @@ export class ResearchAIController {
       : 99;
 
     if (committed && passTarget) {
-      const dynBrakingDist = Math.max(22.0, (vehicle.speed * vehicle.speed - 100) / (2.0 * decelBudget));
-      const isCornerApproach = Boolean(attDecision.inCorner) || (attDecision.distToCorner != null && attDecision.distToCorner < dynBrakingDist) || currentCurv > 0.003;
+      const isCornerApproach = Boolean(attDecision.inCorner) || (attDecision.distToCorner != null && attDecision.distToCorner < 85) || Math.abs(currentCurv) > 0.003;
       const straightClosingFloor = 14.0 + clamp(this._aggression, 0, 1) * 4.0; // Up to +18.0 m/s closing floor on straights
       const cornerClosingFloor = Math.max(4.5, 7.5 * this._aggression);
-      const closingFloor = (straightSend && !isCornerApproach) ? straightClosingFloor : cornerClosingFloor;
+      const isOverlappingLane = actualSeparation < 1.6 && passTarget.delta < 14.0;
+      const closingFloor = (straightSend && !isCornerApproach && !isOverlappingLane) ? straightClosingFloor : cornerClosingFloor;
       const isSlowObstacle = passTarget.other.speed < 16.0;
       const obstacleFloor = isSlowObstacle ? Math.min(physicalTargetSpeed, Math.max(14.0, passTarget.other.speed + 10.0)) : 0;
 
-      if (straightSend && !isCornerApproach) {
+      if (straightSend && !isCornerApproach && !isOverlappingLane) {
         desiredSpeed = Math.min(physicalTargetSpeed, Math.max(desiredSpeed, passTarget.other.speed + closingFloor));
       } else {
-        // In corners / braking zones, utilize full physical limit when separated laterally to complete the pass
-        const cornerFloor = (actualSeparation >= 1.8)
-          ? physicalTargetSpeed
-          : Math.min(physicalTargetSpeed, passTarget.other.speed + cornerClosingFloor);
-        desiredSpeed = Math.min(physicalTargetSpeed, Math.max(desiredSpeed, obstacleFloor, cornerFloor));
+        // In corners / braking zones, cap desiredSpeed strictly to physicalTargetSpeed to prevent sliding off-track
+        if (isOverlappingLane) {
+          const followFloor = Math.max(obstacleFloor, passTarget.other.speed + clamp((passTarget.delta - 6.5) * 0.75, -6.0, 3.0));
+          desiredSpeed = Math.min(desiredSpeed, followFloor);
+        } else {
+          const cornerFloor = Math.min(physicalTargetSpeed, passTarget.other.speed + cornerClosingFloor);
+          desiredSpeed = Math.min(physicalTargetSpeed, Math.max(obstacleFloor, cornerFloor));
+        }
       }
     } else if (passTarget && passTarget.delta > 0 && passTarget.delta < 45 && !defending) {
       const isSlowObstacle = passTarget.other.speed < 16.0;
       const isAttackingPhase = attDecision.phase !== 'NONE' && attDecision.phase !== 'RETURN';
-      if (isAttackingPhase || this._aggression > 0.8) {
+      const isCornerApproach = Boolean(attDecision.inCorner) || (attDecision.distToCorner != null && attDecision.distToCorner < 85) || Math.abs(currentCurv) > 0.003;
+
+      if ((isAttackingPhase || this._aggression > 0.8) && !isCornerApproach) {
         const straightClosingFloor = 14.0 + clamp(this._aggression, 0, 1) * 4.0;
         desiredSpeed = Math.min(physicalTargetSpeed, Math.max(desiredSpeed, passTarget.other.speed + straightClosingFloor));
       } else if (isSlowObstacle) {
@@ -600,6 +613,11 @@ export class ResearchAIController {
       tireGripFactor,
       dt
     });
+
+    if (isFacingBackwards) {
+      pedals.throttle = Math.min(pedals.throttle, 0.10);
+      pedals.brake = Math.max(pedals.brake, 0.35);
+    }
 
     const dynamicControls = this.combatDynamics.process({
       vehicle,

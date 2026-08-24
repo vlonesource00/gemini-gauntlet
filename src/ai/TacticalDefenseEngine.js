@@ -114,11 +114,13 @@ export class TacticalDefenseEngine {
     const ttc = closingSpeed > 0.10 ? bodyGap / closingSpeed : (closingSpeed > -0.4 ? bodyGap / 0.15 : 99);
 
     // Upcoming corner proximity
+    // Upcoming corner proximity (immediate to medium horizon)
     const sampleDist = finite(vehicle.distance, 0);
-    const turnSamples = [16, 32, 54, 75].map((d) =>
+    const turnSamples = [0, 6, 12, 20, 32, 50, 75].map((d) =>
       track?.atDistance ? track.atDistance(sampleDist + d) : { curvature: 0, turnSign: 1, s: sampleDist + d }
     );
-    const turn = turnSamples.sort((a, b) => Math.abs(b.curvature) - Math.abs(a.curvature))[0];
+    const turn = turnSamples.find((t) => Math.abs(finite(t?.curvature, 0)) > 0.003)
+      || turnSamples.sort((a, b) => Math.abs(b.curvature) - Math.abs(a.curvature))[0];
     const turnCurvature = Math.abs(finite(turn?.curvature, 0));
     const distToCorner = Math.max(0, wrap((turn?.s ?? sampleDist) - sampleDist + (track?.length || 1000) * 0.5, track?.length || 1000) - (track?.length || 1000) * 0.5);
 
@@ -366,12 +368,20 @@ export class TacticalDefenseEngine {
         this.targetOffset = clamp(committedSign * 0.50, -roadMargin + 1.0, roadMargin - 1.0);
         this.committedDefensiveOffset = this.targetOffset;
       } else if (inCorner || distToCorner <= 14) {
-        // Physical Apex Shielding: Pin inside line tight to apex curb (0.35m margin)
-        // Completely denying challenger inside room through corner apexes
-        this.phase = 'APEX_SHIELD';
-        const apexShieldOffset = clamp(insideSign * Math.min(2.8, roadMargin * 0.50), -roadMargin + 1.0, roadMargin - 1.0);
-        this.targetOffset = apexShieldOffset;
-        this.committedDefensiveOffset = apexShieldOffset;
+        const isCurrentOutside = (currentLateral * outsideSign) > 0.8;
+        if (isCurrentOutside || isOutsideCommitted) {
+          this.phase = 'EXIT_SQUEEZE';
+          const outsideSqueezeOffset = clamp(outsideSign * Math.min(2.8, roadMargin - 2.4), -roadMargin + 1.0, roadMargin - 1.0);
+          this.targetOffset = outsideSqueezeOffset;
+          this.committedDefensiveOffset = outsideSqueezeOffset;
+        } else {
+          // Physical Apex Shielding: Pin inside line tight to apex curb (0.35m margin)
+          // Completely denying challenger inside room through corner apexes
+          this.phase = 'APEX_SHIELD';
+          const apexShieldOffset = clamp(insideSign * Math.min(2.8, roadMargin * 0.50), -roadMargin + 1.0, roadMargin - 1.0);
+          this.targetOffset = apexShieldOffset;
+          this.committedDefensiveOffset = apexShieldOffset;
+        }
       }
 
       // Unyielding under rubbing pressure: never swerve away or yield the inside corner rights

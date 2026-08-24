@@ -70,6 +70,7 @@ export class FrenetLatticePlanner {
     referenceLineAtDistance,
     kerbAllowance = 0,
     intentType = 'STANDARD',
+    racecraftPhase = 'NONE',
     weights = {}
   }) {
     const points = [];
@@ -102,6 +103,7 @@ export class FrenetLatticePlanner {
         : { s: currentDistance, x: 0, y: 0, z: 0 };
 
       const followsReference = typeof referenceLineAtDistance === 'function'
+        && intentType === 'PRIMARY_INTENT'
         && Math.abs(terminalLateral - desiredOffset) < 0.08;
 
       const guidedLateral = followsReference
@@ -385,6 +387,7 @@ export class FrenetLatticePlanner {
           referenceLineAtDistance,
           kerbAllowance,
           intentType,
+          racecraftPhase,
           weights
         }));
       }
@@ -411,6 +414,7 @@ export class FrenetLatticePlanner {
           referenceLineAtDistance,
           kerbAllowance,
           intentType: entry.intentType,
+          racecraftPhase,
           weights
         }));
       }
