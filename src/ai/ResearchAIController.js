@@ -271,8 +271,8 @@ export class ResearchAIController {
     const isOffTrack = offRoad(current);
 
     const roadHalfWidth = finite(track?.roadHalfWidth, 6.5);
-    const baseRoadMargin = Math.max(2.1, roadHalfWidth - 1.25);
-    const kerbAllowance = this._kerbUsage * Math.min(1.35, finite(track?.curbWidth, 0.8) * 0.9);
+    const baseRoadMargin = Math.max(2.1, Math.min(5.4, roadHalfWidth - 1.6));
+    const kerbAllowance = this._kerbUsage * Math.min(0.8, finite(track?.curbWidth, 0.8) * 0.6);
     const plannedRoadMargin = baseRoadMargin + kerbAllowance;
 
     // Track boundary deviation and stall recovery
@@ -322,7 +322,14 @@ export class ResearchAIController {
     const upcomingPoint = track?.atDistance ? track.atDistance(vehicle.distance + Math.max(18.0, dynamicLookahead)) : { curvature: 0 };
     const upcomingCurv = finite(upcomingPoint.curvature, 0);
     const fallbackGeometricLine = clamp(-Math.sign(upcomingCurv) * Math.min(2.5, Math.abs(upcomingCurv) * 600), -baseRoadMargin, baseRoadMargin);
-    const referenceLine = this.referenceProfile?.paceAtDistance?.(vehicle.distance + Math.max(18.0, dynamicLookahead))?.lineLateral ?? fallbackGeometricLine;
+    const isMatchingTrack = Boolean(this.referenceProfile) && (
+      this.referenceProfile.trackId
+        ? this.referenceProfile.trackId === track?.id
+        : Math.abs((this.referenceProfile?.trackLength || 3061.7) - (track?.length || 1000)) < 100
+    );
+    const referenceLine = (isMatchingTrack && typeof this.referenceProfile?.paceAtDistance === 'function')
+      ? (this.referenceProfile.paceAtDistance(vehicle.distance + Math.max(18.0, dynamicLookahead))?.lineLateral ?? fallbackGeometricLine)
+      : fallbackGeometricLine;
     const paceLine = clamp(referenceLine, -baseRoadMargin, baseRoadMargin);
 
     const defDecision = this.defenseEngine.update({
@@ -432,7 +439,9 @@ export class ResearchAIController {
       kerbAllowance,
       lookAhead: lookAheadDist,
       trackingDistance: (committed || defending) ? Math.max(trackingDistance, clamp(vehicle.speed * 0.95, 12.0, 24.0)) : trackingDistance,
-      referenceLineAtDistance: (s) => this.referenceProfile?.paceAtDistance?.(s)?.lineLateral ?? 0
+      referenceLineAtDistance: (s) => (isMatchingTrack && typeof this.referenceProfile?.paceAtDistance === 'function')
+        ? (this.referenceProfile.paceAtDistance(s)?.lineLateral ?? 0)
+        : 0
     });
 
     const trackingPoint = this.trajectoryPlan.trackingPoint ?? this.trajectoryPlan.points.at(-1);
@@ -494,8 +503,10 @@ export class ResearchAIController {
 
     desiredSpeed = Math.min(desiredSpeed, trajectorySpeedLimit);
 
-    // Synchronize pace with user baseline reference profile if available (57s pace baseline for Prototype)
-    const refData = this.referenceProfile?.paceAtDistance?.(vehicle.distance);
+    // Synchronize pace with user baseline reference profile if available (57s pace baseline for Prototype on matching track)
+    const refData = (isMatchingTrack && typeof this.referenceProfile?.paceAtDistance === 'function')
+      ? this.referenceProfile.paceAtDistance(vehicle.distance)
+      : null;
     const refSpeed = refData?.targetSpeed;
     if (Number.isFinite(refSpeed) && refSpeed > 10.0 && tacticalMode === 'PACE' && (vehicle.classKey === 'prototype' || !vehicle.classKey)) {
       const scaledRef = refSpeed * (1.0 + (this._aggression - 0.5) * 0.08);

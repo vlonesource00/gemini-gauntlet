@@ -180,10 +180,12 @@ export class PaceOptimizer {
     const yawDamping = recovering ? 0.25 : (committed ? 0.38 : 0.42);
 
     const vSpeed = finite(speed, 0);
-    // Speed-dependent steering limit prevents destructive front tire saturation scrub and low-speed plow stalls
+    // Speed-dependent steering limit prevents destructive front tire saturation scrub and high-speed yaw snaps
     const maxUsableSteer = recovering
       ? 0.75
-      : (committed ? clamp(14.0 / Math.max(6.0, vSpeed), 0.16, 0.45) : clamp(12.0 / Math.max(8.0, vSpeed), 0.10, 0.38));
+      : (committed
+        ? clamp(3.8 / Math.max(4.0, vSpeed) + 0.06, 0.10, 0.42)
+        : clamp(3.2 / Math.max(4.0, vSpeed) + 0.05, 0.08, 0.38));
 
     // Direct pure-pursuit trajectory tracking with active yaw rate damping
     let target = clamp(

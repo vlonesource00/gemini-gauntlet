@@ -70,18 +70,24 @@ export class CombatDynamicsEngine {
     const absSlip = Math.abs(slipAngle);
     this.powerSlideActive = false;
 
-    if (absSlip > 0.130 && vSpeed > 10.0) {
+    if (absSlip > 0.115 && vSpeed > 8.0) {
       this.powerSlideActive = true;
-      const excessSlip = absSlip - 0.130;
+      const excessSlip = absSlip - 0.115;
       const slipSign = Math.sign(slipAngle);
 
-      // Instantaneous micro-countersteer proportional to yaw velocity and excess slip
-      const counterSteer = slipSign * clamp(excessSlip * 1.8 + Math.abs(yawRate) * 0.08, 0.02, 0.25);
-      steer = clamp(steer + counterSteer, -0.45, 0.45);
+      // Instantaneous active countersteer proportional to yaw velocity and excess slip
+      const counterSteer = slipSign * clamp(excessSlip * 2.5 + Math.abs(yawRate) * 0.18, 0.05, 0.65);
+      
+      // If critical breakaway (>12 deg / 0.20 rad), completely override turn-in with direct counter-steer lock
+      if (absSlip > 0.20) {
+        steer = clamp(counterSteer, -0.65, 0.65);
+      } else {
+        steer = clamp(steer * 0.35 + counterSteer, -0.55, 0.55);
+      }
 
-      // Power-slide maintenance: maintain positive throttle (40%) to keep rear tires spinning and maintain attitude
+      // Stability throttle: maintain positive torque (35%) to keep rear axle loaded and prevent lift-off snap spins
       if (brake < 0.05) {
-        throttle = Math.max(0.40, throttle * 0.90);
+        throttle = Math.max(0.35, throttle * 0.85);
       }
     }
 
