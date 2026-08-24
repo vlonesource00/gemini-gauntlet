@@ -29,6 +29,12 @@ const TEST_SUITES = [
     name: 'Tactical Defense Scenarios (D1 & D2)',
     file: 'scenario-defense-test.mjs',
     description: 'Headless simulation of Straight Line Defense (D1) and Chicane Inside Line Defense (D2) obeying FIA one-move rule'
+  },
+  {
+    id: 'harbor-ring-contract',
+    name: 'Harbor Ring Circuit Contract Suite',
+    file: 'harbor-ring-contract.mjs',
+    description: 'Purpose-built flat circuit geometry (2704m), zero banking/elevation invariants, and 3-class AI multi-lap execution'
   }
 ];
 

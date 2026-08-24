@@ -113,9 +113,12 @@ export class Circuit {
       const ds = Math.max(0.1, Math.hypot(next.x - prev.x, next.z - prev.z));
       point.grade = clamp(Math.atan2(next.y - prev.y, ds), -0.22, 0.22);
       const fraction = point.s / this.length;
+      const isFlatProfile = this.scenario?.elevation?.profile === 'flat';
       const bankHint = (this.scenario?.bankHints ?? []).find((hint) => fraction >= hint.fromFraction && fraction <= hint.toFraction);
       const authoredBank = bankHint?.bankRadians ?? Math.sin(point.s * 0.026 + 0.6) * 0.045;
-      point.bank = clamp(authoredBank + point.turnSign * point.turnStrength * 0.17, -0.22, 0.22);
+      point.bank = isFlatProfile
+        ? 0
+        : clamp(authoredBank + point.turnSign * point.turnStrength * 0.17, -0.22, 0.22);
       point.normal3 = normal3For(point.tangent, point.normal, point.grade, point.bank);
     }
     this.rubber = new Float32Array(points.length);

@@ -14,6 +14,7 @@ import { FrenetLatticePlanner } from './FrenetLatticePlanner.js';
 import { TacticalAttackEngine } from './TacticalAttackEngine.js';
 import { TacticalDefenseEngine } from './TacticalDefenseEngine.js';
 import { PaceOptimizer } from './PaceOptimizer.js';
+import { CombatDynamicsEngine } from './v2/CombatDynamicsEngine.js';
 
 const finite = (value, fallback = 0) => (Number.isFinite(value) ? value : fallback);
 
@@ -68,6 +69,7 @@ export class ResearchAIController {
       trailBrakingSkill: this._trailBrakingSkill,
       unwindFactor: 0.60
     });
+    this.combatDynamics = new CombatDynamicsEngine();
 
     // Runtime state
     this.trajectoryPlan = null;
@@ -363,15 +365,11 @@ export class ResearchAIController {
       tacticalMode = 'RECOVER';
       targetOffset = 0;
       tacticalReason = isOffTrack ? 'OFF_TRACK_RECOVERY' : 'STALL_RECOVERY';
-    } else if (defDecision.defending) {
-      tacticalMode = 'DEFEND';
-      targetOffset = defDecision.desiredOffset;
-      targetId = defDecision.target?.other?.id ?? null;
-      defending = true;
-      tacticalReason = defDecision.reason;
     } else if (attDecision.committed || (attDecision.phase !== 'NONE' && attDecision.phase !== 'RETURN')) {
       tacticalMode = 'ATTACK';
-      targetOffset = attDecision.desiredOffset;
+      targetOffset = (currentCurv > 0.005)
+        ? clamp(paceLine + Math.sign(finite(attDecision.desiredOffset, 1)) * 0.65, -plannedRoadMargin, plannedRoadMargin)
+        : attDecision.desiredOffset;
       targetId = attDecision.target?.other?.id ?? null;
       committed = attDecision.committed;
       straightSend = attDecision.straightSend;
@@ -379,6 +377,12 @@ export class ResearchAIController {
       tacticalReason = attDecision.divebombing ? 'DIVEBOMB_CORNER_ENTRY'
         : attDecision.switchbacking ? 'SWITCHBACK_LATE_APEX'
         : `${attDecision.phase}_MANEUVER`;
+    } else if (defDecision.defending) {
+      tacticalMode = 'DEFEND';
+      targetOffset = defDecision.desiredOffset;
+      targetId = defDecision.target?.other?.id ?? null;
+      defending = true;
+      tacticalReason = defDecision.reason;
     }
 
     // 3. Multi-Candidate Frenet Trajectory Planning
@@ -416,7 +420,7 @@ export class ResearchAIController {
       vehicle,
       track,
       desiredOffset: targetOffset,
-      fallbackOffsets: recovering || committed || defending ? [] : [paceLine, finite(current?.lateral, 0)],
+      fallbackOffsets: recovering || committed || defending || tacticalMode === 'ATTACK' ? [] : [paceLine, finite(current?.lateral, 0)],
       tacticalCandidates: recovering ? [] : tacticalCandidates,
       trafficEntries: traffic.entries,
       targetSpeed: physicalTargetSpeed,
@@ -520,9 +524,13 @@ export class ResearchAIController {
         // In corners / braking zones, cap desiredSpeed to physicalTargetSpeed to ensure staying on legal track!
         desiredSpeed = Math.min(physicalTargetSpeed, Math.max(obstacleFloor, passTarget.other.speed + closingFloor));
       }
-    } else if (passTarget && passTarget.delta > 0 && passTarget.delta < 36 && !defending) {
+    } else if (passTarget && passTarget.delta > 0 && passTarget.delta < 45 && !defending) {
       const isSlowObstacle = passTarget.other.speed < 16.0;
-      if (isSlowObstacle) {
+      const isAttackingPhase = attDecision.phase !== 'NONE' && attDecision.phase !== 'RETURN';
+      if (isAttackingPhase || this._aggression > 0.8) {
+        const straightClosingFloor = 14.0 + clamp(this._aggression, 0, 1) * 4.0;
+        desiredSpeed = Math.min(physicalTargetSpeed, Math.max(desiredSpeed, passTarget.other.speed + straightClosingFloor));
+      } else if (isSlowObstacle) {
         const escapeSpeed = Math.min(physicalTargetSpeed, Math.max(14.0, passTarget.other.speed + 10.0));
         desiredSpeed = Math.min(desiredSpeed, Math.max(escapeSpeed, passTarget.other.speed + 6.0));
       } else {
@@ -570,12 +578,24 @@ export class ResearchAIController {
       tireGripFactor
     });
 
+    const dynamicControls = this.combatDynamics.process({
+      vehicle,
+      traffic,
+      controls: {
+        steer: clamp(this.steerCommand, -1, 1),
+        throttle: pedals.throttle,
+        brake: pedals.brake
+      },
+      dt
+    });
+
     vehicle.controls = {
-      steer: clamp(this.steerCommand, -1, 1),
-      throttle: pedals.throttle,
-      brake: pedals.brake,
+      steer: dynamicControls.steer,
+      throttle: dynamicControls.throttle,
+      brake: dynamicControls.brake,
       handbrake: 0
     };
+    this.steerCommand = dynamicControls.steer;
 
     vehicle.aiTarget = { x: targetPos.x, z: targetPos.z, lateral: plannedTargetOffset };
 

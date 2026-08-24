@@ -266,7 +266,8 @@ export class TacticalDefenseEngine {
     this.threatScore = threatScore;
 
     const turnSign = Math.sign(finite(turn?.turnSign, 1)) || 1;
-    const outsideSign = -turnSign;
+    const insideSign = -turnSign;
+    const outsideSign = turnSign;
     const inCorner = turnCurvature > 0.0035;
 
     // Detect wheel-to-wheel rubbing pressure
@@ -300,19 +301,19 @@ export class TacticalDefenseEngine {
 
     // Ongoing Active Defense Handling (Holding committed corridor unyielding under pressure)
     if (this.defending) {
-      const activeChallenger = traffic.entries.find((e) => e.other.id === this.defenseTargetId) ?? null;
       this.age += dt;
+      const target = traffic.entries.find((e) => e.other.id === this.defenseTargetId) ?? challenger;
 
-      const passed = activeChallenger && activeChallenger.delta > 4.5;
-      const gone = !activeChallenger || activeChallenger.delta < -52;
-
-      if (passed || gone || this.age > 15.0) {
-        this._clear('RETURN_PACE', 0.6);
+      // Check if defense completed or challenger backed off
+      const passed = target && target.delta > 2.5;
+      const challengerBackedOff = !target || (target.delta < -35.0 && closingSpeed < 0.2);
+      if (passed || challengerBackedOff || (this.age > 18.0 && !isRubbingPressure)) {
+        this._clear('NONE');
         return {
-          phase: 'RETURN_PACE',
-          desiredOffset: this.targetOffset,
+          phase: 'NONE',
+          desiredOffset: nominalBase,
           defending: false,
-          target: null,
+          target,
           threatLevel: 'NONE',
           threatScore: 0,
           attackerIntent: 'NONE',
@@ -334,7 +335,7 @@ export class TacticalDefenseEngine {
       }
 
       // FIA single-move locked direction (prevent weaving, ignore challenger feints)
-      const committedSign = this.defenseDirection || Math.sign(this.targetOffset) || turnSign;
+      const committedSign = this.defenseDirection || (this.targetOffset !== 0 ? Math.sign(this.targetOffset) : insideSign);
       const isOutsideCommitted = committedSign === outsideSign;
 
       // Dynamic Phase Transitions through Corner Phases
@@ -382,7 +383,7 @@ export class TacticalDefenseEngine {
         phase: this.phase,
         desiredOffset: this.targetOffset,
         defending: true,
-        target: activeChallenger,
+        target,
         threatLevel: this.threatLevel,
         threatScore: this.threatScore,
         attackerIntent: this.attackerIntent,

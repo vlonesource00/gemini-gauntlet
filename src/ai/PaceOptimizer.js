@@ -99,15 +99,16 @@ export class PaceOptimizer {
       const point = track?.atDistance ? track.atDistance(sampleDist) : { curvature: 0, banking: 0 };
       
       let rawCurvature = Math.abs(finite(point.curvature, 0));
-      // Effective racing line curvature: exploiting track width and apex clipping flattens corner radius (e.g. Turns 1-6)
+      // Effective racing line curvature: realistic apex clipping geometry without over-flattening tight hairpins/chicanes
       const roadWidth = finite(track?.roadHalfWidth, 6.5) + finite(track?.curbWidth, 1.05);
-      let curvature = rawCurvature / (1.0 + 2.65 * roadWidth * rawCurvature);
+      const flattenFactor = clamp(1.0 + 0.45 * roadWidth * Math.min(0.035, rawCurvature), 1.0, 1.35);
+      let curvature = rawCurvature / flattenFactor;
 
       if (Math.abs(insideLineOffset) > 0.5 && curvature > 1e-4) {
         curvature = curvature / Math.max(0.40, 1.0 - Math.abs(insideLineOffset) * curvature);
       }
 
-      const safetyFactor = defending ? 0.94 : (aggression > 0.8 ? 1.00 : 0.97);
+      const safetyFactor = aggression > 0.80 ? 1.00 : (defending ? 0.95 : 0.97);
       const physLimit = this.calculateCornerSpeed({
         curvature,
         banking: point.banking,
@@ -116,11 +117,7 @@ export class PaceOptimizer {
         skill
       }) * safetyFactor;
 
-      const trackLimit = track?.targetSpeed
-        ? (vClass === 'prototype' ? Math.max(physLimit, track.targetSpeed(sampleDist, skill) * 1.15) : track.targetSpeed(sampleDist, skill))
-        : physLimit;
-
-      const cornerSpeed = Math.max(5.5, Math.min(physLimit, trackLimit));
+      const cornerSpeed = Math.max(5.5, physLimit);
       const reachableSpeed = Math.sqrt(cornerSpeed * cornerSpeed + 2.0 * brakingDecel * dist);
       speedLimit = Math.min(speedLimit, reachableSpeed);
     }
@@ -177,17 +174,19 @@ export class PaceOptimizer {
     recovering = false,
     yielding = false
   } = {}) {
-    const headingGain = recovering ? 2.80 : committed ? 3.45 : 2.25;
-    const lateralGain = recovering ? 0.085 : committed ? 0.080 : 0.055;
+    const headingGain = recovering ? 2.80 : committed ? 3.20 : 2.25;
+    const lateralGain = recovering ? 0.085 : committed ? 0.095 : 0.065;
     const yawDamping = committed ? 0.12 : 0.17;
 
     const vSpeed = finite(speed, 0);
-    // Speed-dependent steering limit prevents destructive high-speed front tire saturation scrub
-    const maxUsableSteer = recovering ? 1.0 : clamp(15.0 / Math.max(8.0, vSpeed), 0.30, 1.0);
+    // Speed-dependent steering limit prevents destructive front tire saturation scrub and low-speed plow stalls
+    const maxUsableSteer = recovering
+      ? 0.75
+      : (committed ? clamp(14.0 / Math.max(6.0, vSpeed), 0.16, 0.45) : clamp(12.0 / Math.max(8.0, vSpeed), 0.10, 0.38));
 
-    // Direct pure-pursuit trajectory tracking with lateral error trim and yaw rate damping
+    // Direct pure-pursuit trajectory tracking with yaw rate damping
     let target = clamp(
-      finite(headingError) * headingGain - finite(lateralError) * lateralGain - finite(yawRate) * yawDamping,
+      finite(headingError) * headingGain - finite(yawRate) * yawDamping,
       -maxUsableSteer,
       maxUsableSteer
     );
@@ -305,11 +304,11 @@ export class PaceOptimizer {
       excessYaw = Math.abs(finite(yawRate, 0));
     }
     
-    // Dynamic instability triggers ONLY on genuine tire breakaway slides (> 8 deg / 0.13 rad slip)
+    // Dynamic instability triggers ONLY on genuine tire breakaway slides (> 9 deg / 0.16 rad slip)
     const speedWeight = saturate(vSpeed / 8.0);
     const instability = saturate(Math.max(
-      (dynamicExcessSlip - 0.130) / 0.09,
-      (excessYaw - 0.85) / 0.90
+      (dynamicExcessSlip - 0.160) / 0.10,
+      (excessYaw - 1.20) / 1.00
     )) * speedWeight;
 
     // 4. Traction Control (TCS) & Corner-Exit Throttle Modulation
@@ -328,7 +327,7 @@ export class PaceOptimizer {
     }
 
     // High-speed direction change & apex drive: maintain positive rear axle load to prevent lift-off snap oversteer
-    if (throttle > 0.05 && isCornering && vSpeed > 16.0 && brake < 0.05 && instability < 0.15) {
+    if (throttle > 0.05 && isCornering && vSpeed > 14.0 && brake < 0.05 && instability < 0.25) {
       throttle = Math.max(throttle, 0.42);
     }
 
@@ -338,11 +337,11 @@ export class PaceOptimizer {
     }
 
     if (instability > 0) {
-      if (brake > 0.03 || speedError < -0.30) {
+      if (brake > 0.03 || speedError < -1.50) {
         throttle = 0;
       } else {
-        // High-speed maintenance throttle floor (25%) prevents lethal lift-off snap spins in esses
-        const minFloor = (vSpeed > 18.0 && !straight && dynamicExcessSlip < 0.18) ? 0.25 : 0.0;
+        // High-speed maintenance throttle floor (30%) prevents lethal lift-off snap spins in esses
+        const minFloor = (vSpeed > 14.0 && !straight) ? 0.30 : 0.0;
         throttle = Math.max(minFloor, throttle * (1.0 - instability * 0.70));
       }
       // Soften brake during oversteer slides to prevent rear lockup
