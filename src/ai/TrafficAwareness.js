@@ -1,8 +1,13 @@
 /**
  * TrafficAwareness.js
- * High-performance AI perception and traffic evaluation engine.
- * Computes vehicle relative metrics, Frenet spatial occupancy, predictive swept corridors,
- * and time-to-collision (TTC) hazard assessments.
+ * Modular High-Performance AI Perception, Pack Racing & Traffic Dynamics Engine.
+ * Features:
+ * - Multi-Vehicle Kinematics & Frenet Spatial Occupancy
+ * - Pack Racing & Multi-Car Cluster Hazard Detection
+ * - Dirty Air, Turbulence & Aerodynamic Downforce Deficit Modeling
+ * - Opportunistic Dual-Flank (Left vs Right) Corridor Asphalt Evaluation
+ * - Time-To-Collision (TTC) & Predictive Swept Corridors
+ * - Off-Track Surface Detection & Rejoin Geometry
  */
 
 const finite = (value, fallback = 0) => (Number.isFinite(value) ? value : fallback);
@@ -27,7 +32,7 @@ const smoothstep = (value) => {
 
 export class TrafficAwareness {
   /**
-   * @param {Object} options
+   * @param {Object} [options]
    * @param {number} [options.longitudinalEnvelope=5.4] - Safety margin in longitudinal direction (meters)
    * @param {number} [options.lateralEnvelope=2.9] - Safety margin in lateral direction (meters)
    * @param {number} [options.bodyLength=4.6] - Standard car body length
@@ -46,11 +51,11 @@ export class TrafficAwareness {
   }
 
   /**
-   * Scan surrounding vehicles and compute relative kinematic & Frenet metrics.
+   * Scan surrounding vehicles and compute relative kinematic, pack, dirty-air & Frenet metrics.
    * @param {Object} vehicle - Ego vehicle
    * @param {Array<Object>} vehicles - All vehicles on track
    * @param {Object} track - Track geometry and surface model
-   * @returns {Object} Traffic perception summary
+   * @returns {Object} Comprehensive traffic perception summary
    */
   scan(vehicle, vehicles, track) {
     const current = vehicle.surface ?? (track?.surfaceAt ? track.surfaceAt(vehicle.position.x, vehicle.position.z) : { lateral: 0, s: vehicle.distance || 0 });
@@ -62,6 +67,11 @@ export class TrafficAwareness {
     const egoLateralSpeed = finite(vel.x * right.x + vel.z * right.z, 0);
     const trackLength = finite(track?.length, 1000);
     const entries = [];
+
+    let totalWakeStrength = 0;
+    let maxFrontDownforceLoss = 0;
+    let maxRearDownforceLoss = 0;
+    let dirtyAirSourceId = null;
 
     for (const other of vehicles || []) {
       if (!other || other === vehicle || other.finished || other.despawned || other.trafficGhost) {
@@ -106,6 +116,28 @@ export class TrafficAwareness {
       const otherTrackAngle = otherTrackPoint?.tangent ? Math.atan2(otherTrackPoint.tangent.x, otherTrackPoint.tangent.z) : otherHeading;
       const otherNoseTrackDeviation = wrapAngle(otherHeading - otherTrackAngle);
 
+      // Dirty air wake modeling from cars ahead (within 45m ahead, |lateral| < 3.8m)
+      let wakeContribution = 0;
+      let frontDfLoss = 0;
+      let rearDfLoss = 0;
+      if (delta > 1.8 && delta < 45.0 && Math.abs(side) < 4.2) {
+        const longDistFactor = clamp(1.0 - delta / 45.0, 0, 1);
+        const latAlignFactor = clamp(1.0 - Math.abs(side) / 3.8, 0, 1);
+        const speedFactor = clamp((otherForwardSpeed - 6.0) / 35.0, 0, 1);
+        wakeContribution = longDistFactor * latAlignFactor * speedFactor;
+        
+        // Front downforce suffers higher loss in turbulent wake (up to 35% loss) -> causes corner push / understeer
+        frontDfLoss = wakeContribution * 0.35;
+        rearDfLoss = wakeContribution * 0.22;
+
+        totalWakeStrength = Math.max(totalWakeStrength, wakeContribution);
+        if (frontDfLoss > maxFrontDownforceLoss) {
+          maxFrontDownforceLoss = frontDfLoss;
+          maxRearDownforceLoss = rearDfLoss;
+          dirtyAirSourceId = other.id;
+        }
+      }
+
       entries.push({
         other,
         delta,
@@ -125,7 +157,10 @@ export class TrafficAwareness {
         relativeSpeed: finite(vehicle.speed) - finite(other.speed),
         relativeLongitudinalVelocity: closingSpeed,
         relativeLateralVelocity: otherLateralSpeed - egoLateralSpeed,
-        ttc: finite(ttc, 99)
+        ttc: finite(ttc, 99),
+        wakeContribution,
+        frontDfLoss,
+        rearDfLoss
       });
     }
 
@@ -144,6 +179,26 @@ export class TrafficAwareness {
     const alongside = entries
       .filter((e) => e.direct < 6.5 && Math.abs(e.longitudinal) < 5.0)
       .sort((a, b) => a.direct - b.direct)[0] ?? null;
+
+    // Pack Racing & Cluster Evaluation
+    const aheadCars = entries.filter((e) => e.delta > 0 && e.delta < 75);
+    const packCount = aheadCars.length;
+    const isPackRacing = packCount >= 2;
+    const packLead = aheadCars[aheadCars.length - 1] ?? null;
+    const packTail = aheadCars[0] ?? null;
+    const avgPackSpeed = packCount > 0
+      ? aheadCars.reduce((sum, e) => sum + e.otherForwardSpeed, 0) / packCount
+      : egoForwardSpeed;
+
+    // Dirty Air summary
+    const dirtyAir = {
+      wakeStrength: clamp(totalWakeStrength, 0, 1),
+      frontDownforceLoss: clamp(maxFrontDownforceLoss, 0, 0.38),
+      rearDownforceLoss: clamp(maxRearDownforceLoss, 0, 0.25),
+      sourceId: dirtyAirSourceId,
+      isTurbulent: totalWakeStrength > 0.15,
+      understeerMultiplier: 1.0 + totalWakeStrength * 0.45 // multiplier on understeer gradient in turns
+    };
 
     // Build predictive 8-quadrant spatial occupancy grid
     const occupancy = {
@@ -191,7 +246,117 @@ export class TrafficAwareness {
       behind,
       alongside,
       occupancy,
-      egoForwardSpeed
+      egoForwardSpeed,
+      egoLateralSpeed,
+      pack: {
+        isPackRacing,
+        count: packCount,
+        lead: packLead,
+        tail: packTail,
+        avgSpeed: avgPackSpeed
+      },
+      dirtyAir
+    };
+  }
+
+  /**
+   * Opportunistic Dual-Flank Corridor Evaluation:
+   * Evaluates both Left and Right corridors against defender positioning, asphalt width, and upcoming turns.
+   * @param {Object} params
+   * @returns {Object} Dual-flank analysis with recommended attack corridor
+   */
+  evaluateDualFlanks({
+    vehicle,
+    track,
+    traffic,
+    target,
+    roadMargin = 5.2,
+    kerbAllowance = 0,
+    nextTurn = null
+  }) {
+    if (!target) {
+      return {
+        bestFlank: 'CENTER',
+        recommendedOffset: 0,
+        leftScore: 0,
+        rightScore: 0,
+        leftOffset: 0,
+        rightOffset: 0,
+        targetLateral: 0,
+        insideFlank: 'NONE'
+      };
+    }
+
+    const targetLateral = finite(target.otherLateral, 0);
+    const targetLatVel = finite(target.otherLateralSpeed, 0);
+    const halfWidth = Math.max(2.1, roadMargin + kerbAllowance);
+
+    // Game visual coordinate convention: +lateral is RIGHT (toward +halfWidth), -lateral is LEFT (toward -halfWidth)
+    // Left Flank: corridor on the left of target (-lateral, down to -halfWidth)
+    // Right Flank: corridor on the right of target (+lateral, up to +halfWidth)
+    const leftSpace = halfWidth + targetLateral;   // width available on left (from target down to -halfWidth)
+    const rightSpace = halfWidth - targetLateral;  // width available on right (from target up to +halfWidth)
+
+    // Minimum 1 car width clearance (~2.4m with safety margin)
+    const minPassWidth = 2.4;
+    const leftFeasible = leftSpace >= minPassWidth;
+    const rightFeasible = rightSpace >= minPassWidth;
+
+    // Desired offsets for both flanks (-lateral is left, +lateral is right)
+    const leftOffset = clamp(targetLateral - Math.min(3.8, Math.max(minPassWidth, leftSpace * 0.65)), -halfWidth, halfWidth);
+    const rightOffset = clamp(targetLateral + Math.min(3.8, Math.max(minPassWidth, rightSpace * 0.65)), -halfWidth, halfWidth);
+
+    // Turn direction: turnSign < 0 is left turn (inside is -lateral), turnSign > 0 is right turn (inside is +lateral)
+    const turnSign = Math.sign(finite(nextTurn?.turnSign, 0));
+    const insideFlank = turnSign < 0 ? 'LEFT' : (turnSign > 0 ? 'RIGHT' : 'NONE');
+
+    // Scoring factors:
+    // 1. Available width (more width = higher safety and speed)
+    let leftScore = leftFeasible ? leftSpace * 1.5 : -100;
+    let rightScore = rightFeasible ? rightSpace * 1.5 : -100;
+
+    // 2. Defender momentum (if defender drifting right (+lat), left opens up; if defender drifting left (-lat), right opens up)
+    if (targetLatVel > 0.08) {
+      leftScore += 2.5;  // defender drifting right (+lat) -> left corridor (-lat) opening
+      rightScore -= 2.0;
+    } else if (targetLatVel < -0.08) {
+      rightScore += 2.5; // defender drifting left (-lat) -> right corridor (+lat) opening
+      leftScore -= 2.0;
+    }
+
+    // 3. Inside apex preference into upcoming corner (inside line gets massive advantage)
+    if (insideFlank === 'LEFT') {
+      leftScore += 3.5;
+    } else if (insideFlank === 'RIGHT') {
+      rightScore += 3.5;
+    }
+
+    // 4. Current ego lateral alignment
+    const currentLat = finite(traffic?.current?.lateral, 0);
+    if (currentLat < targetLateral) {
+      leftScore += 1.0; // already on left side (-lat)
+    } else {
+      rightScore += 1.0; // already on right side (+lat)
+    }
+
+    const bestFlank = leftScore >= rightScore ? (leftFeasible ? 'LEFT' : (rightFeasible ? 'RIGHT' : 'CENTER'))
+      : (rightFeasible ? 'RIGHT' : (leftFeasible ? 'LEFT' : 'CENTER'));
+
+    const recommendedOffset = bestFlank === 'LEFT' ? leftOffset : (bestFlank === 'RIGHT' ? rightOffset : 0);
+
+    return {
+      bestFlank,
+      recommendedOffset,
+      leftScore,
+      rightScore,
+      leftOffset,
+      rightOffset,
+      leftSpace,
+      rightSpace,
+      leftFeasible,
+      rightFeasible,
+      targetLateral,
+      insideFlank
     };
   }
 

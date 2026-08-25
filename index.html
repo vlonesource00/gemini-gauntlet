@@ -55,6 +55,22 @@
         <div class="banner-status" data-hud="scenario-status">TRIAL ACTIVE</div>
       </div>
 
+      <!-- Noclip Spectator Banner Prompt -->
+      <div id="noclip-hud" class="noclip-hud" style="display: none;">
+        🎥 NOCLIP SPECTATOR CAM [V] · CLICK VIEWPORT TO LOCK MOUSE · WASD+QE FLY · SHIFT BOOST · ESC UNLOCK
+      </div>
+
+      <!-- Multi-Car Race Leaderboard (Active in multi-car races) -->
+      <section id="race-leaderboard" class="race-leaderboard" style="display: none;">
+        <header>
+          <span>🏆 RACE LEADERBOARD</span>
+          <span id="leaderboard-grid-info">12 CARS</span>
+        </header>
+        <div class="leaderboard-rows" id="leaderboard-rows">
+          <!-- Populated dynamically by main.js -->
+        </div>
+      </section>
+
       <!-- Quick Notification Notice -->
       <div class="notice" data-hud="notice"></div>
 

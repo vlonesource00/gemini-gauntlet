@@ -12,6 +12,11 @@ export const SCENARIO_CATALOG = Object.freeze({
     { id: 'D3', name: 'Cross-Over Retaliation', tag: 'DEFENSE SCENARIO D3', objective: 'Counter-attack on exit after opponent dives deep on entry.', carClass: 'prototype', defaultSpeed: 1.0 },
     { id: 'D4', name: 'Low-Grip Squeeze', tag: 'DEFENSE SCENARIO D4', objective: 'Defend on reduced friction surface balancing traction and corridor space.', carClass: 'touring', defaultSpeed: 1.0 }
   ],
+  race: [
+    { id: 'RACE_4', name: '4-Car Prototype Grand Prix', tag: '4-CAR GRID', objective: 'High-speed 4-car prototype championship race with pack drafting and late-braking divebombs.', carClass: 'prototype', defaultSpeed: 1.0, gridCount: 4 },
+    { id: 'RACE_4_GT', name: '4-Car GT Battle', tag: '4-CAR GRID', objective: '4-car wheel-to-wheel GT battle testing slipstream slingshots, trail braking, and cutbacks.', carClass: 'gt', defaultSpeed: 1.0, gridCount: 4 },
+    { id: 'RACE_4_MIXED', name: '4-Car Multi-Class Sprint', tag: '4-CAR GRID', objective: 'Mixed Prototype and GT 4-car sprint with dynamic traffic and multi-flank overtakes.', carClass: 'prototype', defaultSpeed: 1.0, gridCount: 4 }
+  ],
   hotlap: [
     { id: 'H1', name: 'Ghost Baseline Lap', tag: 'HOTLAP SCENARIO H1', objective: 'Beat the reference human/AI telemetry delta on a clean hot lap.', carClass: 'prototype', defaultSpeed: 1.0 }
   ],
@@ -95,6 +100,7 @@ export class ScenarioDeck {
           <div class="category-tabs" role="tablist">
             <button class="category-tab active" data-category="attack" type="button">ATTACK</button>
             <button class="category-tab" data-category="defense" type="button">DEFENSE</button>
+            <button class="category-tab" data-category="race" type="button">4-CAR RACE</button>
             <button class="category-tab" data-category="hotlap" type="button">HOTLAP</button>
             <button class="category-tab" data-category="duel" type="button">DUEL</button>
           </div>
@@ -136,7 +142,7 @@ export class ScenarioDeck {
             <button class="deck-btn" data-cam="PURSUIT" type="button">PURSUIT</button>
             <button class="deck-btn" data-cam="TACTICAL" type="button">TACTICAL</button>
             <button class="deck-btn" data-cam="COCKPIT" type="button">COCKPIT</button>
-            <button class="deck-btn" data-cam="FREE" type="button">FREE</button>
+            <button class="deck-btn" data-cam="FREE" type="button">NOCLIP [V]</button>
           </div>
         </div>
 

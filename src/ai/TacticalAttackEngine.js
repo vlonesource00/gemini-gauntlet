@@ -1,21 +1,17 @@
 /**
  * TacticalAttackEngine.js
- * High-performance motorsport combat attack & slingshot engine:
- * - High-Speed Slingshot: +18.0 m/s (+65 km/h) closing speed floor on straightaways with ERS burst
- * - Fearless Divebomb: -3.4G late-braking deceleration model claiming inside apex rights
- * - Rubbing & Contact Acceptance: Resilient side-by-side combat holding attack line (< 0.4m contact)
- * - Wide Attack Swoops: 4.2m to 5.4m deep lateral separation punching through dirty air
- * - Switchback Counter: Dynamic detection of defender overslow with late-apex diamond undercut
+ * Modular Motorsport Combat Attack, Overtaking & Racecraft Intelligence:
+ * - Opportunistic Dual-Flank Attacks (Continuous Left vs Right Corridor Scoring)
+ * - Inside vs Outside Tactical Decision-Making (Inside Apex Claim vs Outside Momentum Carry)
+ * - High-Speed Slingshot (+18.0 m/s closing speed floor with ERS boost & tow pull-out)
+ * - Late-Braking Apex Divebombs (-3.5G decel model claiming apex rights)
+ * - Diamond Switchback / Cutback Undercut against inside-overslowing defenders
+ * - Side-by-Side Combat Rubbing Resilience (< 0.4m contact acceptance)
  */
 
+import { clamp, wrap, saturate } from '../core/math.js';
+
 const finite = (value, fallback = 0) => (Number.isFinite(value) ? value : fallback);
-
-const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
-
-const wrap = (value, length) => {
-  if (length <= 0) return 0;
-  return ((value % length) + length) % length;
-};
 
 const ATTACK_PHASES = new Set([
   'ATTACK_LEFT',
@@ -29,7 +25,7 @@ const ATTACK_PHASES = new Set([
 
 export class TacticalAttackEngine {
   /**
-   * @param {Object} options
+   * @param {Object} [options]
    * @param {number} [options.index=1] - Driver index
    * @param {number} [options.aggression=0.88] - Aggression factor (0-1)
    * @param {number} [options.diveMargin=0.45] - Divebomb threshold factor (0-1)
@@ -111,7 +107,6 @@ export class TacticalAttackEngine {
 
   /**
    * Evaluate slipstream wake strength, drag reduction, and slingshot pull-out criteria.
-   * Enables eager punch through dirty air with high closing speeds.
    * @param {Object} vehicle
    * @param {Object} target
    * @returns {Object} Slipstream metrics
@@ -129,8 +124,7 @@ export class TacticalAttackEngine {
     // Up to 38% aerodynamic drag reduction in direct slipstream wake
     const dragReduction = wakeStrength * 0.38;
 
-    // Velocity-Differential Slingshot pull-out timing:
-    // Rides the tow pocket to maximize speed delta, then punches out at exact mathematical threshold
+    // Slingshot pull-out timing: ride tow to accumulate delta, then punch out into clean air
     const closingSpeed = target.relativeLongitudinalVelocity;
     const dynamicPulloutDist = clamp(closingSpeed * 1.15 + 4.8, 6.5, 28.0);
     const shouldPullOut = (target.delta <= dynamicPulloutDist && closingSpeed > 0.4)
@@ -146,9 +140,8 @@ export class TacticalAttackEngine {
   }
 
   /**
-   * Calculate dynamic divebomb feasibility into upcoming braking zone.
-   * Assumes fearless -3.4G braking deceleration and ground-effect downforce,
-   * allowing late inside braking entries that claim apex position.
+   * Calculate late-braking inside divebomb feasibility into upcoming corner.
+   * Assumes -3.5G peak braking deceleration with ground-effect aero downforce.
    * @param {Object} params
    * @returns {Object} Divebomb evaluation
    */
@@ -164,20 +157,21 @@ export class TacticalAttackEngine {
     if (!target || !nextTurn) return { feasible: false };
 
     const curvature = Math.abs(finite(nextTurn.curvature, 0));
-    if (curvature < 0.0025) return { feasible: false }; // straight or negligible bend
+    if (curvature < 0.0025) return { feasible: false };
 
     const turnSign = Math.sign(finite(nextTurn.turnSign, 1)) || 1;
-    const distToCorner = wrap(nextTurn.s - vehicle.distance + track.length * 0.5, track.length) - track.length * 0.5;
+    const trackLen = Math.max(1, finite(track?.length, 1000));
+    const distToCorner = wrap(nextTurn.s - vehicle.distance + trackLen * 0.5, trackLen) - trackLen * 0.5;
 
     // Divebomb window is active when approaching braking zone (8m to 90m ahead)
     if (distToCorner < 8 || distToCorner > 90) return { feasible: false };
 
-    // Fearless -3.4G peak braking deceleration utilizing ground-effect aero downforce & tire grip
+    // Fearless -3.5G peak braking deceleration
     const diveDecelG = Math.max(3.4, (vehicle.classKey === 'prototype' ? 3.6 : 3.4) * egoGripFactor * (0.95 + this.aggression * 0.20));
-    const egoMaxDecel = diveDecelG * 9.81; // >= 33.35 m/s^2 deceleration
-    const oppDecelEst = 1.25 * 9.81 * egoGripFactor; // opponent standard/conservative braking ~1.25G
+    const egoMaxDecel = diveDecelG * 9.81;
+    const oppDecelEst = 1.25 * 9.81 * egoGripFactor;
 
-    // Corner speed limit at apex with ground-effect aero downforce & aggressive kerb clipping
+    // Corner speed limit at apex
     const apexRadius = 1.0 / Math.max(1e-4, curvature);
     const apexLateralG = (vehicle.classKey === 'prototype' ? 2.4 : 1.85) * egoGripFactor * (1.0 + this.kerbUsage * 0.15);
     const apexMaxSpeed = Math.sqrt(apexLateralG * 9.81 * apexRadius);
@@ -185,22 +179,19 @@ export class TacticalAttackEngine {
     const egoSpeed = Math.max(5, finite(vehicle.speed, 0));
     const egoBrakingDist = Math.max(0, (egoSpeed * egoSpeed - apexMaxSpeed * apexMaxSpeed) / (2 * egoMaxDecel));
 
-    // Opponent braking point estimate
     const oppSpeed = Math.max(5, finite(target.other.speed, 0));
     const oppBrakingDist = Math.max(0, (oppSpeed * oppSpeed - apexMaxSpeed * apexMaxSpeed) / (2 * oppDecelEst));
 
-    // Divebomb advantage: ego can brake substantially later by (oppBrakingDist - egoBrakingDist)
     const brakingAdvantage = oppBrakingDist - egoBrakingDist;
     const gapToBridge = target.delta;
 
-    // Target inside line for the dive (firmly claiming inside apex line)
+    // Target inside line for the dive (inside = -turnSign)
     const targetInsideOffset = clamp(
       -turnSign * Math.min(3.4, roadMargin * 0.60),
       -roadMargin + 0.65,
       roadMargin - 0.65
     );
 
-    // Feasible if late braking advantage covers gap before apex entry
     const diveRange = 28 + this.aggression * 18;
     const speedAdvantage = egoSpeed - oppSpeed;
     const feasible = (gapToBridge < diveRange)
@@ -243,7 +234,6 @@ export class TacticalAttackEngine {
     const trackLen = Math.max(1, finite(track?.length, 1000));
     const distToCorner = wrap(nextTurn.s - vehicle.distance + trackLen * 0.5, trackLen) - trackLen * 0.5;
 
-    // Switchback is only applicable in corner approach & entry (8m to 55m ahead)
     if (distToCorner < 8 || distToCorner > 55) return { feasible: false };
 
     const leadLateral = finite(target.otherLateral, 0);
@@ -287,7 +277,7 @@ export class TacticalAttackEngine {
   }
 
   /**
-   * Main tactical attack update tick.
+   * Main tactical attack update loop.
    * @param {Object} params
    * @returns {Object} Tactical decision and offset directive
    */
@@ -415,7 +405,6 @@ export class TacticalAttackEngine {
         && corridor.legal
         && corridor.blockerId === this.targetId;
 
-      // When side-by-side or divebombing, ignore proximity/rubbing alerts with battle target
       const targetCombatInteraction = (isSideBySide || this.divebombActive || this.switchbackActive)
         && (corridor.blockerId === this.targetId || corridor.blockerId === null);
 
@@ -423,7 +412,6 @@ export class TacticalAttackEngine {
       const maxAttackAge = target.other.speed < 3.0 ? 18.0 : (isSideBySide ? 18.0 : 12.0);
       const minCommitmentDuration = 1.4;
 
-      // Hold attack line firmly through corner entry and mid-corner; do NOT abort or weave rapidly on rubbing/squeezes
       const shouldAbort = (this.age > maxAttackAge)
         || (!isSideBySide && this.noProgressAge > 5.0)
         || (!isSideBySide && !this.divebombActive && this.age > minCommitmentDuration && newlyUnsafe);
@@ -493,10 +481,9 @@ export class TacticalAttackEngine {
       this.draftAge = Math.max(0, this.draftAge - dt);
     }
 
-    // Calculate available track space to the left (positive lateral) and right (negative lateral) of the lead vehicle
     const leadLateral = finite(target.otherLateral, 0);
-    const spaceOnLeft = roadMargin - leadLateral;   // Distance from target to left boundary (+margin)
-    const spaceOnRight = leadLateral + roadMargin;  // Distance from target to right boundary (-margin)
+    const spaceOnRight = roadMargin - leadLateral; // available asphalt on right (+lateral)
+    const spaceOnLeft = roadMargin + leadLateral;  // available asphalt on left (-lateral)
 
     // 2. Dynamic Divebomb & Switchback checks in corners
     const divebomb = inCorner ? this.evaluateDivebomb({
@@ -521,20 +508,19 @@ export class TacticalAttackEngine {
     const targetSpeed = Math.max(vehicle.speed, target.other.speed + 18.0);
     const candidates = [];
 
-    // Attack Swoops: Clean, stable lateral separation (2.35m to 2.65m) for slipstream pull-out
-    // Prevents extreme lateral jumps that scrub speed or upset car balance at high velocity
+    // Lateral separation for slipstream pull-out
     const lateralSwoop = clamp(2.35 + this.aggression * 0.30, 2.35, 2.65);
 
-    // Left Attack Lane Candidate: lateral separation to the left (+lateral) of lead car
+    // Left Attack Lane Candidate (-lateral, side = -1):
     if (spaceOnLeft >= 2.2) {
       const isLeftInside = inCorner && turnSign < 0;
       const isLeftDive = isLeftInside && divebomb.feasible;
       const isLeftSwitch = !isLeftInside && inCorner && switchback.feasible;
 
-      const leftSwoopOffset = clamp(leadLateral + lateralSwoop, -baseRoadMargin + 0.8, baseRoadMargin - 0.8);
+      const leftSwoopOffset = clamp(leadLateral - lateralSwoop, -baseRoadMargin + 0.8, baseRoadMargin - 0.8);
       const leftTargetOffset = isLeftDive
         ? clamp(divebomb.insideOffset, -baseRoadMargin + 0.8, baseRoadMargin - 0.8)
-        : (isLeftInside ? clamp(Math.min(3.2, baseRoadMargin * 0.70), -baseRoadMargin + 0.8, baseRoadMargin - 0.8)
+        : (isLeftInside ? clamp(-Math.min(3.2, baseRoadMargin * 0.70), -baseRoadMargin + 0.8, baseRoadMargin - 0.8)
           : (isLeftSwitch ? clamp(switchback.outsideOffset, -baseRoadMargin + 0.8, baseRoadMargin - 0.8) : leftSwoopOffset));
 
       const leftCorridor = awareness.evaluateCorridor({
@@ -569,7 +555,7 @@ export class TacticalAttackEngine {
 
         candidates.push({
           phase,
-          side: 1,
+          side: -1,
           offset: leftTargetOffset,
           corridor: leftCorridor,
           score: leftCorridor.collisionFree ? score : score - 15,
@@ -580,16 +566,16 @@ export class TacticalAttackEngine {
       }
     }
 
-    // Right Attack Lane Candidate: lateral separation to the right (-lateral) of lead car
+    // Right Attack Lane Candidate (+lateral, side = 1):
     if (spaceOnRight >= 2.2) {
       const isRightInside = inCorner && turnSign > 0;
       const isRightDive = isRightInside && divebomb.feasible;
       const isRightSwitch = !isRightInside && inCorner && switchback.feasible;
 
-      const rightSwoopOffset = clamp(leadLateral - lateralSwoop, -baseRoadMargin + 0.8, baseRoadMargin - 0.8);
+      const rightSwoopOffset = clamp(leadLateral + lateralSwoop, -baseRoadMargin + 0.8, baseRoadMargin - 0.8);
       const rightTargetOffset = isRightDive
         ? clamp(divebomb.insideOffset, -baseRoadMargin + 0.8, baseRoadMargin - 0.8)
-        : (isRightInside ? clamp(-Math.min(3.2, baseRoadMargin * 0.70), -baseRoadMargin + 0.8, baseRoadMargin - 0.8)
+        : (isRightInside ? clamp(Math.min(3.2, baseRoadMargin * 0.70), -baseRoadMargin + 0.8, baseRoadMargin - 0.8)
           : (isRightSwitch ? clamp(switchback.outsideOffset, -baseRoadMargin + 0.8, baseRoadMargin - 0.8) : rightSwoopOffset));
 
       const rightCorridor = awareness.evaluateCorridor({
@@ -624,7 +610,7 @@ export class TacticalAttackEngine {
 
         candidates.push({
           phase,
-          side: -1,
+          side: 1,
           offset: rightTargetOffset,
           corridor: rightCorridor,
           score: rightCorridor.collisionFree ? score : score - 15,
@@ -635,8 +621,7 @@ export class TacticalAttackEngine {
       }
     }
 
-    // Apply lane commitment hysteresis: once committed to an overtaking side (left vs right),
-    // penalize sudden opposite-side flipping unless the current lane is blocked
+    // Lane commitment hysteresis
     if (this.phase !== 'NONE' && this.phase !== 'RETURN' && this.side != null) {
       for (const cand of candidates) {
         if (cand.side === this.side) {
@@ -651,7 +636,7 @@ export class TacticalAttackEngine {
     const chosen = candidates[0] ?? null;
 
     const isSlowObstacle = target.other.speed < 12.0 && target.delta < 24.0;
-    const attackRange = 28 + aggression * 10; // up to 38m
+    const attackRange = 28 + aggression * 10;
 
     const straightSend = !inCorner && (chosen?.timeGainS ?? 0) > 0.02 && target.delta < attackRange;
     const attackTrigger = Boolean(chosen) && (
@@ -711,7 +696,6 @@ export class TacticalAttackEngine {
       };
     }
 
-    // If target is slow or stopped, NEVER fall into DRAFT behind it! Force immediate open flank evasion pass!
     if (isSlowObstacle) {
       const openSide = spaceOnRight >= spaceOnLeft ? 1 : -1;
       const evasionOffset = openSide > 0
@@ -766,7 +750,6 @@ export class TacticalAttackEngine {
       };
     }
 
-    // Default to drafting in tow if waiting for optimal launch window
     this.phase = 'DRAFT';
     return {
       phase: 'DRAFT',

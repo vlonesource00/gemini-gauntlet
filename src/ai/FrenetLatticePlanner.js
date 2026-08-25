@@ -1,20 +1,17 @@
 /**
  * FrenetLatticePlanner.js
- * Multi-candidate Frenet-space trajectory generation and lattice evaluation engine.
- * Computes smooth C2 quintic minimum-jerk spatial trajectories, curvature profiles,
- * G-limits, spatial bounding-capsule collision checking, track limit compliance,
- * candidate selection hysteresis (-22.0 bonus), and deduplicated visual candidates.
+ * Modular Multi-Candidate Frenet Trajectory Lattice & Dynamic Line Adaptation Engine:
+ * - Smooth C2 Quintic Minimum-Jerk Spatial Trajectories
+ * - Dynamic Line Adaptation (Alternative Racing Lines when blocked or forced off-line)
+ * - Dirty-Air Wake Avoidance Corridors
+ * - Bounding-Capsule Collision Prediction & Clearance Assessment
+ * - Off-Track Rejoin & Surface Recovery Trajectory Synthesis
+ * - Candidate Selection Hysteresis (-22.0 bonus) and 3D Visual Spline Extraction
  */
 
+import { clamp, wrap, wrapAngle } from '../core/math.js';
+
 const finite = (value, fallback = 0) => (Number.isFinite(value) ? value : fallback);
-
-const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
-
-const wrapAngle = (angle) => {
-  let result = (angle + Math.PI) % (Math.PI * 2);
-  if (result < 0) result += Math.PI * 2;
-  return result - Math.PI;
-};
 
 /**
  * Quintic polynomial minimum-jerk lateral transition curve: S(u) = 10u^3 - 15u^4 + 6u^5.
@@ -94,7 +91,7 @@ export class FrenetLatticePlanner {
   }
 
   /**
-   * Reset internal planner state (e.g. on race restart or teleport).
+   * Reset internal planner state.
    */
   reset() {
     this.lastSelectedOffset = null;
@@ -189,7 +186,7 @@ export class FrenetLatticePlanner {
         roadViolation += excess + 1.0;
       }
 
-      // Edge risk starts building only when exceedingly close to the actual surface boundary
+      // Edge risk builds when close to the track boundary
       const edgeBuffer = Math.max(0.12, 0.40 - aggression * 0.22 - (kerbAllowance > 0 ? 0.12 : 0));
       edgeRisk += Math.max(0, Math.abs(lateral) - (surfaceLimit - edgeBuffer)) ** 2;
 
@@ -233,7 +230,6 @@ export class FrenetLatticePlanner {
           predictedCollisions += 1;
           collisionRisk += 25000 + (-longitudinalClearance + 0.2) * (-lateralClearance + 0.2) * 2500;
         } else if (!isSlowObstaclePass && !separatingPassTrajectory) {
-          // Attenuate distant proximity penalty so AI does not hesitate to set up bold overtaking maneuvers
           const distAbs = Math.abs(longitudinalGap);
           const proximityHorizon = Math.max(4.5, 8.5 - aggression * 2.0);
           if (distAbs < proximityHorizon && lateralClearance < 1.0) {
@@ -390,7 +386,7 @@ export class FrenetLatticePlanner {
       }
     }
 
-    // Generate balanced left, center, right, and evasive candidates so AI can dynamically adapt if blocked
+    // Generate balanced left, center, right, and evasive candidates
     const oppositeLane = intendedOffset > 0.5 ? -Math.min(margin * 0.75, intendedOffset) : (intendedOffset < -0.5 ? Math.min(margin * 0.75, -intendedOffset) : 0);
     const candidatePool = recovering
       ? [intendedOffset, currentLateral, 0]
@@ -493,7 +489,7 @@ export class FrenetLatticePlanner {
 
     this.lastSelectedOffset = selected.terminalLateral;
 
-    // Filter diagnostic candidates for 3D visualization: keep 1 best candidate per distinct lateral corridor
+    // Filter diagnostic candidates for 3D visualization
     const visualCandidates = [selected];
     selected.selected = true;
     for (const cand of candidateTrajectories) {
@@ -534,7 +530,7 @@ export class FrenetLatticePlanner {
       maxCurvaturePerM: selected.maxCurvaturePerM,
       maxLateralAccelerationMps2: selected.maxLateralAccelerationMps2,
       intentType: selected.intentType,
-      candidates: visualCandidates, // Clean deduplicated candidate array for 3D visualization
+      candidates: visualCandidates,
       committed,
       recovering: Boolean(recovering)
     };

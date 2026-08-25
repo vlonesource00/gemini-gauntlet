@@ -1041,3 +1041,117 @@ canvas {
     display: none;
   }
 }
+
+/* Multi-Car Race Leaderboard */
+.race-leaderboard {
+  position: absolute;
+  top: 92px;
+  right: 18px;
+  width: 290px;
+  background: rgba(6, 12, 19, 0.88);
+  backdrop-filter: blur(12px);
+  border: 1px solid rgba(0, 240, 255, 0.35);
+  border-radius: 4px;
+  padding: 8px 10px;
+  font-family: ui-monospace, Consolas, monospace;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.6);
+  pointer-events: none;
+  z-index: 15;
+}
+
+.race-leaderboard header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  border-bottom: 1px solid rgba(0, 240, 255, 0.2);
+  padding-bottom: 4px;
+  margin-bottom: 6px;
+  font-size: 10px;
+  font-weight: 800;
+  color: var(--cyan);
+  letter-spacing: 0.12em;
+}
+
+.leaderboard-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  max-height: 400px;
+  overflow-y: hidden;
+}
+
+.leaderboard-row {
+  display: grid;
+  grid-template-columns: 24px 36px 1fr 48px 42px;
+  align-items: center;
+  gap: 4px;
+  font-size: 9.5px;
+  padding: 2px 4px;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.leaderboard-row.player {
+  background: rgba(0, 240, 255, 0.18);
+  border-left: 2px solid var(--cyan);
+}
+
+.leaderboard-pos {
+  font-weight: 800;
+  color: #fff;
+}
+
+.leaderboard-badge {
+  font-size: 8px;
+  font-weight: 800;
+  padding: 1px 3px;
+  border-radius: 2px;
+  text-align: center;
+}
+.badge-proto { background: #ff1744; color: #fff; }
+.badge-gt { background: #00e5ff; color: #000; }
+.badge-tour { background: #ffd600; color: #000; }
+
+.leaderboard-name {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: #d6e8f7;
+  font-weight: 600;
+}
+
+.leaderboard-gap {
+  text-align: right;
+  color: var(--lime);
+  font-weight: 700;
+}
+
+.leaderboard-speed {
+  text-align: right;
+  color: var(--text-muted);
+}
+
+/* Noclip Spectator Banner */
+.noclip-hud {
+  position: absolute;
+  top: 72px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: rgba(10, 22, 34, 0.94);
+  border: 1px solid var(--cyan);
+  box-shadow: 0 0 24px rgba(0, 240, 255, 0.5);
+  color: #fff;
+  padding: 8px 20px;
+  border-radius: 4px;
+  font: 700 11px ui-monospace, Consolas, monospace;
+  letter-spacing: 0.12em;
+  text-align: center;
+  pointer-events: none;
+  z-index: 30;
+  animation: pulse-border 2s infinite ease-in-out;
+}
+
+@keyframes pulse-border {
+  0%, 100% { border-color: rgba(0, 240, 255, 0.8); }
+  50% { border-color: rgba(212, 255, 0, 0.9); }
+}

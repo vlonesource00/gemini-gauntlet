@@ -1,27 +1,22 @@
 /**
  * TacticalDefenseEngine.js
- * Advanced Unified Motorsport Defense Engine for Gemini Gauntlet:
- * - Proactive Door Shutting: Immediate inside lane claim within 45m when challenger is closing (zero hesitation)
- * - Physical Apex Shielding (APEX_SHIELD): Pins inside line tight to apex curb (0.35m margin), denying inside room completely
- * - Outside Defense Squeeze (EXIT_SQUEEZE / OUTSIDE_DEFENSE_SQUEEZE): Smoothly drifts out to leave exactly 1 car width (2.2m) at track boundary
- * - Unyielding Under Pressure: Holds committed defensive offset under wheel-to-wheel rubbing pressure without yielding or swerving
- * - Anti-Weave & Feint Filtering: Strict FIA single defensive move corridor locking while ignoring rapid opponent feints
- * - Aerodynamic Tow-Breaking Math: Stepped lateral shifts destroying >66% follower tow
- * - Defensive ERS Deployment Arbitration: Straightaway counter-bursts and corner-exit launch acceleration
+ * Modular Motorsport Combat Defense, Line Protection & Racecraft Intelligence:
+ * - FIA Single-Move Rule Enforcement (Strict Non-Weaving Directional Locking)
+ * - Proactive Door Shutting (Claiming inside defensive lane up to 45m ahead)
+ * - Physical Apex Shielding (APEX_SHIELD: pinning inside line tight to apex curb)
+ * - Outside Exit Squeezing (EXIT_SQUEEZE: leaving exactly 1 car width at edge)
+ * - Aerodynamic Tow Breaking (BREAK_TOW: stepped lateral shifts destroying follower draft)
+ * - Unyielding Side-by-Side Rubbing Pressure Defense
+ * - Asymmetric Attacker Feint Filtering
  */
 
-const finite = (value, fallback = 0) => (Number.isFinite(value) ? value : fallback);
-const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
-const saturate = (value) => Math.max(0, Math.min(1, value));
+import { clamp, wrap, saturate } from '../core/math.js';
 
-const wrap = (value, length) => {
-  if (length <= 0) return 0;
-  return ((value % length) + length) % length;
-};
+const finite = (value, fallback = 0) => (Number.isFinite(value) ? value : fallback);
 
 export class TacticalDefenseEngine {
   /**
-   * @param {Object} options
+   * @param {Object} [options]
    * @param {number} [options.index=1] - Driver index
    * @param {number} [options.defenseReactivity=0.8] - Defensive responsiveness (0-1)
    */
@@ -54,7 +49,7 @@ export class TacticalDefenseEngine {
     this.ersDefensiveDeployTimer = 0;
     this.ersDefensiveReason = 'NONE';
     this.lastDefendedCorner = false;
-    this.cornerPhase = 'NONE'; // APPROACH, ENTRY, APEX, EXIT
+    this.cornerPhase = 'NONE';
     this.intent = null;
     this.rubbingPressure = 0;
     return this;
@@ -123,8 +118,6 @@ export class TacticalDefenseEngine {
     const bodyGap = Math.max(0, gap - 4.6);
     const ttc = closingSpeed > 0.10 ? bodyGap / closingSpeed : (closingSpeed > -0.4 ? bodyGap / 0.15 : 99);
 
-    // Upcoming corner proximity
-    // Upcoming corner proximity (immediate to medium horizon)
     const sampleDist = finite(vehicle.distance, 0);
     const turnSamples = [0, 6, 12, 20, 32, 50, 75].map((d) =>
       track?.atDistance ? track.atDistance(sampleDist + d) : { curvature: 0, turnSign: 1, s: sampleDist + d }
@@ -146,13 +139,12 @@ export class TacticalDefenseEngine {
     const isClosingThreat = (gap < 9.0) || (gap <= 30.0 && closingSpeed >= 0.25) || (gap <= 45.0 && closingSpeed >= 1.2 && distToCorner < 75);
     const proactiveBoost = isClosingThreat ? 0.30 : 0;
 
-    // Non-linear synergy boost when closing rapidly into a braking zone
     const synergy = fClose * fCorner * 0.28 + proactiveBoost;
 
     const rawThreat = 0.20 * fGap + 0.22 * fClose + 0.24 * fTtc + 0.14 * fLat + 0.15 * fCorner + synergy;
     const threatScore = saturate(rawThreat * (0.85 + this.defenseReactivity * 0.35));
 
-    // Schmitt-Trigger Posture Hysteresis with instant critical posture for closing threats within striking distance
+    // Schmitt-Trigger Posture Hysteresis
     let threatLevel = this.threatLevel;
     if (threatScore >= 0.65 || (isClosingThreat && threatScore >= 0.40)) {
       threatLevel = 'CRITICAL';
@@ -168,7 +160,7 @@ export class TacticalDefenseEngine {
   }
 
   /**
-   * Real-time Attacker Intent Classifier with Heading & Momentum Vector Tracking and Feint Filtering.
+   * Real-time Attacker Intent Classifier with Feint Filtering.
    */
   classifyAttackerIntent({
     challenger,
@@ -186,16 +178,15 @@ export class TacticalDefenseEngine {
     const lateralDelta = attackerLateral - currentLateral;
     const attackerLatVel = finite(challenger.otherLateralSpeed, finite(challenger.relativeLateralVelocity, 0));
     const attackerNose = finite(challenger.otherNoseTrackDeviation, 0);
-    const insideSign = turnSign;
-    const outsideSign = -turnSign;
+    const insideSign = -turnSign;
+    const outsideSign = turnSign;
 
-    // Lateral movement vectors relative to corner geometry
     const isMovingInside = (attackerLateral * insideSign) > 0.4 || (attackerLatVel * insideSign) > 0.12 || (attackerNose * insideSign) > 0.03;
     const isPositionedOutside = (attackerLateral * outsideSign) > 0.5;
     const isPointingOutside = (attackerLatVel * outsideSign) > 0.15 || (attackerNose * outsideSign) > 0.04;
     const isMovingOutside = isPositionedOutside || isPointingOutside;
 
-    // Asymmetric Feint Filter: tracks dwell time on outside to prevent biting on rapid feints
+    // Asymmetric Feint Filter: tracks dwell time on outside
     if (isMovingOutside && !isMovingInside) {
       this.outsideDwellTimer += dt;
     } else {
@@ -289,7 +280,6 @@ export class TacticalDefenseEngine {
     const isRubbingPressure = isAlongside && lateralSeparation < 2.35;
     this.rubbingPressure = isRubbingPressure ? clamp(1.0 - lateralSeparation / 2.35, 0.2, 1.0) : 0;
 
-    // Attacker Intent Classification with Asymmetric Feint Filter
     const attackerIntent = this.classifyAttackerIntent({
       challenger,
       currentLateral,
@@ -312,12 +302,11 @@ export class TacticalDefenseEngine {
       this.lastDefendedCorner = this.defending;
     }
 
-    // Ongoing Active Defense Handling (Holding committed corridor unyielding under pressure)
+    // Ongoing Active Defense Handling
     if (this.defending) {
       this.age += dt;
       const target = traffic.entries.find((e) => e.other.id === this.defenseTargetId) ?? challenger;
 
-      // Check if defense completed or challenger backed off
       const passed = target && target.delta > 2.5;
       const challengerBackedOff = !target || (target.delta < -18.0 && closingSpeed < 0.3) || (target.delta < -12.0 && closingSpeed < -0.4);
       if (passed || challengerBackedOff || (this.age > 6.0 && !isRubbingPressure)) {
@@ -341,28 +330,24 @@ export class TacticalDefenseEngine {
         };
       }
 
-      // Straightaway ERS Counter-Burst when threatened
       if (!inCorner && (closingSpeed > 1.8 || threatLevel === 'CRITICAL') && gap < 26.0 && vehicle.controls?.throttle > 0.80) {
         this.ersDefensiveDeployTimer = 2.0;
         this.ersDefensiveReason = 'STRAIGHT_COUNTER_BURST';
       }
 
-      // FIA single-move locked direction (prevent weaving, ignore challenger feints)
+      // FIA single-move locked direction (strictly prevent weaving)
       const committedSign = this.defenseDirection || (this.targetOffset !== 0 ? Math.sign(this.targetOffset) : insideSign);
       const isOutsideCommitted = this.defenseDirection !== 0 && this.defenseDirection === outsideSign;
 
       // Dynamic Phase Transitions through Corner Phases
       if (distToCorner > 65) {
         if (this.towBreakTimer > 0 && !isRubbingPressure) {
-          // Aerodynamic tow break on long straights
           this.phase = 'BREAK_TOW';
         } else if (gap < 24.0 && (closingSpeed > 0.6 || threatLevel === 'CRITICAL')) {
-          // Proactive inside cover on straight approach
           this.phase = 'LOCK_DEFENSIVE_LANE';
           this.targetOffset = clamp(committedSign * Math.min(2.5, roadMargin * 0.50), -roadMargin + 1.0, roadMargin - 1.0);
           this.committedDefensiveOffset = this.targetOffset;
         } else {
-          // On open straightaways without immediate dive threat, release defense smoothly
           this._clear('RETURN_PACE', 0.5);
           return {
             phase: 'RETURN_PACE',
@@ -383,7 +368,6 @@ export class TacticalDefenseEngine {
           };
         }
       } else if (gap > 12.0 && inCorner) {
-        // When challenger is not within immediate striking distance in corner complex, take racing line
         this.phase = 'PACE_DEFEND';
         this.targetOffset = nominalBase;
       } else if ((attackerIntent === 'ATTACK_OUTSIDE_MOMENTUM' || isOutsideCommitted) && (inCorner || distToCorner <= 45)) {
@@ -393,7 +377,7 @@ export class TacticalDefenseEngine {
         this.targetOffset = outsideSqueezeOffset;
         this.committedDefensiveOffset = outsideSqueezeOffset;
       } else if (distToCorner <= 65 && distToCorner > 28 && !isOutsideCommitted) {
-        // Proactive Inside Lane Lock on braking approach - Claim preferred defensive inside lane with zero hesitation
+        // Proactive Inside Lane Lock on braking approach - Claim inside defensive lane with zero hesitation
         this.phase = 'LOCK_DEFENSIVE_LANE';
         const insideLockOffset = clamp(committedSign * Math.min(3.5, roadMargin * 0.65), -roadMargin + 1.0, roadMargin - 1.0);
         this.targetOffset = insideLockOffset;
@@ -411,8 +395,7 @@ export class TacticalDefenseEngine {
         this.committedDefensiveOffset = this.targetOffset;
       } else if (inCorner || distToCorner <= 14) {
         if (inCorner) {
-          // Physical Apex Shielding through corner sequences & chicanes:
-          // Shield the inside apex of the immediate turn being negotiated
+          // Physical Apex Shielding through corner sequences & chicanes
           this.phase = 'APEX_SHIELD';
           const apexShieldOffset = clamp(insideSign * Math.min(2.8, roadMargin * 0.50), -roadMargin + 1.0, roadMargin - 1.0);
           this.targetOffset = apexShieldOffset;
@@ -433,7 +416,6 @@ export class TacticalDefenseEngine {
         }
       }
 
-      // Unyielding under rubbing pressure: never swerve away or yield the inside corner rights
       if (isRubbingPressure && this.committedDefensiveOffset !== 0) {
         this.targetOffset = this.committedDefensiveOffset;
       }
@@ -481,7 +463,6 @@ export class TacticalDefenseEngine {
       };
     }
 
-    // Proactive Triggering: Only defend against genuine closing threats or close proximity
     const isThreatening = threatLevel === 'CRITICAL' || threatLevel === 'HIGH' || (gap < 12.0 && closingSpeed > -0.4) || (gap < 24.0 && closingSpeed > 0.6);
     const shouldDefend = challenger
       && isThreatening
@@ -508,12 +489,10 @@ export class TacticalDefenseEngine {
       };
     }
 
-    // If threatening, clear cooldown for immediate zero-hesitation response
     if (isThreatening) {
       this.cooldown = 0;
     }
 
-    // Relative challenger offset
     const challengerLateral = finite(challenger.otherLateral, finite(challenger.side, 0));
     const lateralDelta = challengerLateral - currentLateral;
     const inDirectTow = Math.abs(lateralDelta) < 1.1 && gap < 45.0;
@@ -523,17 +502,14 @@ export class TacticalDefenseEngine {
     let reason = 'CLAIM_INSIDE_DEFENSIVE_CORRIDOR';
 
     if (attackerIntent === 'ATTACK_OUTSIDE_MOMENTUM') {
-      // Outside Defense Squeeze: Smoothly drift out to leave exactly 1 car width (2.2m) at the track boundary
       defensiveOffset = clamp(outsideSign * Math.min(2.8, roadMargin - 2.4), -roadMargin + 1.0, roadMargin - 1.0);
       phase = 'OUTSIDE_DEFENSE_SQUEEZE';
       reason = 'SQUEEZE_OUTSIDE_MOMENTUM_CORRIDOR';
     } else if (inCorner) {
-      // Physical Apex Shielding: Pin inside line tight to apex curb (0.6m margin), completely denying inside room
       defensiveOffset = clamp(insideSign * Math.min(3.4, roadMargin * 0.65), -roadMargin + 1.0, roadMargin - 1.0);
       phase = 'APEX_SHIELD';
       reason = 'PHYSICAL_APEX_SHIELDING';
     } else if (gap > 18.0 && inDirectTow && distToCorner > 65) {
-      // Stepped lateral tow break (shifts 2.0m off draft line to destroy >66% follower tow)
       const breakSide = distToCorner < 140 ? insideSign : (currentLateral > 0 ? -1 : 1);
       const breakShift = 2.0 * breakSide;
       defensiveOffset = clamp(currentLateral + breakShift, -roadMargin + 1.0, roadMargin - 1.0);
@@ -541,13 +517,11 @@ export class TacticalDefenseEngine {
       reason = 'AERODYNAMIC_TOW_BREAK';
       this.towBreakTimer = 2.2;
     } else {
-      // Proactive Door Shutting: Claim preferred defensive inside lane with zero hesitation
       defensiveOffset = clamp(insideSign * Math.min(3.2, roadMargin * 0.60), -roadMargin + 1.0, roadMargin - 1.0);
       phase = 'LOCK_DEFENSIVE_LANE';
       reason = 'PROACTIVE_SHUT_INSIDE_DOOR';
     }
 
-    // Candidate corridors evaluation (handles third-party blockers if present)
     const candidateOffsets = [
       { offset: defensiveOffset, phase, reason },
       { offset: clamp(-defensiveOffset * 0.6, -roadMargin + 0.8, roadMargin - 0.8), phase: 'DEFEND_ALTERNATIVE', reason: 'DEFEND_ALTERNATIVE_LANE' },
@@ -566,7 +540,6 @@ export class TacticalDefenseEngine {
           targetSpeed: vehicle.speed
         });
 
-        // Challenger proximity/rubbing is tolerated racing pressure; only 3rd-party blockers trigger alternative lanes
         const isThirdPartyBlocker = corridor.blockerId && corridor.blockerId !== challenger.other.id;
         if (corridor.legal && (!isThirdPartyBlocker || corridor.collisionFree)) {
           chosenCandidate = cand;
@@ -575,7 +548,6 @@ export class TacticalDefenseEngine {
       }
     }
 
-    // Unyielding Defensive Line Commitment (Strict FIA single defensive move corridor lock)
     this.phase = chosenCandidate.phase;
     this.defenseTargetId = challenger.other.id;
     this.targetOffset = chosenCandidate.offset;

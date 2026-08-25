@@ -262,10 +262,11 @@ export class ResearchAIController {
 
     const offensiveDeploy = committed || this._ersAttackMode;
     const defensiveDeploy = defending && defensiveErsRequested;
+    const cornerExitDeploy = throttle > 0.80 && Math.abs(finite(vehicle?.controls?.steer, 0)) < 0.35;
     const paceSurplusDeploy = (straight && throttle > 0.85 && surplus > 0.01)
       || (lapProgress > 0.80 && throttle > 0.88 && surplus > 0.015);
 
-    const shouldDeploy = canDeploy && (offensiveDeploy || defensiveDeploy || paceSurplusDeploy);
+    const shouldDeploy = canDeploy && (offensiveDeploy || defensiveDeploy || paceSurplusDeploy || cornerExitDeploy);
 
     plan.targetSoc = targetSoc;
     plan.mode = shouldDeploy ? 'ATTACK' : 'AUTO';
@@ -479,33 +480,49 @@ export class ResearchAIController {
       insideLineOffset: targetOffset
     });
 
-    this.trajectoryPlan = this.trajectoryPlanner.plan({
-      vehicle,
-      track,
-      desiredOffset: targetOffset,
-      fallbackOffsets: recovering ? [] : [paceLine, finite(current?.lateral, 0)],
-      tacticalCandidates: recovering ? [] : tacticalCandidates,
-      trafficEntries: traffic.entries,
-      targetSpeed: physicalTargetSpeed,
-      aggression: this._aggression,
-      racecraftPhase: defending ? defDecision.phase : attDecision.phase,
-      targetId,
-      recovering,
-      pitActive: Boolean(vehicle.pitIntent?.active),
-      urgent: committed || defending || isOffTrack,
-      roadMargin: plannedRoadMargin,
-      kerbAllowance,
-      lookAhead: lookAheadDist,
-      trackingDistance,
-      referenceLineAtDistance: (s) => {
-        if (isMatchingTrack && typeof this.referenceProfile?.paceAtDistance === 'function') {
-          return this.referenceProfile.paceAtDistance(s)?.lineLateral ?? 0;
+    // 4. Multi-Rate Decoupled Trajectory Lattice Evaluation (25Hz / Phase-Triggered)
+    this.planTimer = (this.planTimer || 0) + dt;
+    const tacticalPhase = defending ? defDecision.phase : attDecision.phase;
+    const phaseChanged = (this.lastRacecraftPhase !== tacticalPhase);
+    this.lastRacecraftPhase = tacticalPhase;
+
+    const shouldReplan = !this.trajectoryPlan
+      || phaseChanged
+      || committed
+      || defending
+      || isOffTrack
+      || this.planTimer >= 0.04;
+
+    if (shouldReplan) {
+      this.planTimer = (this.index % 4) * (0.04 / 4); // time-slice phase offset across cars
+      this.trajectoryPlan = this.trajectoryPlanner.plan({
+        vehicle,
+        track,
+        desiredOffset: targetOffset,
+        fallbackOffsets: recovering ? [] : [paceLine, finite(current?.lateral, 0)],
+        tacticalCandidates: recovering ? [] : tacticalCandidates,
+        trafficEntries: traffic.entries,
+        targetSpeed: physicalTargetSpeed,
+        aggression: this._aggression,
+        racecraftPhase: tacticalPhase,
+        targetId,
+        recovering,
+        pitActive: Boolean(vehicle.pitIntent?.active),
+        urgent: committed || defending || isOffTrack,
+        roadMargin: plannedRoadMargin,
+        kerbAllowance,
+        lookAhead: lookAheadDist,
+        trackingDistance,
+        referenceLineAtDistance: (s) => {
+          if (isMatchingTrack && typeof this.referenceProfile?.paceAtDistance === 'function') {
+            return this.referenceProfile.paceAtDistance(s)?.lineLateral ?? 0;
+          }
+          const pt = track?.atDistance ? track.atDistance(s) : { curvature: 0 };
+          const curv = finite(pt.curvature, 0);
+          return clamp(-Math.sign(curv) * Math.min(2.4, Math.abs(curv) * 35.0), -2.5, 2.5);
         }
-        const pt = track?.atDistance ? track.atDistance(s) : { curvature: 0 };
-        const curv = finite(pt.curvature, 0);
-        return clamp(-Math.sign(curv) * Math.min(2.4, Math.abs(curv) * 35.0), -2.5, 2.5);
-      }
-    });
+      });
+    }
 
     const trackingPoint = this.trajectoryPlan.trackingPoint ?? this.trajectoryPlan.points.at(-1);
     const plannedTargetOffset = finite(trackingPoint?.lateral, targetOffset);
@@ -553,7 +570,7 @@ export class ResearchAIController {
       yawRate: vehicle.yawRate,
       slipAngle: liveSlip,
       speed: vehicle.speed,
-      currentCurvature: currentCurv,
+      currentCurvature: signedCurv,
       dt,
       committed,
       recovering
@@ -561,22 +578,6 @@ export class ResearchAIController {
 
     // 6. Longitudinal Target Speed & Dynamic Adjustments
     let desiredSpeed = physicalTargetSpeed;
-
-    const speedAero = vehicle.classKey === 'prototype' ? clamp((vehicle.speed - 16.0) / 32.0, 0, 1) : 0;
-    const baseClassG = (vehicle.classKey === 'prototype' ? (1.80 + 0.85 * speedAero) : vehicle.classKey === 'gt' ? 1.25 : 0.98) * 9.81;
-    const lateralAccelBudget = baseClassG * tireGripFactor * (committed ? 1.08 : 1.0);
-    const decelBudget = (vehicle.classKey === 'prototype' ? 14.5 : vehicle.classKey === 'gt' ? 9.8 : 6.8) * tireGripFactor;
-    const trajectorySpeedLimit = this.trajectoryPlan.points.reduce((limit, p) => {
-      const fwd = Math.max(0, finite(p.forwardDistance, 0));
-      if (fwd < 2.0) return limit;
-      const curv = Math.max(0, finite(p.curvature, 0));
-      if (curv < 1e-4) return limit;
-      const cornerSpeed = Math.sqrt(lateralAccelBudget / curv);
-      const reachableSpeed = Math.sqrt(cornerSpeed * cornerSpeed + 2.0 * decelBudget * fwd);
-      return Math.min(limit, reachableSpeed);
-    }, physicalTargetSpeed);
-
-    desiredSpeed = Math.min(desiredSpeed, trajectorySpeedLimit);
 
     const refData = (activeProfile && typeof activeProfile.paceAtDistance === 'function')
       ? activeProfile.paceAtDistance(vehicle.distance)
@@ -589,7 +590,7 @@ export class ResearchAIController {
       : null;
 
     if (scaledRef != null && tacticalMode === 'PACE') {
-      desiredSpeed = Math.max(desiredSpeed, Math.min(physicalTargetSpeed * 1.05, scaledRef));
+      desiredSpeed = Math.min(physicalTargetSpeed, scaledRef);
     }
 
     const passTarget = attDecision.target;
@@ -650,9 +651,9 @@ export class ResearchAIController {
     }
 
     // Never exceed physical cornering limit or global braking envelope
-    desiredSpeed = Math.min(desiredSpeed, trajectorySpeedLimit);
+    desiredSpeed = Math.min(desiredSpeed, physicalTargetSpeed);
     if (scaledRef != null) {
-      const diveBonus = (committed || attDecision.divebombing || straightSend) ? 1.25 : 1.02;
+      const diveBonus = (committed || attDecision.divebombing || straightSend) ? 1.15 : 1.0;
       const envelopeCap = scaledRef * diveBonus;
       desiredSpeed = Math.min(desiredSpeed, envelopeCap);
     }

@@ -402,15 +402,15 @@ export class CoupledDynamicsController {
       // Gentle recovery throttle / brake
       throttle = speedError > 0.5 ? clamp(0.35 + speedError * 0.05, 0.3, 0.6) : 0;
       brake = speedError < -2.0 ? clamp((-speedError - 2.0) * 0.25, 0.1, 0.7) : 0;
-    } else if (speedError < -0.70) {
+    } else if (speedError < -2.20) {
       // =======================================================================
       // DECELERATION & TRAIL-BRAKING ZONE
       // =======================================================================
       throttle = 0;
 
-      if (speedError < -2.20) {
+      if (speedError < -6.50) {
         // High-G threshold braking on approach (up to -3.5G decel)
-        rawBrake = clamp(0.85 + (-speedError - 2.20) * 0.25, 0.85, 1.0);
+        rawBrake = clamp(0.85 + (-speedError - 6.50) * 0.15, 0.85, 1.0);
 
         // Trail braking: smoothly blend off brake along friction circle boundary
         if (isCornering || latUtilization > 0.12) {
@@ -432,26 +432,36 @@ export class CoupledDynamicsController {
           brake = rawBrake;
         }
       } else {
-        // Smooth entry coasting / light modulation
-        rawBrake = clamp((-speedError - 0.70) * 0.40, 0, 0.65);
-        brake = isCornering ? clamp(rawBrake * remainingLongBudget * 0.6, 0, 0.35) : rawBrake;
+        // Smooth progressive braking (speedError between -2.20 and -6.50)
+        const brakeFrac = (-speedError - 2.20) / (6.50 - 2.20);
+        rawBrake = clamp(brakeFrac * 0.85, 0.05, 0.85);
+        brake = isCornering ? clamp(rawBrake * remainingLongBudget * 0.8, 0, 0.50) : rawBrake;
       }
     } else {
       // =======================================================================
-      // ACCELERATION & APEX EXIT POWER LAUNCH ZONE
+      // ACCELERATION, MOMENTUM CARRY & APEX EXIT POWER LAUNCH ZONE
       // =======================================================================
       brake = 0;
-      const rawThrottle = clamp(0.88 + speedError * 0.22, 0.50, 1.0);
+      const rawThrottle = speedError >= 0
+        ? clamp(0.95 + speedError * 0.25, 0.70, 1.0)
+        : clamp((speedError + 2.20) / 2.20 * 0.65, 0.20, 0.65); // Smooth coasting / carry momentum when slightly over target
 
       if (isCornering) {
-        // Corner-exit traction control: scale throttle by remaining traction budget and steering unwind
-        const unwindPower = 1.0 - this.unwindFactor * Math.pow(steerMag, 1.2) * 0.35;
-        exitFactor = clamp(remainingLongBudget * unwindPower, 0.42, 1.0);
-        throttle = clamp(rawThrottle * exitFactor, 0.42, 1.0);
+        // Corner-exit power launch: scale throttle with high baseline and fast unwind
+        const unwindPower = 1.0 - this.unwindFactor * Math.pow(steerMag, 1.1) * 0.18;
+        exitFactor = clamp(remainingLongBudget * unwindPower, 0.65, 1.0);
+        throttle = clamp(rawThrottle * exitFactor, 0.35, 1.0);
 
         // High-speed cornering maintenance floor (maintains positive rear-axle load & downforce)
-        if (vSpeed > 14.0 && !straight) {
-          throttle = Math.max(throttle, 0.38);
+        if (vSpeed > 10.0 && !straight) {
+          throttle = Math.max(throttle, 0.45);
+        }
+
+        // Fast full-throttle trigger on steering unwinding
+        if (steerMag < 0.30 || speedError > 0) {
+          throttle = 1.0;
+          launchActive = true;
+          unwindBonus = 1.0;
         }
       } else {
         // Straightaway / unwound steering: instant 100% full launch power!
@@ -583,7 +593,7 @@ export class CoupledDynamicsController {
       p.speed = clamp(vSpeed + (desiredSpeed - vSpeed) * saturate(t / 1.5), 0, 95.0);
       p.time = t;
       p.curvature = finite(ptNode.curvature, 0);
-      p.latG = Math.abs(p.speed * p.curvature) / 9.81;
+      p.latG = Math.abs(p.speed * p.speed * p.curvature) / 9.81;
       p.remainingLongBudget = pedalResult.friction.remainingLongBudget;
     }
 

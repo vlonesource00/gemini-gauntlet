@@ -41,6 +41,12 @@ const TEST_SUITES = [
     name: 'Coupled Dynamics & Stanley Suite',
     file: 'coupled-dynamics-test.mjs',
     description: 'Curvature-feedforward, Stanley steering, 2D G-G friction-circle trail braking, and zero-GC horizon benchmark'
+  },
+  {
+    id: 'twelve-car-race',
+    name: '12-Car Multi-Class Full Grid Race Suite',
+    file: 'twelve-car-race-test.mjs',
+    description: 'Full 12-car grid simulation, pack racing emergence, dirty air wake matrices, multi-car passing, and zero deep overlaps'
   }
 ];
 

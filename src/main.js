@@ -57,42 +57,82 @@ const input = new InputManager(() => {
   audio.unlock().catch(() => {});
 });
 
-// Vehicles Setup
-// Player = Prototype Class (Cyan), AI = Prototype / GT Class (Neon Amber / Orange)
-const player = new Vehicle({
-  id: 'player',
-  name: 'MARTIM',
-  color: '#00f0ff',
-  player: true,
-  spec: 'prototype'
-});
+// ---------------------------------------------------------------------------
+// 4-Car Race Grid Specification & Fleet Initialization
+// ---------------------------------------------------------------------------
+const GRID_SPECS = [
+  { id: 'player', name: 'MARTIM (PLAYER)', spec: 'prototype', color: '#00f0ff', player: true, ai: 'v2', agg: 0.92, skill: 0.95 },
+  { id: 'ai-1', name: 'GAUNTLET-AI', spec: 'prototype', color: '#ff9900', player: false, ai: 'v1', agg: 0.88, skill: 0.92 },
+  { id: 'ai-2', name: 'Apex Prototype 03', spec: 'prototype', color: '#ff1744', player: false, ai: 'v2', agg: 0.90, skill: 0.90 },
+  { id: 'ai-3', name: 'Titan Prototype 04', spec: 'prototype', color: '#76ff03', player: false, ai: 'v1', agg: 0.86, skill: 0.88 }
+];
 
-const aiVehicle = new Vehicle({
-  id: 'ai-1',
-  name: 'GAUNTLET-AI',
-  color: '#ff9900',
-  player: false,
-  spec: 'prototype'
-});
+const allVehicles = [];
+const allVisuals = [];
+const allControllers = [];
 
-const vehicles = [player, aiVehicle];
+for (let i = 0; i < GRID_SPECS.length; i += 1) {
+  const spec = GRID_SPECS[i];
+  const vehicle = new Vehicle({
+    id: spec.id,
+    name: spec.name,
+    color: spec.color,
+    player: spec.player,
+    spec: spec.spec
+  });
+  allVehicles.push(vehicle);
 
-// Research AI Controllers & Scenario Engine
-const aiController = new ResearchAIController(1, {
-  aggression: 0.75,
-  diveMargin: 0.45,
-  defenseReactivity: 0.8,
-  kerbUsage: 0.9,
-  lookahead: 22.0
-});
+  const visual = new CarVisual(vehicle, { variant: spec.spec === 'prototype' ? 'prototype' : 'gt' });
+  scene.add(visual.group);
+  allVisuals.push(visual);
 
-const playerPaceAI = new ResearchAIController(2, {
-  aggression: 0.65,
-  diveMargin: 0.35,
-  defenseReactivity: 0.7,
-  kerbUsage: 0.8,
-  lookahead: 24.0
-});
+  let controller;
+  if (i === 0) {
+    // Player Autonomous Pace AI
+    controller = new ResearchAIController(2, {
+      aggression: 0.65,
+      diveMargin: 0.35,
+      defenseReactivity: 0.7,
+      kerbUsage: 0.8,
+      lookahead: 24.0
+    });
+  } else if (i === 1) {
+    // Primary GAUNTLET-AI
+    controller = new ResearchAIController(1, {
+      aggression: spec.agg,
+      diveMargin: 0.45,
+      defenseReactivity: 0.8,
+      kerbUsage: 0.9,
+      lookahead: 22.0
+    });
+  } else if (spec.ai === 'v2') {
+    controller = new NextGenAIController(i + 1, {
+      aggression: spec.agg,
+      skill: spec.skill,
+      track
+    });
+  } else {
+    controller = new ResearchAIController(i + 1, {
+      aggression: spec.agg,
+      skill: spec.skill,
+      diveMargin: 0.55,
+      kerbUsage: 0.85
+    });
+  }
+  controller.debugEnabled = (i === 1);
+  allControllers.push(controller);
+}
+
+const player = allVehicles[0];
+const aiVehicle = allVehicles[1];
+const playerPaceAI = allControllers[0];
+const aiController = allControllers[1];
+const visuals = allVisuals;
+
+// Active Fleet Subset (dynamically adjusted per scenario)
+let activeVehicles = [player, aiVehicle];
+let activeControllers = [playerPaceAI, aiController];
+let activeGridCount = 2;
 
 // User Reference Lap Recorder & Baseline Engine
 const lapRecorder = new ReferenceLapManager(track);
@@ -100,13 +140,6 @@ aiController.setReferenceProfile(lapRecorder);
 playerPaceAI.setReferenceProfile(lapRecorder);
 
 const scenarioEngine = new ScenarioEngine(track, player, aiVehicle, aiController);
-
-// Visual Car Models
-const visuals = [
-  new CarVisual(player, { variant: 'prototype' }),
-  new CarVisual(aiVehicle, { variant: 'prototype' })
-];
-visuals.forEach((v) => scene.add(v.group));
 
 // AI 3D Debug Suite Renderer
 const aiDebug = new AIDebugSuiteRenderer(scene, track);
@@ -122,7 +155,7 @@ const assets = new AssetLibrary({
 let assetsReady = false;
 assets.preload().then((result) => {
   assetsReady = true;
-  visuals.forEach((v) => v.attachAsset(assets));
+  allVisuals.forEach((v) => v.attachAsset(assets));
   environment.installAssets(assets);
   if (loadingStatus) {
     loadingStatus.textContent = result.failed
@@ -143,14 +176,69 @@ let frameCounter = 0;
 let physicsCounter = 0;
 let metricsAt = previousTime;
 
+/**
+ * Configures the active grid (2 cars for tactical duels, 4 for full races)
+ */
+function configureActiveGrid(scenarioId) {
+  let count = 2;
+  const upper = String(scenarioId || '').toUpperCase();
+  if (upper.startsWith('RACE') || upper === 'FREE') {
+    count = 4;
+  }
+
+  activeGridCount = count;
+  activeVehicles = allVehicles.slice(0, count);
+  activeControllers = allControllers.slice(0, count);
+
+  // Position and display cars
+  const gridStartDistance = 140.0;
+  const gridBoxSpacing = 10.5;
+
+  for (let i = 0; i < allVehicles.length; i += 1) {
+    const v = allVehicles[i];
+    const vis = allVisuals[i];
+    if (i < count) {
+      vis.group.visible = true;
+      if (count > 2) {
+        // 4-car staggered starting grid
+        const lateral = (i % 2 === 0) ? 2.0 : -2.0;
+        const dist = gridStartDistance - (i * gridBoxSpacing);
+        v.resetTo(track, dist, lateral);
+        v.speed = 0;
+        v.velocity = { x: 0, y: 0, z: 0 };
+        v.localVelocity = { x: 0, z: 0 };
+      }
+    } else {
+      vis.group.visible = false;
+      v.place(-9999, -9999, 0, -100);
+      v.speed = 0;
+    }
+  }
+
+  // Update Leaderboard visibility
+  const leaderboardEl = document.querySelector('#race-leaderboard');
+  if (leaderboardEl) {
+    leaderboardEl.style.display = count > 2 ? 'block' : 'none';
+    const infoEl = document.querySelector('#leaderboard-grid-info');
+    if (infoEl) infoEl.textContent = `${count} CARS`;
+  }
+}
+
 // UI Scenario Control Deck
 const scenarioDeck = new ScenarioDeck({
   onScenarioSelect: (scenarioId) => {
-    scenarioEngine.loadScenario(scenarioId);
+    configureActiveGrid(scenarioId);
+    if (activeGridCount <= 2) {
+      scenarioEngine.loadScenario(scenarioId);
+    }
     audio.unlock().catch(() => {});
   },
   onReset: () => {
-    scenarioEngine.resetScenario();
+    if (activeGridCount > 2) {
+      configureActiveGrid(scenarioDeck.activeScenarioId);
+    } else {
+      scenarioEngine.resetScenario();
+    }
     lapRecorder.reset();
     input.reset();
   },
@@ -181,6 +269,11 @@ const scenarioDeck = new ScenarioDeck({
   onCameraChange: (camMode) => {
     cameraRig.setMode(camMode);
     visuals[0].setCockpitView(camMode === 'COCKPIT');
+    if (camMode === 'FREE') {
+      input.requestPointerLock(renderer.domElement);
+    } else {
+      input.exitPointerLock();
+    }
   },
   onSetBaseline: () => {
     const res = lapRecorder.captureLiveBaseline();
@@ -226,6 +319,13 @@ const scenarioDeck = new ScenarioDeck({
   }
 });
 
+// Pointer Lock on canvas click for Noclip camera
+renderer.domElement.addEventListener('click', () => {
+  if (cameraRig.mode === 'FREE') {
+    input.requestPointerLock(renderer.domElement);
+  }
+});
+
 // Top HUD Autopilot badge click
 document.querySelector('#hud-autopilot-badge')?.addEventListener('click', () => {
   scenarioDeck.toggleAutopilot();
@@ -258,6 +358,8 @@ const elMotecWidthBar = document.querySelector('#motec-width-bar');
 const elMotecLinePhase = document.querySelector('#motec-line-phase');
 const elMotecCurbDist = document.querySelector('#motec-curb-dist');
 const elBtnMute = document.querySelector('#btn-mute');
+const elNoclipHud = document.querySelector('#noclip-hud');
+const elLeaderboardRows = document.querySelector('#leaderboard-rows');
 
 // Mute button click
 elBtnMute?.addEventListener('click', () => {
@@ -284,24 +386,24 @@ function fixedStep(dt) {
     phase: 'racing',
     raceTime: sessionTimeS,
     elapsed: sessionTimeS,
-    statusFor: (v) => ({ position: v === player ? 1 : 2 })
+    statusFor: (v) => {
+      const sorted = [...activeVehicles].sort((a, b) => b.distance - a.distance);
+      return { position: sorted.indexOf(v) + 1 };
+    }
   };
 
   // Player Controls: manual driving if keys pressed, otherwise autonomous pace along track
   const isInteracting = input.isInteracting();
   if (cameraRig.mode === 'FREE') {
-    Object.assign(player.controls, { throttle: 0, brake: 0, steer: 0, handbrake: 0 });
+    playerPaceAI.update(player, activeVehicles, track, raceState, dt);
   } else if (!autopilotActive) {
-    // 100% Pure manual driving
     Object.assign(player.controls, input.controls(player, dt));
   } else if (isInteracting) {
-    // Autopilot mode with manual user override
     Object.assign(player.controls, input.controls(player, dt));
   } else {
-    // Autonomous Pace Cruise for player
-    playerPaceAI.update(player, vehicles, track, raceState, dt);
+    playerPaceAI.update(player, activeVehicles, track, raceState, dt);
     const scenario = scenarioEngine.activeScenario;
-    if (scenario?.playerConfig?.initialSpeedMps) {
+    if (scenario?.playerConfig?.initialSpeedMps && activeGridCount <= 2) {
       const targetSpeed = scenario.playerConfig.initialSpeedMps;
       const speedError = targetSpeed - player.speed;
       if (speedError < -2) {
@@ -314,24 +416,29 @@ function fixedStep(dt) {
     }
   }
 
-  // Update AI controller with valid race state
-  aiController.update(aiVehicle, vehicles, track, raceState, dt);
+  // Update AI controllers for all active AI vehicles
+  for (let i = 1; i < activeVehicles.length; i += 1) {
+    activeControllers[i].update(activeVehicles[i], activeVehicles, track, raceState, dt);
+  }
 
-  // Aerodynamic wake & slipstream
-  updateAerodynamicWakes(vehicles);
+  // Aerodynamic wake & dirty air matrices across active fleet
+  updateAerodynamicWakes(activeVehicles);
 
-  // Physics stepping
-  player.step(dt, track, true);
-  aiVehicle.step(dt, track, true);
+  // Physics stepping for all active cars
+  for (let i = 0; i < activeVehicles.length; i += 1) {
+    activeVehicles[i].step(dt, track, true);
+  }
 
   // Vehicle-vehicle collision resolution
-  const collisionStats = resolveVehicleCollisions(vehicles, 3);
+  const collisionStats = resolveVehicleCollisions(activeVehicles, 3);
 
-  // Scenario engine evaluation
-  scenarioEngine.update(dt, collisionStats);
+  // Scenario engine evaluation (for 2-car scenarios)
+  if (activeGridCount <= 2) {
+    scenarioEngine.update(dt, collisionStats);
+  }
 
-  // Reference Lap recording & multi-vehicle telemetry (Player + AI)
-  lapRecorder.update(vehicles, dt);
+  // Reference Lap recording & multi-vehicle telemetry
+  lapRecorder.update(activeVehicles, dt);
 
   physicsCounter += 1;
 }
@@ -339,7 +446,11 @@ function fixedStep(dt) {
 // Keyboard Actions / Shortcuts
 function processActions() {
   if (input.consume('KeyR')) {
-    scenarioEngine.resetScenario();
+    if (activeGridCount > 2) {
+      configureActiveGrid(scenarioDeck.activeScenarioId);
+    } else {
+      scenarioEngine.resetScenario();
+    }
     input.reset();
   }
   if (input.consume('Space')) {
@@ -352,6 +463,19 @@ function processActions() {
     const nextMode = cameraRig.cycleMode();
     scenarioDeck.setCameraMode(nextMode);
     visuals[0].setCockpitView(nextMode === 'COCKPIT');
+    input.exitPointerLock();
+  }
+  if (input.consume('KeyV') || input.consume('KeyF')) {
+    const isFree = cameraRig.mode === 'FREE';
+    const nextMode = isFree ? 'CHASE' : 'FREE';
+    cameraRig.setMode(nextMode);
+    scenarioDeck.setCameraMode(nextMode);
+    visuals[0].setCockpitView(false);
+    if (!isFree) {
+      input.requestPointerLock(renderer.domElement);
+    } else {
+      input.exitPointerLock();
+    }
   }
   if (input.consume('Tab')) {
     aiDebug.visible = !aiDebug.visible;
@@ -398,8 +522,10 @@ function frame(now) {
     if (steps === MAX_STEPS_PER_FRAME) accumulator = 0;
   }
 
-  // Update visuals
-  visuals.forEach((v) => v.update(rawDelta));
+  // Update visuals for active fleet
+  for (let i = 0; i < activeVehicles.length; i += 1) {
+    allVisuals[i].update(rawDelta);
+  }
   environment.update(rawDelta);
 
   // Update AI Debug Suite
@@ -410,7 +536,15 @@ function frame(now) {
   // Update Camera Rig
   if (cameraRig.mode === 'FREE') {
     cameraRig.updateFree(input.freeCameraRaw(), rawDelta);
+    if (elNoclipHud) {
+      elNoclipHud.style.display = 'block';
+      const isLocked = input.isPointerLocked();
+      elNoclipHud.textContent = isLocked
+        ? `🎥 NOCLIP SPECTATOR LOCKED · WASD+QE FLY · SHIFT BOOST · CTRL SLOW · WHEEL SPD (${input.flightSpeed}m/s) · ESC UNLOCK`
+        : `🎥 NOCLIP SPECTATOR ACTIVE · CLICK VIEWPORT TO LOCK MOUSE · [V] TOGGLE CHASE`;
+    }
   } else {
+    if (elNoclipHud) elNoclipHud.style.display = 'none';
     const cockpitPose = cameraRig.mode === 'COCKPIT' ? visuals[0].getCockpitPose() : null;
     cameraRig.update(player, rawDelta, cockpitPose, aiVehicle);
   }
@@ -429,7 +563,7 @@ function frame(now) {
     metricsAt = now;
   }
 
-  // Update Live HUD Readouts
+  // Update Live HUD Readouts & Multi-Car Leaderboard
   updateHUDReadouts();
 
   // Render WebGL Scene
@@ -437,7 +571,7 @@ function frame(now) {
   requestAnimationFrame(frame);
 }
 
-// Update HUD Elements
+// Update HUD Elements & Race Leaderboard
 function updateHUDReadouts() {
   const speedKph = Math.round((player.speed || 0) * 3.6);
   if (elSpeed) elSpeed.textContent = String(speedKph);
@@ -468,7 +602,7 @@ function updateHUDReadouts() {
   if (elDistance) elDistance.textContent = `${(player.distance || 0).toFixed(1)} M`;
   if (elSimRate) elSimRate.textContent = `${isPaused ? 'PAUSED' : simTimeScale.toFixed(1) + 'x'} // ${metrics.physicsHz}HZ`;
 
-  // Gap to AI
+  // Gap to AI / Leader
   const gapDist = (aiVehicle.distance || 0) - (player.distance || 0);
   const gapSeconds = (gapDist / Math.max(10, player.speed || 20)).toFixed(2);
   if (elGapAI) {
@@ -487,7 +621,7 @@ function updateHUDReadouts() {
   const slipAngle = ((Math.atan2(localVel.x, Math.max(1, localVel.z)) * 180) / Math.PI).toFixed(1);
   if (elSlip) elSlip.textContent = `${slipAngle}°`;
 
-  // MoTeC G-G circle dot position (41px center, +/- 36px range)
+  // MoTeC G-G circle dot position
   if (elGGDot) {
     const dotX = Math.max(-36, Math.min(36, (-localAcc.x / 9.81 / 2.5) * 36));
     const dotY = Math.max(-36, Math.min(36, (-localAcc.z / 9.81 / 2.5) * 36));
@@ -518,6 +652,35 @@ function updateHUDReadouts() {
   if (elMotecWidthBar) elMotecWidthBar.style.width = `${widthPct.toFixed(1)}%`;
   if (elMotecLinePhase) elMotecLinePhase.textContent = linePhase;
   if (elMotecCurbDist) elMotecCurbDist.textContent = `L: ${distL}m · R: ${distR}m`;
+
+  // Update Multi-Car Race Leaderboard
+  if (activeGridCount > 2 && elLeaderboardRows) {
+    const sorted = [...activeVehicles].sort((a, b) => b.distance - a.distance);
+    const leaderDist = sorted[0]?.distance || 1;
+
+    let html = '';
+    for (let pos = 0; pos < sorted.length; pos += 1) {
+      const v = sorted[pos];
+      const isUser = (v === player);
+      const gapM = leaderDist - v.distance;
+      const gapStr = pos === 0 ? 'LEADER' : `+${(gapM / Math.max(8, v.speed || 20)).toFixed(1)}s`;
+      const spdKmh = Math.round(v.speed * 3.6);
+      const spec = v.spec || 'gt';
+      const badgeClass = spec === 'prototype' ? 'badge-proto' : (spec === 'touring' ? 'badge-tour' : 'badge-gt');
+      const badgeText = spec === 'prototype' ? 'LMP' : (spec === 'touring' ? 'TCR' : 'GT');
+
+      html += `
+        <div class="leaderboard-row ${isUser ? 'player' : ''}">
+          <span class="leaderboard-pos">P${pos + 1}</span>
+          <span class="leaderboard-badge ${badgeClass}">${badgeText}</span>
+          <span class="leaderboard-name">${v.name}</span>
+          <span class="leaderboard-gap">${gapStr}</span>
+          <span class="leaderboard-speed">${spdKmh}k</span>
+        </div>
+      `;
+    }
+    elLeaderboardRows.innerHTML = html;
+  }
 
   // Update AI Thought HUD from AI Controller telemetry
   const aiTelemetry = aiController.telemetry || aiController.debugState?.telemetry || {};
@@ -571,7 +734,8 @@ window.__GEMINI_GAUNTLET__ = {
   cameraRig,
   track,
   environment,
-  vehicles,
+  allVehicles,
+  get activeVehicles() { return activeVehicles; },
   player,
   aiVehicle,
   aiController,
@@ -586,10 +750,17 @@ window.__GEMINI_GAUNTLET__ = {
   input,
   metrics,
   SCENARIO_CATALOG,
+  configureActiveGrid,
   get isPaused() { return isPaused; },
   get simTimeScale() { return simTimeScale; },
-  resetScenario: () => scenarioEngine.resetScenario(),
-  loadScenario: (id) => scenarioEngine.loadScenario(id),
+  resetScenario: () => {
+    if (activeGridCount > 2) configureActiveGrid(scenarioDeck.activeScenarioId);
+    else scenarioEngine.resetScenario();
+  },
+  loadScenario: (id) => {
+    configureActiveGrid(id);
+    if (activeGridCount <= 2) scenarioEngine.loadScenario(id);
+  },
   setSimSpeed: (speed) => scenarioDeck.onSpeedChange(speed)
 };
 

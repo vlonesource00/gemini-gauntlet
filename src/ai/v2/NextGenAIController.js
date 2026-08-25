@@ -353,30 +353,46 @@ export class NextGenAIController {
         : Math.abs((this.referenceProfile?.trackLength || 3061.7) - (track?.length || 1000)) < 100
     );
 
-    this.trajectoryPlan = this.trajectoryPlanner.plan({
-      vehicle,
-      track,
-      desiredOffset: targetOffset,
-      fallbackOffsets: recovering || defending ? [] : [targetOffset, finite(current?.lateral, 0)],
-      trafficEntries: traffic.entries,
-      targetSpeed: physicalTargetSpeed,
-      aggression: this._aggression,
-      racecraftPhase: defending ? tactical.defenseMode : attacking ? tactical.attackMode : 'NONE',
-      targetId,
-      recovering,
-      pitActive: Boolean(vehicle.pitIntent?.active),
-      urgent: defending || attacking || isOffTrack,
-      roadMargin: baseRoadMargin,
-      kerbAllowance,
-      lookAhead: lookAheadDist,
-      trackingDistance: (defending || attacking) ? Math.max(trackingDistance, clamp(vehicle.speed * 0.95, 12.0, 24.0)) : trackingDistance,
-      referenceLineAtDistance: (s) => {
-        if (isMatchingTrack && typeof this.referenceProfile?.paceAtDistance === 'function') {
-          return this.referenceProfile.paceAtDistance(s)?.lineLateral ?? 0;
+    // 4. Multi-Rate Decoupled Trajectory Lattice Evaluation (25Hz / Phase-Triggered)
+    this.planTimer = (this.planTimer || 0) + dt;
+    const racecraftPhase = defending ? tactical.defenseMode : (attacking ? tactical.attackMode : 'NONE');
+    const phaseChanged = (this.lastRacecraftPhase !== racecraftPhase);
+    this.lastRacecraftPhase = racecraftPhase;
+
+    const shouldReplan = !this.trajectoryPlan
+      || phaseChanged
+      || defending
+      || attacking
+      || isOffTrack
+      || this.planTimer >= 0.04;
+
+    if (shouldReplan) {
+      this.planTimer = (this.index % 4) * (0.04 / 4); // time-slice phase offset across cars
+      this.trajectoryPlan = this.trajectoryPlanner.plan({
+        vehicle,
+        track,
+        desiredOffset: targetOffset,
+        fallbackOffsets: recovering || defending ? [] : [targetOffset, finite(current?.lateral, 0)],
+        trafficEntries: traffic.entries,
+        targetSpeed: physicalTargetSpeed,
+        aggression: this._aggression,
+        racecraftPhase,
+        targetId,
+        recovering,
+        pitActive: Boolean(vehicle.pitIntent?.active),
+        urgent: defending || attacking || isOffTrack,
+        roadMargin: baseRoadMargin,
+        kerbAllowance,
+        lookAhead: lookAheadDist,
+        trackingDistance: (defending || attacking) ? Math.max(trackingDistance, clamp(vehicle.speed * 0.95, 12.0, 24.0)) : trackingDistance,
+        referenceLineAtDistance: (s) => {
+          if (isMatchingTrack && typeof this.referenceProfile?.paceAtDistance === 'function') {
+            return this.referenceProfile.paceAtDistance(s)?.lineLateral ?? 0;
+          }
+          return this.optimalEngine?.sampleAtDistance?.(s)?.lateral ?? 0;
         }
-        return this.optimalEngine?.sampleAtDistance?.(s)?.lateral ?? 0;
-      }
-    });
+      });
+    }
 
     const trackingPoint = this.trajectoryPlan.trackingPoint ?? this.trajectoryPlan.points.at(-1);
     const plannedTargetOffset = finite(trackingPoint?.lateral, targetOffset);

@@ -4,9 +4,9 @@ import { KeyboardDynamics } from './input/KeyboardDynamics.js';
 
 const GAME_CODES = new Set([
   'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Space',
-  'KeyW', 'KeyA', 'KeyS', 'KeyD', 'KeyR', 'KeyC', 'KeyM', 'KeyT',
-  'KeyE', 'KeyQ', 'KeyP', 'KeyG', 'KeyN', 'KeyJ', 'Tab',
-  'Digit1', 'Digit2', 'Digit3', 'Digit4', 'Digit5',
+  'KeyW', 'KeyA', 'KeyS', 'KeyD', 'KeyR', 'KeyC', 'KeyV', 'KeyM', 'KeyT',
+  'KeyE', 'KeyQ', 'KeyP', 'KeyG', 'KeyN', 'KeyJ', 'KeyF', 'KeyU', 'Tab',
+  'Digit1', 'Digit2', 'Digit3', 'Digit4', 'Digit5', 'Digit6', 'Digit7',
   'BracketLeft', 'BracketRight', 'Semicolon', 'Quote', 'Comma', 'Period',
   'F1', 'F2', 'F3', 'F4', 'F5', 'F6', 'F7'
 ]);
@@ -20,9 +20,12 @@ export class InputManager {
     this.onGesture = onGesture;
     this.keyboardDynamics = new KeyboardDynamics();
 
+    this.mouseDeltaX = 0;
+    this.mouseDeltaY = 0;
+    this.flightSpeed = 32;
+
     this._onKeyDown = (event) => {
       if (GAME_CODES.has(event.code)) {
-        // Prevent scrolling for game controls, allow normal tab if needed or prevent
         if (event.code !== 'Tab' || !event.shiftKey) event.preventDefault();
       }
       if (!this.keys.has(event.code)) this.pressed.add(event.code);
@@ -38,10 +41,27 @@ export class InputManager {
       this.onGesture?.();
     };
 
+    this._onMouseMove = (event) => {
+      if (document.pointerLockElement) {
+        this.mouseDeltaX += event.movementX || 0;
+        this.mouseDeltaY += event.movementY || 0;
+      }
+    };
+
+    this._onWheel = (event) => {
+      if (document.pointerLockElement) {
+        event.preventDefault();
+        const delta = Math.sign(event.deltaY);
+        this.flightSpeed = clamp(this.flightSpeed - delta * 6, 8, 160);
+      }
+    };
+
     if (typeof window !== 'undefined') {
       window.addEventListener('keydown', this._onKeyDown, { passive: false });
       window.addEventListener('keyup', this._onKeyUp);
       window.addEventListener('pointerdown', this._onPointer);
+      window.addEventListener('mousemove', this._onMouseMove);
+      window.addEventListener('wheel', this._onWheel, { passive: false });
     }
   }
 
@@ -59,6 +79,32 @@ export class InputManager {
     return this.held('KeyW', 'KeyA', 'KeyS', 'KeyD', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Space');
   }
 
+  isPointerLocked() {
+    return typeof document !== 'undefined' && Boolean(document.pointerLockElement);
+  }
+
+  requestPointerLock(element) {
+    if (!element || typeof document === 'undefined') return;
+    try {
+      if (document.pointerLockElement !== element) {
+        element.requestPointerLock?.();
+      }
+    } catch {
+      // Ignored if user gesture required
+    }
+  }
+
+  exitPointerLock() {
+    if (typeof document === 'undefined') return;
+    try {
+      if (document.pointerLockElement) {
+        document.exitPointerLock?.();
+      }
+    } catch {
+      // Ignored
+    }
+  }
+
   keyboardRaw() {
     const screenAxis = (this.held('KeyD', 'ArrowRight') ? 1 : 0) - (this.held('KeyA', 'ArrowLeft') ? 1 : 0);
     return {
@@ -70,13 +116,21 @@ export class InputManager {
   }
 
   freeCameraRaw() {
+    const dx = this.mouseDeltaX;
+    const dy = this.mouseDeltaY;
+    this.mouseDeltaX = 0;
+    this.mouseDeltaY = 0;
+
     return {
       forward: (this.held('KeyW') ? 1 : 0) - (this.held('KeyS') ? 1 : 0),
       right: (this.held('KeyD') ? 1 : 0) - (this.held('KeyA') ? 1 : 0),
-      up: (this.held('KeyE') ? 1 : 0) - (this.held('KeyQ') ? 1 : 0),
+      up: (this.held('KeyE', 'Space') ? 1 : 0) - (this.held('KeyQ', 'KeyC') ? 1 : 0),
       yaw: (this.held('ArrowRight') ? 1 : 0) - (this.held('ArrowLeft') ? 1 : 0),
       pitch: (this.held('ArrowUp') ? 1 : 0) - (this.held('ArrowDown') ? 1 : 0),
-      boost: this.held('ShiftLeft', 'ShiftRight')
+      boost: this.held('ShiftLeft', 'ShiftRight'),
+      slow: this.held('ControlLeft', 'ControlRight'),
+      baseSpeed: this.flightSpeed,
+      mouseLook: { dx, dy }
     };
   }
 
@@ -110,6 +164,8 @@ export class InputManager {
   reset() {
     this.keys.clear();
     this.pressed.clear();
+    this.mouseDeltaX = 0;
+    this.mouseDeltaY = 0;
     this.keyboardDynamics.reset();
   }
 
@@ -118,5 +174,7 @@ export class InputManager {
     window.removeEventListener('keydown', this._onKeyDown);
     window.removeEventListener('keyup', this._onKeyUp);
     window.removeEventListener('pointerdown', this._onPointer);
+    window.removeEventListener('mousemove', this._onMouseMove);
+    window.removeEventListener('wheel', this._onWheel);
   }
 }

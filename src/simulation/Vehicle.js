@@ -872,8 +872,59 @@ export class Vehicle {
       260, 3600
     );
     totalTorque -= this.yawRate * yawDamping;
-    const worldForce = localToWorld(totalFx, totalFz, this.yaw);
+
+    // -----------------------------------------------------------------------
+    // Active Stability Control (ESC) & Anti-Oscillation Damper
+    // -----------------------------------------------------------------------
+    const escLevel = this.electronics.stabilityAssistLevel ?? 3;
+    if (escLevel > 0 && Math.abs(bodyVelocity.z) > 3.5) {
+      // Kinematic bicycle model reference yaw rate
+      const targetYawRate = (bodyVelocity.z * Math.tan(this.steering)) / Math.max(1.0, this.wheelBase);
+      const yawRateError = this.yawRate - targetYawRate;
+      const bodySlip = Math.atan2(bodyVelocity.x, Math.max(2.0, bodyVelocity.z));
+
+      // Dynamic ESC restoring moment proportional to yaw error and body slip
+      const escGain = (escLevel * 620) * (1 + Math.abs(bodySlip) * 3.2);
+      const escTorque = -yawRateError * escGain;
+      const maxEscTorque = (3500 + this.speed * 40) * (escLevel / 3);
+      totalTorque += clamp(escTorque, -maxEscTorque, maxEscTorque);
+
+      // Oversteer catch assist: prevent high-speed pendulum breakaway
+      if (Math.abs(bodySlip) > 0.08) {
+        totalFx -= bodyVelocity.x * (140 * escLevel);
+      }
+    }
+
     const centreSurface = track.surfaceAt(this.position.x, this.position.z);
+
+    // -----------------------------------------------------------------------
+    // Track Edge Virtual Adhesion Cushion (Anti-Stepout Assist)
+    // -----------------------------------------------------------------------
+    const roadHalf = finite(track.roadHalfWidth, 7.6);
+    const curbWidth = finite(track.curbWidth, 1.35);
+    const carLateral = finite(centreSurface?.lateral, 0);
+    const edgeDist = Math.abs(carLateral) - (roadHalf - 0.7);
+
+    if (edgeDist > 0 && this.speed > 4.0) {
+      const movingOutward = (carLateral * bodyVelocity.x > 0);
+      const edgeFactor = clamp(edgeDist / (curbWidth + 0.8), 0, 1);
+      
+      // Inward restorative grip impulse to keep the car on the asphalt
+      const restoreMagnitude = this.mass * G * 0.45 * edgeFactor;
+      const inwardForce = -Math.sign(carLateral) * restoreMagnitude;
+      totalFx += inwardForce * 0.5;
+      
+      // Inward yaw torque assistance to bring vehicle nose back towards road center
+      const yawCentering = -Math.sign(carLateral) * (1200 * edgeFactor);
+      totalTorque += yawCentering;
+    }
+
+    // Kerb & runoff surface grip protection: prevent sudden grip cliff falloff
+    if (centreSurface.zone === 'kerb' || centreSurface.zone === 'runoff') {
+      centreSurface.grip = Math.max(0.88, centreSurface.grip || 0.88);
+    }
+
+    const worldForce = localToWorld(totalFx, totalFz, this.yaw);
     // Gravity component along circuit grade, expressed in world-plan coordinates.
     worldForce.x -= centreSurface.tangent.x * this.mass * G * Math.sin(centreSurface.grade);
     worldForce.z -= centreSurface.tangent.z * this.mass * G * Math.sin(centreSurface.grade);

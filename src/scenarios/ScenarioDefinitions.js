@@ -415,6 +415,43 @@ export const SCENARIOS = Object.freeze({
       allowOffTrack: true,
       description: 'Multi-lap full battle across Endurance Park with dynamic tactics, passing, defense, and drafting.'
     })
+  }),
+
+  RACE_12_CARS: Object.freeze({
+    id: 'RACE_12_CARS',
+    name: '12-Car Multi-Class Grand Prix',
+    category: 'duel',
+    trackSection: 'Full Circuit Grid',
+    description: '12-car mixed-class championship race (Prototypes, GTs, Touring) with pack racing, draft trains, and multi-flank overtakes.',
+    trackDistance: 0,
+    durationS: 360,
+    playerConfig: Object.freeze({
+      spec: 'prototype',
+      distance: 140.0,
+      lateralOffset: 2.0,
+      initialSpeedKph: 0,
+      initialSpeedMps: 0,
+      ersMode: 'AUTO',
+      behavior: 'human'
+    }),
+    aiConfig: Object.freeze({
+      spec: 'prototype',
+      distance: 130.5,
+      lateralOffset: -2.0,
+      initialSpeedKph: 0,
+      initialSpeedMps: 0,
+      initialManeuver: 'RACE',
+      initialAggression: 0.88,
+      ersMode: 'AUTO',
+      targetPaceKph: 260
+    }),
+    gridCount: 12,
+    successCriteria: Object.freeze({
+      targetOutcome: 'RACE_FINISH',
+      maxContactCount: 6,
+      allowOffTrack: true,
+      description: 'Championship 12-car multi-class race testing pack racing, dirty air turbulence, divebombs, and defensive lines.'
+    })
   })
 });
 

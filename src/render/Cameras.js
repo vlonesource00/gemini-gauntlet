@@ -27,9 +27,10 @@ export class CameraRig {
     const validModes = ['CHASE', 'PURSUIT', 'TACTICAL', 'COCKPIT', 'FREE'];
     if (!validModes.includes(mode)) return this.mode;
     if (mode === 'FREE' && this.mode !== 'FREE') {
-      const direction = this.camera.getWorldDirection(this._freeForward);
-      this.freeYaw = Math.atan2(direction.x, direction.z);
-      this.freePitch = Math.asin(clamp(direction.y, -1, 1));
+      const euler = new THREE.Euler(0, 0, 0, 'YXZ');
+      euler.setFromQuaternion(this.camera.quaternion, 'YXZ');
+      this.freeYaw = euler.y;
+      this.freePitch = euler.x;
       this.position.copy(this.camera.position);
     }
     if (mode !== 'FREE') {
@@ -66,26 +67,38 @@ export class CameraRig {
   updateFree(input = {}, dt = 0) {
     if (this.mode !== 'FREE') return;
     const safeDt = clamp(Number.isFinite(dt) ? dt : 0, 0, 0.1);
-    this.freeYaw += clamp(input.yaw ?? 0, -1, 1) * 1.65 * safeDt;
+
+    // Standard non-inverted FPS mouse look (when pointer is locked)
+    if (input.mouseLook) {
+      const mouseSens = 0.0022;
+      this.freeYaw -= (input.mouseLook.dx || 0) * mouseSens;
+      this.freePitch = clamp(this.freePitch - (input.mouseLook.dy || 0) * mouseSens, -1.48, 1.48);
+    }
+
+    // Keyboard arrow keys look
+    this.freeYaw -= clamp(input.yaw ?? 0, -1, 1) * 1.65 * safeDt;
     this.freePitch = clamp(this.freePitch + clamp(input.pitch ?? 0, -1, 1) * 1.35 * safeDt, -1.48, 1.48);
-    const cosPitch = Math.cos(this.freePitch);
-    this._freeForward.set(
-      Math.sin(this.freeYaw) * cosPitch,
-      Math.sin(this.freePitch),
-      Math.cos(this.freeYaw) * cosPitch
-    );
-    this._freeRight.set(Math.cos(this.freeYaw), 0, -Math.sin(this.freeYaw));
+
+    // Set camera orientation via Euler
+    const euler = new THREE.Euler(this.freePitch, this.freeYaw, 0, 'YXZ');
+    this.camera.quaternion.setFromEuler(euler);
+
+    // Derive Forward and Right vectors from camera orientation
+    this.camera.getWorldDirection(this._freeForward);
+    this._freeRight.set(1, 0, 0).applyQuaternion(this.camera.quaternion);
+
+    // WASD and vertical movement relative to camera
     this._freeMove.set(0, 0, 0)
       .addScaledVector(this._freeForward, clamp(input.forward ?? 0, -1, 1))
       .addScaledVector(this._freeRight, clamp(input.right ?? 0, -1, 1));
     this._freeMove.y += clamp(input.up ?? 0, -1, 1);
     if (this._freeMove.lengthSq() > 1) this._freeMove.normalize();
-    const speed = input.boost ? 92 : 24;
+
+    const baseSpeed = input.baseSpeed || 32;
+    const speed = input.boost ? (baseSpeed * 2.8) : (input.slow ? (baseSpeed * 0.35) : baseSpeed);
     this.position.addScaledVector(this._freeMove, speed * safeDt);
-    this.look.copy(this.position).addScaledVector(this._freeForward, 30);
+
     this.camera.position.copy(this.position);
-    this.camera.up.set(0, 1, 0);
-    this.camera.lookAt(this.look);
   }
 
   update(vehicle, dt, cockpitPose = null, opponentVehicle = null) {
