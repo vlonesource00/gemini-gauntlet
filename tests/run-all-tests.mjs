@@ -53,6 +53,18 @@ const TEST_SUITES = [
     name: 'Multi-Class Flying Lap Pace Benchmark Suite',
     file: 'pace-benchmark-test.mjs',
     description: 'Autonomous flying lap pace verification across Prototype, GT, and Touring on flat and elevation circuits'
+  },
+  {
+    id: 'exit-horizon-and-feint',
+    name: 'Exit-Horizon Velocity & Counterfactual Response Suite',
+    file: 'exit-horizon-and-feint-test.mjs',
+    description: 'Friction-circle longitudinal velocity propagation, late-apex exit momentum, and discrete 3-mode counterfactual defender response'
+  },
+  {
+    id: 'pit-grand-prix',
+    name: '12-Lap Grand Prix & Mandatory Pit Stop Suite',
+    file: 'pit-grand-prix-test.mjs',
+    description: 'Multi-class 12-lap race stepping, pit lane entry, 60 km/h limiter, 3.5s box service, and tire grip restore'
   }
 ];
 
