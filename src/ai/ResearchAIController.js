@@ -345,9 +345,11 @@ export class ResearchAIController {
     const turnCurvature = Math.abs(finite(turn?.curvature, 0));
     const turnSign = Math.sign(finite(turn?.turnSign, 1)) || 1;
 
-    const currentPoint = track?.atDistance ? track.atDistance(vehicle.distance) : { curvature: 0 };
-    const signedCurv = finite(currentPoint?.curvature, 0);
-    const currentCurv = Math.abs(signedCurv);
+    const currentPoint = track?.atDistance ? track.atDistance(vehicle.distance) : { curvature: 0, turnSign: 0 };
+    const rawCurv = finite(currentPoint?.curvature, 0);
+    const sign = finite(currentPoint?.turnSign, 0) || (rawCurv > 0.001 ? 1 : 0);
+    const signedCurv = sign * rawCurv;
+    const currentCurv = Math.abs(rawCurv);
 
     // Curvature-Adaptive Apex Lookahead Horizon
     const dynamicLookahead = this.computeLookahead(vehicle.speed, currentCurv);
@@ -364,11 +366,10 @@ export class ResearchAIController {
         ? this.referenceProfile.trackId === track?.id
         : Math.abs((this.referenceProfile?.trackLength || 3061.7) - (track?.length || 1000)) < 100
     );
-    const activeProfile = (this.referenceProfile && isMatchingTrack) ? this.referenceProfile : this.optimalEngine;
-    const fallbackGeometricLine = clamp(-Math.sign(upcomingCurv) * Math.min(2.4, Math.abs(upcomingCurv) * 80.0), -2.5, 2.5);
-    const referenceLine = (activeProfile && typeof activeProfile.paceAtDistance === 'function')
-      ? (activeProfile.paceAtDistance(vehicle.distance + Math.max(18.0, dynamicLookahead))?.lineLateral ?? fallbackGeometricLine)
-      : fallbackGeometricLine;
+    const optSample = this.optimalEngine?.sampleAtDistance?.(vehicle.distance, vehicle.classKey);
+    const referenceLine = (this.referenceProfile && isMatchingTrack && typeof this.referenceProfile.paceAtDistance === 'function')
+      ? (this.referenceProfile.paceAtDistance(vehicle.distance, vehicle.classKey)?.lineLateral ?? 0)
+      : (optSample?.lateral ?? 0);
     const paceLine = clamp(referenceLine, -baseRoadMargin, baseRoadMargin);
 
     const defDecision = this.defenseEngine.update({
@@ -437,24 +438,11 @@ export class ResearchAIController {
       tacticalReason = 'OVERTAKE_COMPLETE_RETURN';
     }
 
-    // Universal continuous targetOffset rate-limiter: guarantees zero lateral jump artifacts
-    const currentCarLat = finite(current?.lateral, 0);
-    const maxLateralRate = (recovering || isOffTrack) ? 6.0 : (committed ? 4.5 : 3.2);
-    const maxShiftThisFrame = maxLateralRate * dt;
-    this.smoothedTargetOffset = clamp(
-      (this.smoothedTargetOffset != null ? this.smoothedTargetOffset : currentCarLat) +
-        clamp(targetOffset - (this.smoothedTargetOffset != null ? this.smoothedTargetOffset : currentCarLat), -maxShiftThisFrame, maxShiftThisFrame),
-      -plannedRoadMargin,
-      plannedRoadMargin
-    );
-    targetOffset = this.smoothedTargetOffset;
+    targetOffset = clamp(targetOffset, -plannedRoadMargin, plannedRoadMargin);
 
     // 4. Multi-Candidate Frenet Trajectory Planning
     const tacticalCandidates = (tacticalMode === 'PACE' || recovering) ? [] : [
-      { offset: targetOffset, intentType: 'TACTICAL_TARGET', transitionScales: [0.75, 1.0, 1.3] },
-      { offset: paceLine, intentType: 'RACING_LINE', transitionScales: [1.0, 1.5] },
-      { offset: plannedRoadMargin * 0.65, intentType: 'RIGHT_OPEN_LANE', transitionScales: [0.8, 1.1] },
-      { offset: -plannedRoadMargin * 0.65, intentType: 'LEFT_OPEN_LANE', transitionScales: [0.8, 1.1] }
+      { offset: targetOffset, intentType: 'TACTICAL_TARGET', transitionScales: [0.75, 1.0, 1.3] }
     ];
 
     const lookAheadDist = recovering
@@ -499,7 +487,7 @@ export class ResearchAIController {
         vehicle,
         track,
         desiredOffset: targetOffset,
-        fallbackOffsets: recovering ? [] : [paceLine, finite(current?.lateral, 0)],
+        fallbackOffsets: (recovering || committed || defending) ? [] : [paceLine],
         tacticalCandidates: recovering ? [] : tacticalCandidates,
         trafficEntries: traffic.entries,
         targetSpeed: physicalTargetSpeed,
@@ -513,14 +501,7 @@ export class ResearchAIController {
         kerbAllowance,
         lookAhead: lookAheadDist,
         trackingDistance,
-        referenceLineAtDistance: (s) => {
-          if (isMatchingTrack && typeof this.referenceProfile?.paceAtDistance === 'function') {
-            return this.referenceProfile.paceAtDistance(s)?.lineLateral ?? 0;
-          }
-          const pt = track?.atDistance ? track.atDistance(s) : { curvature: 0 };
-          const curv = finite(pt.curvature, 0);
-          return clamp(-Math.sign(curv) * Math.min(2.4, Math.abs(curv) * 35.0), -2.5, 2.5);
-        }
+        referenceLineAtDistance: (s) => 0
       });
     }
 
@@ -579,8 +560,9 @@ export class ResearchAIController {
     // 6. Longitudinal Target Speed & Dynamic Adjustments
     let desiredSpeed = physicalTargetSpeed;
 
+    const activeProfile = (this.referenceProfile && isMatchingTrack) ? this.referenceProfile : null;
     const refData = (activeProfile && typeof activeProfile.paceAtDistance === 'function')
-      ? activeProfile.paceAtDistance(vehicle.distance)
+      ? activeProfile.paceAtDistance(vehicle.distance, vehicle.classKey)
       : null;
     const classFactor = (vehicle.classKey === 'gt') ? 0.82 : (vehicle.classKey === 'touring' ? 0.70 : 1.0);
     const rawRefSpeed = refData?.targetSpeed;
@@ -599,23 +581,20 @@ export class ResearchAIController {
       : 99;
 
     if (committed && passTarget) {
-      const isCornerApproach = Boolean(attDecision.inCorner) || (attDecision.distToCorner != null && attDecision.distToCorner < 85) || Math.abs(currentCurv) > 0.003;
-      const straightClosingFloor = 14.0 + clamp(this._aggression, 0, 1) * 4.0;
-      const cornerClosingFloor = Math.max(4.5, 7.5 * this._aggression);
-      const isOverlappingLane = actualSeparation < 1.6 && passTarget.delta < 14.0;
-      const closingFloor = (straightSend && !isCornerApproach && !isOverlappingLane) ? straightClosingFloor : cornerClosingFloor;
-      const isSlowObstacle = passTarget.other.speed < 16.0;
-      const obstacleFloor = isSlowObstacle ? Math.min(physicalTargetSpeed, Math.max(14.0, passTarget.other.speed + 10.0)) : 0;
-
-      if (straightSend && !isCornerApproach && !isOverlappingLane) {
-        desiredSpeed = Math.min(physicalTargetSpeed, Math.max(desiredSpeed, passTarget.other.speed + closingFloor));
+      if (passTarget.delta <= 0) {
+        desiredSpeed = physicalTargetSpeed;
       } else {
-        if (isOverlappingLane) {
-          const followFloor = Math.max(obstacleFloor, passTarget.other.speed + clamp((passTarget.delta - 6.5) * 0.75, -6.0, 3.0));
-          desiredSpeed = Math.min(desiredSpeed, followFloor);
+        const isCornerApproach = Boolean(attDecision.inCorner) || (attDecision.distToCorner != null && attDecision.distToCorner < 85) || Math.abs(currentCurv) > 0.003;
+        const straightClosingFloor = 14.0 + clamp(this._aggression, 0, 1) * 4.0;
+        const cornerClosingFloor = Math.max(5.5, 8.5 * this._aggression);
+        const isDirectRearCollisionRisk = actualSeparation < 1.0 && passTarget.delta > 0.8 && passTarget.delta < 4.0;
+
+        if (isDirectRearCollisionRisk) {
+          desiredSpeed = Math.min(desiredSpeed, passTarget.other.speed + 1.5);
         } else {
-          const cornerFloor = Math.min(physicalTargetSpeed, passTarget.other.speed + cornerClosingFloor);
-          desiredSpeed = Math.min(physicalTargetSpeed, Math.max(obstacleFloor, cornerFloor));
+          const closingFloor = isCornerApproach ? cornerClosingFloor : straightClosingFloor;
+          const targetCap = isCornerApproach ? physicalTargetSpeed * 1.08 : physicalTargetSpeed;
+          desiredSpeed = Math.min(targetCap, Math.max(desiredSpeed, passTarget.other.speed + closingFloor));
         }
       }
     } else if (passTarget && passTarget.delta > 0 && passTarget.delta < 45 && !defending) {
@@ -629,6 +608,8 @@ export class ResearchAIController {
       } else if (isSlowObstacle) {
         const escapeSpeed = Math.min(physicalTargetSpeed, Math.max(14.0, passTarget.other.speed + 10.0));
         desiredSpeed = Math.min(desiredSpeed, Math.max(escapeSpeed, passTarget.other.speed + 6.0));
+      } else if (attDecision.phase === 'DRAFT') {
+        desiredSpeed = Math.min(physicalTargetSpeed, Math.max(desiredSpeed, passTarget.other.speed + 4.0));
       } else {
         const safeGap = clamp(7.0 + passTarget.relativeLongitudinalVelocity ** 2 / 10.0, 7.5, 30.0);
         const followSpeedFloor = Math.max(10.0, passTarget.other.speed - 4.5);
@@ -660,12 +641,13 @@ export class ResearchAIController {
 
     // 8. Low-Level Pedal Control & Trail Braking
     const speedError = desiredSpeed - vehicle.speed;
+    const pedalSpeedError = speedError < -0.2 ? Math.min(-6.5, speedError * 2.5 - 3.5) : speedError;
     const straight = Math.abs(signedCurv) < 0.0030;
     const liveLatAccel = Math.abs(finite(vehicle.speed, 0) * finite(vehicle.yawRate, 0));
 
     const pedals = this.paceOptimizer.computePedals({
       vehicle,
-      speedError,
+      speedError: pedalSpeedError,
       desiredSpeed,
       headingError,
       lateralAccel: liveLatAccel,

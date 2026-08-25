@@ -47,6 +47,12 @@ const TEST_SUITES = [
     name: '12-Car Multi-Class Full Grid Race Suite',
     file: 'twelve-car-race-test.mjs',
     description: 'Full 12-car grid simulation, pack racing emergence, dirty air wake matrices, multi-car passing, and zero deep overlaps'
+  },
+  {
+    id: 'pace-benchmark',
+    name: 'Multi-Class Flying Lap Pace Benchmark Suite',
+    file: 'pace-benchmark-test.mjs',
+    description: 'Autonomous flying lap pace verification across Prototype, GT, and Touring on flat and elevation circuits'
   }
 ];
 

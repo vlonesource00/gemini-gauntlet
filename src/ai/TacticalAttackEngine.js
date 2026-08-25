@@ -163,8 +163,22 @@ export class TacticalAttackEngine {
     const trackLen = Math.max(1, finite(track?.length, 1000));
     const distToCorner = wrap(nextTurn.s - vehicle.distance + trackLen * 0.5, trackLen) - trackLen * 0.5;
 
-    // Divebomb window is active when approaching braking zone (8m to 90m ahead)
-    if (distToCorner < 8 || distToCorner > 90) return { feasible: false };
+    // Divebomb window is active when approaching braking zone (6m to 145m ahead)
+    // Target inside line for the dive (inside = +turnSign)
+    const targetInsideOffset = clamp(
+      turnSign * Math.min(3.4, roadMargin * 0.65),
+      -roadMargin + 0.65,
+      roadMargin - 0.65
+    );
+
+    if (distToCorner < 6 || distToCorner > 145) {
+      return {
+        feasible: false,
+        insideOffset: targetInsideOffset,
+        turnSign,
+        distToCorner
+      };
+    }
 
     // Fearless -3.5G peak braking deceleration
     const diveDecelG = Math.max(3.4, (vehicle.classKey === 'prototype' ? 3.6 : 3.4) * egoGripFactor * (0.95 + this.aggression * 0.20));
@@ -185,17 +199,10 @@ export class TacticalAttackEngine {
     const brakingAdvantage = oppBrakingDist - egoBrakingDist;
     const gapToBridge = target.delta;
 
-    // Target inside line for the dive (inside = -turnSign)
-    const targetInsideOffset = clamp(
-      -turnSign * Math.min(3.4, roadMargin * 0.60),
-      -roadMargin + 0.65,
-      roadMargin - 0.65
-    );
-
-    const diveRange = 28 + this.aggression * 18;
+    const diveRange = 36 + this.aggression * 20;
     const speedAdvantage = egoSpeed - oppSpeed;
     const feasible = (gapToBridge < diveRange)
-      && (brakingAdvantage + speedAdvantage * 0.95 > gapToBridge * 0.25)
+      && (brakingAdvantage + speedAdvantage * 0.95 > gapToBridge * 0.20)
       && (this.aggression >= this.diveMargin * 0.70);
 
     return {
@@ -238,8 +245,8 @@ export class TacticalAttackEngine {
 
     const leadLateral = finite(target.otherLateral, 0);
 
-    // Defender has committed heavily to the inside line (inside = -turnSign)
-    const defenderHuggingInside = (leadLateral * (-turnSign)) > (roadMargin * 0.30);
+    // Defender has committed heavily to the inside line (inside = +turnSign)
+    const defenderHuggingInside = (leadLateral * turnSign) > (roadMargin * 0.25);
     const speedAdvantage = vehicle.speed - target.other.speed;
     const closingSpeed = target.relativeLongitudinalVelocity;
 
@@ -249,16 +256,16 @@ export class TacticalAttackEngine {
     const defenderOverslowed = target.other.speed < estApexSpeed * 0.88 || (speedAdvantage > 3.0 && closingSpeed > 2.0);
 
     if (defenderHuggingInside && defenderOverslowed && target.delta < 28) {
-      // 1. Setup wide entry on the outside (+turnSign) to square off corner entry
+      // 1. Setup wide entry on the outside (-turnSign) to square off corner entry
       const outsideEntryOffset = clamp(
-        turnSign * Math.min(3.2, roadMargin * 0.55),
+        -turnSign * Math.min(3.2, roadMargin * 0.55),
         -3.6,
         3.6
       );
 
-      // 2. Sharp late-apex diamond undercut offset cutting across inside exit (-turnSign)
+      // 2. Sharp late-apex diamond undercut offset cutting across inside exit (+turnSign)
       const undercutApexOffset = clamp(
-        -turnSign * Math.min(2.4, roadMargin * 0.42),
+        turnSign * Math.min(2.4, roadMargin * 0.42),
         -3.6,
         3.6
       );
@@ -317,13 +324,15 @@ export class TacticalAttackEngine {
     }
 
     // Analyze current and upcoming turn geometry across wide horizon
-    const turns = [0, 8, 16, 32, 50, 75, 105, 140].map((dist) =>
+    const turns = [0, 10, 20, 35, 55, 80, 115, 155, 185, 225].map((dist) =>
       track?.atDistance ? track.atDistance(vehicle.distance + dist) : { curvature: 0, turnSign: 1, s: vehicle.distance + dist }
     );
-    const turn = turns.sort((a, b) => Math.abs(b.curvature) - Math.abs(a.curvature))[0];
+    const upcomingTurn = turns.find((t) => Math.abs(finite(t?.curvature, 0)) >= 0.0035)
+      ?? turns.sort((a, b) => Math.abs(b.curvature) - Math.abs(a.curvature))[0];
+    const turn = upcomingTurn;
     const turnCurvature = Math.abs(finite(turn?.curvature, 0));
-    const inCorner = turnCurvature >= 0.003;
     const distToCorner = Math.max(0, wrap((turn?.s ?? vehicle.distance) - vehicle.distance + (track?.length || 1000) * 0.5, track?.length || 1000) - (track?.length || 1000) * 0.5);
+    const inCorner = turnCurvature >= 0.0028 && distToCorner < 195;
     const turnSign = Math.sign(finite(turn?.turnSign, 1)) || 1;
 
     // Handle ongoing active attack state
@@ -370,10 +379,32 @@ export class TacticalAttackEngine {
         }
       }
 
+      // Dynamic transition into Divebomb / Inside attack when entering corner braking zone from straightaway attack
+      if (inCorner && (this.phase === 'SLINGSHOT' || this.phase === 'ATTACK_LEFT' || this.phase === 'ATTACK_RIGHT')) {
+        const activeTurnSign = Math.sign(finite(turn?.turnSign, 1)) || 1;
+        const diveDecision = this.evaluateDivebomb({
+          vehicle,
+          target,
+          track,
+          nextTurn: turn,
+          roadMargin,
+          egoGripFactor: 1.0 + this.kerbUsage * 0.12,
+          kerbAllowance
+        });
+        if (diveDecision.feasible) {
+          this.phase = 'DIVEBOMB';
+          this.divebombActive = true;
+          this.targetOffset = diveDecision.insideOffset;
+        } else {
+          this.phase = 'ATTACK_INSIDE';
+          this.targetOffset = clamp(activeTurnSign * Math.min(3.2, baseRoadMargin * 0.65), -baseRoadMargin + 0.8, baseRoadMargin - 0.8);
+        }
+      }
+
       // When attacking inside or divebombing through a corner sequence, adapt target offset to the active turn sign
       if ((this.phase === 'ATTACK_INSIDE' || this.divebombActive) && inCorner) {
         const activeTurnSign = Math.sign(finite(turn?.turnSign, 1)) || 1;
-        const dynamicInsideOffset = clamp(-activeTurnSign * Math.min(3.2, baseRoadMargin * 0.65), -baseRoadMargin + 0.8, baseRoadMargin - 0.8);
+        const dynamicInsideOffset = clamp(activeTurnSign * Math.min(3.2, baseRoadMargin * 0.65), -baseRoadMargin + 0.8, baseRoadMargin - 0.8);
         this.targetOffset = dynamicInsideOffset;
       }
 
@@ -511,17 +542,19 @@ export class TacticalAttackEngine {
     // Lateral separation for slipstream pull-out
     const lateralSwoop = clamp(2.35 + this.aggression * 0.30, 2.35, 2.65);
 
+    const maxAsphaltMargin = Math.min(3.2, baseRoadMargin * 0.65);
+
     // Left Attack Lane Candidate (-lateral, side = -1):
     if (spaceOnLeft >= 2.2) {
       const isLeftInside = inCorner && turnSign < 0;
       const isLeftDive = isLeftInside && divebomb.feasible;
       const isLeftSwitch = !isLeftInside && inCorner && switchback.feasible;
 
-      const leftSwoopOffset = clamp(leadLateral - lateralSwoop, -baseRoadMargin + 0.8, baseRoadMargin - 0.8);
+      const leftSwoopOffset = clamp(leadLateral - lateralSwoop, -maxAsphaltMargin, maxAsphaltMargin);
       const leftTargetOffset = isLeftDive
-        ? clamp(divebomb.insideOffset, -baseRoadMargin + 0.8, baseRoadMargin - 0.8)
-        : (isLeftInside ? clamp(-Math.min(3.2, baseRoadMargin * 0.70), -baseRoadMargin + 0.8, baseRoadMargin - 0.8)
-          : (isLeftSwitch ? clamp(switchback.outsideOffset, -baseRoadMargin + 0.8, baseRoadMargin - 0.8) : leftSwoopOffset));
+        ? clamp(divebomb.insideOffset, -maxAsphaltMargin, maxAsphaltMargin)
+        : (isLeftInside ? clamp(-Math.min(3.2, baseRoadMargin * 0.70), -maxAsphaltMargin, maxAsphaltMargin)
+          : (isLeftSwitch ? clamp(switchback.outsideOffset, -maxAsphaltMargin, maxAsphaltMargin) : leftSwoopOffset));
 
       const leftCorridor = awareness.evaluateCorridor({
         vehicle,
@@ -537,7 +570,7 @@ export class TacticalAttackEngine {
         let phase = 'ATTACK_LEFT';
         if (inCorner) {
           phase = isLeftDive ? 'DIVEBOMB' : (isLeftInside ? 'ATTACK_INSIDE' : (isLeftSwitch ? 'SWITCHBACK' : 'ATTACK_OUTSIDE'));
-        } else if (slipstream.shouldPullOut) {
+        } else if (slipstream.shouldPullOut || this.draftAge >= 0.25 || target.delta < 20) {
           phase = 'SLINGSHOT';
         }
 
@@ -545,13 +578,11 @@ export class TacticalAttackEngine {
         const spaceAdvantage = (spaceOnLeft - spaceOnRight) * 1.4;
         const isSqueezed = spaceOnLeft < 3.8 && spaceOnRight >= 4.6;
         const isOpenSweep = spaceOnLeft >= 4.5 && spaceOnRight < 3.8;
-        const score = leftCorridor.minimumClearanceM * 1.6
+        const score = (inCorner ? 0 : leftCorridor.minimumClearanceM * 1.6)
           + timeGain * 3.0
-          + spaceAdvantage
-          + (isLeftDive ? 4.5 + this.aggression * 2.5 : (isLeftInside ? 1.8 : 0.8))
-          + (isLeftSwitch ? 3.0 + this.aggression * 1.8 : 0)
-          - (isSqueezed ? 2.5 : 0)
-          + (isOpenSweep ? 2.8 : 0);
+          + (isLeftDive ? 22.0 + this.aggression * 9.0 : (isLeftInside ? 18.0 + this.aggression * 8.0 : 0.5))
+          + (isLeftSwitch ? 12.0 + this.aggression * 4.5 : 0)
+          + (!inCorner ? spaceAdvantage + (isOpenSweep ? 2.8 : 0) - (isSqueezed ? 2.5 : 0) : 0);
 
         candidates.push({
           phase,
@@ -572,11 +603,11 @@ export class TacticalAttackEngine {
       const isRightDive = isRightInside && divebomb.feasible;
       const isRightSwitch = !isRightInside && inCorner && switchback.feasible;
 
-      const rightSwoopOffset = clamp(leadLateral + lateralSwoop, -baseRoadMargin + 0.8, baseRoadMargin - 0.8);
+      const rightSwoopOffset = clamp(leadLateral + lateralSwoop, -maxAsphaltMargin, maxAsphaltMargin);
       const rightTargetOffset = isRightDive
-        ? clamp(divebomb.insideOffset, -baseRoadMargin + 0.8, baseRoadMargin - 0.8)
-        : (isRightInside ? clamp(Math.min(3.2, baseRoadMargin * 0.70), -baseRoadMargin + 0.8, baseRoadMargin - 0.8)
-          : (isRightSwitch ? clamp(switchback.outsideOffset, -baseRoadMargin + 0.8, baseRoadMargin - 0.8) : rightSwoopOffset));
+        ? clamp(divebomb.insideOffset, -maxAsphaltMargin, maxAsphaltMargin)
+        : (isRightInside ? clamp(Math.min(3.2, baseRoadMargin * 0.70), -maxAsphaltMargin, maxAsphaltMargin)
+          : (isRightSwitch ? clamp(switchback.outsideOffset, -maxAsphaltMargin, maxAsphaltMargin) : rightSwoopOffset));
 
       const rightCorridor = awareness.evaluateCorridor({
         vehicle,
@@ -592,7 +623,7 @@ export class TacticalAttackEngine {
         let phase = 'ATTACK_RIGHT';
         if (inCorner) {
           phase = isRightDive ? 'DIVEBOMB' : (isRightInside ? 'ATTACK_INSIDE' : (isRightSwitch ? 'SWITCHBACK' : 'ATTACK_OUTSIDE'));
-        } else if (slipstream.shouldPullOut) {
+        } else if (slipstream.shouldPullOut || this.draftAge >= 0.25 || target.delta < 20) {
           phase = 'SLINGSHOT';
         }
 
@@ -600,13 +631,11 @@ export class TacticalAttackEngine {
         const spaceAdvantage = (spaceOnRight - spaceOnLeft) * 1.4;
         const isSqueezed = spaceOnRight < 3.8 && spaceOnLeft >= 4.6;
         const isOpenSweep = spaceOnRight >= 4.5 && spaceOnLeft < 3.8;
-        const score = rightCorridor.minimumClearanceM * 1.6
+        const score = (inCorner ? 0 : rightCorridor.minimumClearanceM * 1.6)
           + timeGain * 3.0
-          + spaceAdvantage
-          + (isRightDive ? 4.5 + this.aggression * 2.5 : (isRightInside ? 1.8 : 0.8))
-          + (isRightSwitch ? 3.0 + this.aggression * 1.8 : 0)
-          - (isSqueezed ? 2.5 : 0)
-          + (isOpenSweep ? 2.8 : 0);
+          + (isRightDive ? 22.0 + this.aggression * 9.0 : (isRightInside ? 18.0 + this.aggression * 8.0 : 0.5))
+          + (isRightSwitch ? 12.0 + this.aggression * 4.5 : 0)
+          + (!inCorner ? spaceAdvantage + (isOpenSweep ? 2.8 : 0) - (isSqueezed ? 2.5 : 0) : 0);
 
         candidates.push({
           phase,
@@ -621,13 +650,14 @@ export class TacticalAttackEngine {
       }
     }
 
-    // Lane commitment hysteresis
-    if (this.phase !== 'NONE' && this.phase !== 'RETURN' && this.side != null) {
+    // Lane commitment hysteresis (disabled during corner approaches or when current lane is squeezed)
+    const currentSideSqueezed = (this.side === -1 && spaceOnLeft < 3.2) || (this.side === 1 && spaceOnRight < 3.2);
+    if (this.phase !== 'NONE' && this.phase !== 'RETURN' && this.side != null && !inCorner && !currentSideSqueezed) {
       for (const cand of candidates) {
         if (cand.side === this.side) {
-          cand.score += 5.0;
+          cand.score += 2.5;
         } else {
-          cand.score -= 6.0;
+          cand.score -= 2.5;
         }
       }
     }
@@ -636,10 +666,13 @@ export class TacticalAttackEngine {
     const chosen = candidates[0] ?? null;
 
     const isSlowObstacle = target.other.speed < 12.0 && target.delta < 24.0;
-    const attackRange = 28 + aggression * 10;
+    const attackRange = 36 + aggression * 12;
+
+    // Allow drafting for first 0.3s when far behind (>20m) and straight is long
+    const wantsDraftHold = !inCorner && target.delta > 21.0 && this.draftAge < 0.35 && slipstream.wakeStrength > 0.15;
 
     const straightSend = !inCorner && (chosen?.timeGainS ?? 0) > 0.02 && target.delta < attackRange;
-    const attackTrigger = Boolean(chosen) && (
+    const attackTrigger = Boolean(chosen) && !wantsDraftHold && (
       (target.delta < attackRange && (chosen.timeGainS ?? 0) > 0.02)
       || slipstream.shouldPullOut
       || isSlowObstacle

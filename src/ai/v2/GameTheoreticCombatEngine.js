@@ -222,7 +222,7 @@ export class GameTheoreticCombatEngine {
 
     const roadHalfW = finite(track?.roadHalfWidth, this.roadHalfWidth);
     const curbW = finite(track?.curbWidth, this.curbWidth);
-    const maxMargin = Math.max(2.1, roadHalfW - 1.20 + Math.min(0.70, curbW * 0.55));
+    const maxMargin = Math.max(2.1, Math.min(5.2, roadHalfW - 1.80 + Math.min(0.50, curbW * 0.40)));
 
     // Lockout timer for recently passed cars
     this.targetLockTimer = Math.max(0, this.targetLockTimer - dt);
@@ -246,7 +246,7 @@ export class GameTheoreticCombatEngine {
 
     const isApproachingCorner = multiApex.primaryCurv > 0.0045;
     const isStraight = multiApex.primaryCurv < 0.0028;
-    const primaryInsideSign = -multiApex.primarySign; // Inside lateral sign (-1 for right turn, +1 for left turn)
+    const primaryInsideSign = multiApex.primarySign; // Inside lateral sign (+1 for left turn, -1 for right turn)
     const insideOffset = clamp(primaryInsideSign * (maxMargin * 0.78), -maxMargin, maxMargin);
 
     // Scan traffic entries (Challenger behind, Target ahead)
@@ -254,13 +254,28 @@ export class GameTheoreticCombatEngine {
 
     const challenger = entries.find((e) => {
       if (!e?.other || e.other.finished || e.other.despawned || e.other.trafficGhost) return false;
-      if (e.delta >= -0.8 || e.delta <= -52.0) return false;
+      if (e.delta >= -0.8 || e.delta <= -45.0) return false;
+      const closing = finite(e.otherForwardSpeed - traffic.egoForwardSpeed, 0);
       if (this.passedTargetId && e.other.id === this.passedTargetId) {
-        const closing = finite(e.otherForwardSpeed - traffic.egoForwardSpeed, 0);
-        if (Math.abs(e.delta) > 5.5 || closing <= 0.35) return false;
+        if (Math.abs(e.delta) > 6.0 || closing <= 0.35) return false;
       }
+      if (closing < -0.3 && Math.abs(e.delta) > 8.0) return false;
       return true;
     });
+
+    const activeAttackEntry = this.attackTargetId
+      ? entries.find((e) => e.other?.id === this.attackTargetId)
+      : null;
+
+    if (activeAttackEntry && (activeAttackEntry.delta < -1.8 || (activeAttackEntry.delta < 0.2 && vSpeed >= finite(activeAttackEntry.other?.speed, 0) + 2.0 && this.attackTimer > 1.0))) {
+      this.passedTargetId = this.attackTargetId;
+      this.targetLockTimer = 16.0;
+      this.attackMode = 'NONE';
+      this.attackTargetId = null;
+      this.attackTimer = 0;
+      this.divebombCommitted = false;
+      this.switchbackStage = 'NONE';
+    }
 
     const targetAhead = entries.find((e) => {
       if (!e?.other || e.other.finished || e.other.despawned || e.other.trafficGhost) return false;
@@ -279,7 +294,7 @@ export class GameTheoreticCombatEngine {
     // =========================================================================
     // 1. STACKELBERG LEADER DEFENSE GAME
     // =========================================================================
-    if (challenger && challenger.delta > -42.0) {
+    if (challenger && challenger.delta > -45.0) {
       const gap = Math.abs(challenger.delta);
       const challengerSpeed = finite(challenger.other?.speed ?? challenger.otherForwardSpeed, vSpeed);
       const closingSpeed = Math.max(0, challengerSpeed - vSpeed);
@@ -291,21 +306,25 @@ export class GameTheoreticCombatEngine {
       this.filteredAttackerLateral = damp(this.filteredAttackerLateral, rawAttackerLat, 6.5, dt);
 
       // Composite Stackelberg threat score T(t) in [0, 1]
-      const fGap = Math.exp(-gap / 15.0);
+      const fGap = Math.exp(-gap / 16.0);
       const fClose = saturate((closingSpeed + 0.4) / 4.8);
       const fTtc = ttc <= 4.5 ? Math.pow(1.0 - ttc / 4.5, 2) : 0;
-      const fCorner = Math.exp(-multiApex.primaryDist / 42.0) * saturate(multiApex.primaryCurv / 0.003);
+      const fCorner = Math.exp(-multiApex.primaryDist / 45.0) * saturate(multiApex.primaryCurv / 0.003);
       const lateralSeparation = Math.abs(rawAttackerLat - currentLat);
       const fLat = 1.0 - saturate((lateralSeparation - 1.4) / 8.0);
 
       const isClosingThreat = (gap < 10.0)
-        || (gap <= 26.0 && closingSpeed >= 0.35)
-        || (gap <= 42.0 && closingSpeed >= 1.0 && multiApex.primaryDist < 75.0)
+        || (gap <= 24.0 && closingSpeed >= 0.30)
+        || (gap <= 42.0 && closingSpeed >= 0.60 && multiApex.primaryDist < 85.0)
         || (ttc < 3.2);
 
-      this.threatScore = saturate(fGap * 0.30 + fClose * 0.25 + fTtc * 0.25 + fCorner * 0.15 + (isClosingThreat ? 0.25 : 0.0));
+      const isAttackerRealThreat = closingSpeed > 0.15 || gap < 10.0 || (ttc < 3.5 && gap < 20.0);
 
-      if (isClosingThreat || this.threatScore > 0.35 || this.defenseDwellTimer > 0) {
+      this.threatScore = isAttackerRealThreat
+        ? saturate(fGap * 0.30 + fClose * 0.25 + fTtc * 0.25 + fCorner * 0.15 + (isClosingThreat ? 0.30 : 0.0))
+        : 0;
+
+      if ((isClosingThreat || this.threatScore > 0.35 || this.defenseDwellTimer > 0) && isAttackerRealThreat) {
         tacticalRole = 'DEFEND';
         this.defenseTargetId = challenger.other?.id ?? null;
         this.defenseTimer += dt;
@@ -324,7 +343,7 @@ export class GameTheoreticCombatEngine {
 
         // FIA Single Defensive Move Rule: Lock direction upon initial commitment
         if (!this.oneMoveLocked || this.lockedDefensiveLane === null) {
-          this.defenseDirection = Math.sign(preferredDefensiveOffset) || 1;
+          this.defenseDirection = Math.sign(preferredDefensiveOffset) || primaryInsideSign;
           this.lockedDefensiveLane = preferredDefensiveOffset;
           this.oneMoveLocked = true;
         }
@@ -335,7 +354,7 @@ export class GameTheoreticCombatEngine {
           ? insideOffset
           : clamp(lockedSign * (maxMargin * 0.72), -maxMargin, maxMargin);
 
-        if (isStraight && gap > 11.0 && closingSpeed > 0.8) {
+        if (isStraight && gap > 11.0 && closingSpeed > 0.6) {
           // A. Break Tow (Stepped lateral shift on straight)
           this.defenseMode = 'BREAK_TOW';
           targetLateral = clamp(defensiveTargetLat * 0.70, -maxMargin * 0.72, maxMargin * 0.72);
@@ -347,11 +366,11 @@ export class GameTheoreticCombatEngine {
           this.defenseMode = 'APEX_SHIELD';
 
           // Multi-apex chicane adaptation: blend cleanly between apex 1 and apex 2 setup
-          if (multiApex.isChicane && multiApex.primaryDist < 10.0) {
-            const secondaryInsideSign = -multiApex.secondarySign;
-            const transitionBlend = saturate((10.0 - multiApex.primaryDist) / 10.0);
+          if (multiApex.isChicane && multiApex.primaryDist < 12.0) {
+            const secondaryInsideSign = multiApex.secondarySign;
+            const transitionBlend = saturate((12.0 - multiApex.primaryDist) / 12.0);
             const secondaryInsideOffset = secondaryInsideSign * (maxMargin * 0.78);
-            targetLateral = lerp(insideOffset, secondaryInsideOffset, transitionBlend * 0.65);
+            targetLateral = lerp(insideOffset, secondaryInsideOffset, transitionBlend * 0.60);
             combatNotes = 'DEFEND_CHICANE_MULTI_APEX_SHIELD';
           } else {
             targetLateral = insideOffset;
@@ -363,7 +382,7 @@ export class GameTheoreticCombatEngine {
         } else if (!isStraight && gap < 8.0) {
           // C. Exit Squeeze (Drift out smoothly to leave exactly 1 car width at outside edge)
           this.defenseMode = 'EXIT_SQUEEZE';
-          const outsideBoundary = -primaryInsideSign * (maxMargin - this.carWidth - 0.22);
+          const outsideBoundary = clamp(-primaryInsideSign * (maxMargin - this.carWidth - 0.25), -maxMargin, maxMargin);
           targetLateral = outsideBoundary;
           dMin = Math.min(targetLateral, 0) - 0.35;
           dMax = Math.max(targetLateral, 0) + 0.35;
@@ -412,8 +431,8 @@ export class GameTheoreticCombatEngine {
       const closingSpeed = Math.max(0, vSpeed - targetSpeed);
 
       // Check if inside line is open (opponent is not hugging inside apex curb)
-      const isInsideOpen = Math.abs(opponentLat - insideOffset) > 2.4;
-      const isSideBySide = Math.abs(gap) < this.carLength * 1.1;
+      const isInsideOpen = Math.abs(opponentLat - insideOffset) > 2.0;
+      const isSideBySide = Math.abs(gap) < this.carLength * 1.2;
 
       // Pass completion check (car established clear forward progress)
       if (gap < -2.2) {
@@ -431,8 +450,8 @@ export class GameTheoreticCombatEngine {
         this.attackMode = 'SIDE_BY_SIDE';
         const opponentSide = opponentLat >= 0 ? 1 : -1;
         const assignedSide = -opponentSide;
-        targetLateral = clamp(opponentLat + assignedSide * (this.carWidth + 0.55), -maxMargin, maxMargin);
-        desiredSpeed = Math.max(desiredSpeed, targetSpeed + 4.0);
+        targetLateral = clamp(opponentLat + assignedSide * (this.carWidth + 0.65), -maxMargin, maxMargin);
+        desiredSpeed = Math.max(desiredSpeed, targetSpeed + 6.0);
         dMin = Math.min(targetLateral - 0.5, currentLat - 0.3);
         dMax = Math.max(targetLateral + 0.5, currentLat + 0.3);
         combatNotes = 'ATTACK_SIDE_BY_SIDE_HOLD';
@@ -443,12 +462,12 @@ export class GameTheoreticCombatEngine {
         desiredSpeed = Math.max(desiredSpeed, targetSpeed + straightClosingFloor);
 
         // Calculate dynamic pull-out timing
-        const dynamicPulloutDist = clamp(closingSpeed * 1.15 + 4.8, 6.5, 28.0);
-        const shouldPullOut = gap <= dynamicPulloutDist || gap < 8.0;
+        const dynamicPulloutDist = clamp(closingSpeed * 1.15 + 4.8, 6.5, 24.0);
+        const shouldPullOut = gap <= dynamicPulloutDist || gap < 16.0;
 
         if (shouldPullOut) {
           // Punch out into clear lateral lane
-          const pullSide = opponentLat > 0 ? -1 : 1;
+          const pullSide = opponentLat >= 0 ? -1 : 1;
           targetLateral = clamp(opponentLat + pullSide * 3.8, -maxMargin, maxMargin);
           combatNotes = 'ATTACK_SLINGSHOT_PUNCH_OUT';
         } else {
@@ -456,7 +475,7 @@ export class GameTheoreticCombatEngine {
           targetLateral = clamp(opponentLat, -maxMargin * 0.85, maxMargin * 0.85);
           combatNotes = 'ATTACK_SLINGSHOT_DRAFTING';
         }
-      } else if (isApproachingCorner && isInsideOpen && gap < 32.0) {
+      } else if (isApproachingCorner && isInsideOpen && gap < 36.0) {
         // C. Fearless Inside Divebomb (-3.5G Threshold Deceleration)
         this.attackMode = 'DIVEBOMB';
         this.divebombCommitted = true;
@@ -465,12 +484,11 @@ export class GameTheoreticCombatEngine {
         // Multi-apex chicane divebomb control: regulate exit speed for secondary apex
         if (multiApex.isChicane) {
           targetLateral = insideOffset;
-          // Hold sufficient speed through apex 1 while preparing chicane reversal
-          desiredSpeed = Math.max(optimalSample.targetSpeed * 0.96, targetSpeed + 4.5);
+          desiredSpeed = Math.max(optimalSample.targetSpeed * 0.98, targetSpeed + 5.5);
           combatNotes = 'ATTACK_CHICANE_IBR_DIVEBOMB';
         } else {
           targetLateral = insideOffset;
-          desiredSpeed = Math.max(optimalSample.targetSpeed, targetSpeed + 5.5 + aggression * 2.0);
+          desiredSpeed = Math.max(optimalSample.targetSpeed, targetSpeed + 6.0 + aggression * 3.0);
           combatNotes = 'ATTACK_FEARLESS_IBR_DIVEBOMB';
         }
 
@@ -486,13 +504,13 @@ export class GameTheoreticCombatEngine {
           // Stage 1: Stay wider on entry to square off corner radius
           this.switchbackStage = 'ENTRY_WIDE';
           targetLateral = clamp(-primaryInsideSign * (maxMargin * 0.75), -maxMargin, maxMargin);
-          desiredSpeed = optimalSample.targetSpeed * 0.94; // Controlled entry
+          desiredSpeed = optimalSample.targetSpeed * 0.96; // Controlled entry
           combatNotes = 'ATTACK_SWITCHBACK_WIDE_ENTRY';
         } else {
           // Stage 2: Cut underneath defender on exit with maximum longitudinal drive
           this.switchbackStage = 'EXIT_UNDERCUT';
           targetLateral = clamp(primaryInsideSign * (maxMargin * 0.45), -maxMargin, maxMargin);
-          desiredSpeed = Math.max(optimalSample.targetSpeed * 1.06, targetSpeed + 6.0);
+          desiredSpeed = Math.max(optimalSample.targetSpeed * 1.08, targetSpeed + 6.5);
           combatNotes = 'ATTACK_SWITCHBACK_EXIT_UNDERCUT';
         }
       }

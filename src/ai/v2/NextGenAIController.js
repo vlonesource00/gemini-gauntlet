@@ -43,7 +43,7 @@ export class NextGenAIController {
 
     // Perception & Hybrid Engine Layers
     this.awareness = new TrafficAwareness();
-    this.optimalEngine = null;
+    this.optimalEngine = options.track ? new GlobalTimeOptimalEngine({ track: options.track }) : null;
     this.combatEngine = new GameTheoreticCombatEngine();
     this.coupledMPCC = new CoupledMPCCController({ horizonSeconds: 2.5, nodeCount: 18 });
     this.trajectoryPlanner = new FrenetLatticePlanner({ pointCount: 24, horizonS: 3.2 });
@@ -267,11 +267,11 @@ export class NextGenAIController {
     const isOffTrack = offRoad(current) || offRoad(vehicle.surface);
 
     const nominalHalfWidth = finite(track.roadHalfWidth, 6.5);
-    const kerbAllowance = Math.min(1.2, finite(track.curbWidth, 1.05) * 0.95) * this._kerbUsage;
-    const baseRoadMargin = Math.max(2.1, nominalHalfWidth - 1.15 + kerbAllowance);
+    const kerbAllowance = Math.min(0.8, finite(track.curbWidth, 1.05) * 0.65) * this._kerbUsage;
+    const baseRoadMargin = Math.max(2.1, Math.min(5.2, nominalHalfWidth - 1.80 + kerbAllowance));
     const currentSurfaceMargin = finite(
       track.planningLateralLimit?.(vehicle.distance, current?.lateral),
-      nominalHalfWidth - 1.15
+      nominalHalfWidth - 1.80
     );
     const edgeDeviation = Math.abs(finite(current?.lateral, 0)) > currentSurfaceMargin + 0.55;
 
@@ -308,10 +308,11 @@ export class NextGenAIController {
       dt
     });
 
+    const optCurrent = this.optimalEngine?.sampleAtDistance?.(vehicle.distance, vehicle.classKey);
     const defending = tactical.role === 'DEFEND';
     const attacking = tactical.role === 'ATTACK';
     let tacticalMode = recovering ? 'RECOVER' : (defending ? 'DEFEND' : attacking ? 'ATTACK' : 'PACE');
-    let targetOffset = recovering ? 0 : clamp(tactical.targetLateral, -baseRoadMargin, baseRoadMargin);
+    let targetOffset = recovering ? 0 : (tactical.role === 'PACE' ? (optCurrent?.lateral ?? 0) : clamp(tactical.targetLateral, -baseRoadMargin, baseRoadMargin));
     let targetId = attacking ? this.combatEngine.attackTargetId : (defending ? this.combatEngine.defenseTargetId : null);
     let tacticalReason = recovering ? (isOffTrack ? 'OFF_TRACK_RECOVERY' : 'STALL_RECOVERY') : tactical.notes;
 
@@ -372,7 +373,7 @@ export class NextGenAIController {
         vehicle,
         track,
         desiredOffset: targetOffset,
-        fallbackOffsets: recovering || defending ? [] : [targetOffset, finite(current?.lateral, 0)],
+        fallbackOffsets: (recovering || defending || attacking) ? [] : [targetOffset],
         trafficEntries: traffic.entries,
         targetSpeed: physicalTargetSpeed,
         aggression: this._aggression,
@@ -383,13 +384,13 @@ export class NextGenAIController {
         urgent: defending || attacking || isOffTrack,
         roadMargin: baseRoadMargin,
         kerbAllowance,
-        lookAhead: lookAheadDist,
-        trackingDistance: (defending || attacking) ? Math.max(trackingDistance, clamp(vehicle.speed * 0.95, 12.0, 24.0)) : trackingDistance,
+        trackingDistance,
         referenceLineAtDistance: (s) => {
           if (isMatchingTrack && typeof this.referenceProfile?.paceAtDistance === 'function') {
-            return this.referenceProfile.paceAtDistance(s)?.lineLateral ?? 0;
+            return this.referenceProfile.paceAtDistance(s, vehicle.classKey)?.lineLateral ?? 0;
           }
-          return this.optimalEngine?.sampleAtDistance?.(s)?.lateral ?? 0;
+          const optLat = this.optimalEngine?.sampleAtDistance?.(s, vehicle.classKey)?.lateral;
+          return Number.isFinite(optLat) ? clamp(optLat, -baseRoadMargin, baseRoadMargin) : 0;
         }
       });
     }
@@ -439,11 +440,7 @@ export class NextGenAIController {
 
     // 6. Longitudinal Desired Speed Synchronization
     let desiredSpeed = physicalTargetSpeed;
-    const optSample = this.optimalEngine?.sampleAtDistance?.(vehicle.distance);
-    if (optSample && tactical.role === 'PACE') {
-      const scaledRef = optSample.targetSpeed * (0.98 + (this._aggression - 0.5) * 0.08);
-      desiredSpeed = Math.min(physicalTargetSpeed, Math.max(desiredSpeed, scaledRef));
-    } else if (tactical.desiredSpeed) {
+    if (tactical.desiredSpeed) {
       desiredSpeed = Math.min(physicalTargetSpeed, Math.max(desiredSpeed, tactical.desiredSpeed));
     }
 

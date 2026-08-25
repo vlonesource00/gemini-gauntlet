@@ -2,16 +2,23 @@
  * FrenetLatticePlanner.js
  * Modular Multi-Candidate Frenet Trajectory Lattice & Dynamic Line Adaptation Engine:
  * - Smooth C2 Quintic Minimum-Jerk Spatial Trajectories
+ * - (1-x)^2 Parabolic Constant-Acceleration Line Rejoin (REJOIN_A = 4.0 m/s^2, ANCHOR_DEAD = 1.5m)
+ * - Station-Stencil Derivative Differencing (dq/ds and d2q/ds2) & Comb-Free Path Curvature
+ * - Zero-Hesitation Overtaking Candidate Generation & Saturating Intent Cost Field
  * - Dynamic Line Adaptation (Alternative Racing Lines when blocked or forced off-line)
  * - Dirty-Air Wake Avoidance Corridors
  * - Bounding-Capsule Collision Prediction & Clearance Assessment
- * - Off-Track Rejoin & Surface Recovery Trajectory Synthesis
  * - Candidate Selection Hysteresis (-22.0 bonus) and 3D Visual Spline Extraction
  */
 
 import { clamp, wrap, wrapAngle } from '../core/math.js';
 
 const finite = (value, fallback = 0) => (Number.isFinite(value) ? value : fallback);
+
+export const ANCHOR_DEAD = 1.5;      // metres of cross-track error controller owns outright
+export const REJOIN_A = 4.0;         // m/s^2 constant lateral acceleration spent rejoining the line
+export const LINE_PULL = 0.006;      // tie-breaking line pull weight
+export const LINE_PULL_SAT = 4.0;    // metres^2 at which the pull saturates
 
 /**
  * Quintic polynomial minimum-jerk lateral transition curve: S(u) = 10u^3 - 15u^4 + 6u^5.
@@ -43,6 +50,45 @@ export const minimumJerkDerivative = (value) => {
 export const minimumJerkSecondDerivative = (value) => {
   const u = clamp(value, 0, 1);
   return 60 * u * (1 - u) * (1 - 2 * u);
+};
+
+/**
+ * Parabolic constant-acceleration decay function: w(x) = (1 - x)^2 for x in [0, 1).
+ * Yields non-zero initial slope -2/L and constant second derivative 2/L^2,
+ * perfectly closing tracking offset without receding-horizon fixed-point lag.
+ * @param {number} shift - Offset to decay
+ * @param {number} distance - Forward distance traveled
+ * @param {number} span - Spatial decay span L
+ * @returns {number} Decayed offset
+ */
+export const parabolicRejoin = (shift, distance, span) => {
+  if (shift === 0 || span <= 0) return 0;
+  const x = distance / span;
+  return x >= 1.0 ? 0 : shift * (1 - x) * (1 - x);
+};
+
+/**
+ * Exact differential geometry curvature & scale of Frenet path offset q(s)
+ * with derivatives qp = dq/ds, qpp = d2q/ds2 off reference line of curvature k(s)
+ * and curvature rate kp = dk/ds.
+ * @param {number} k - Reference curvature
+ * @param {number} kp - Reference curvature rate dk/ds
+ * @param {number} q - Lateral offset
+ * @param {number} qp - dq/ds
+ * @param {number} qpp - d2q/ds2
+ * @param {Object} [out]
+ * @returns {Object} { kappa, scale }
+ */
+export const pathGeom = (k, kp, q, qp, qpp, out = { kappa: 0, scale: 1 }) => {
+  const A = 1 - k * q;
+  const B = qp;
+  const Ap = -(kp * q + k * qp);
+  const Bp = qpp;
+  const n2 = A * A + B * B;
+  const n1 = Math.sqrt(n2);
+  out.kappa = Math.abs((n2 * k + A * Bp - B * Ap) / Math.max(1e-7, n2 * n1));
+  out.scale = n1;
+  return out;
 };
 
 /**
@@ -123,6 +169,7 @@ export class FrenetLatticePlanner {
     weights = {}
   }) {
     const points = [];
+    const smoothQ = new Float64Array(this.pointCount);
     const startSpeed = Math.max(0, finite(vehicle?.speed, 0));
     const acceleration = clamp((finite(targetSpeed, startSpeed) - startSpeed) * 0.42, -7.0, 5.0);
 
@@ -140,6 +187,32 @@ export class FrenetLatticePlanner {
 
     const effectiveRoadMargin = roadMargin + kerbAllowance;
 
+    // Check if candidate follows a dynamic reference racing line
+    const hasReference = typeof referenceLineAtDistance === 'function';
+    const isPaceLine = intentType === 'PRIMARY_INTENT' || intentType === 'RACING_LINE' || intentType === 'PACE';
+
+    // Initial lateral offset relative to nominal reference line
+    const startDistance = finite(vehicle?.distance, 0);
+    const startRef = track?.atDistance ? track.atDistance(startDistance) : { s: startDistance };
+    const startSurfaceLimit = Math.min(
+      effectiveRoadMargin,
+      finite(track?.planningLateralLimit?.(startRef.s, terminalLateral), effectiveRoadMargin) + kerbAllowance
+    );
+
+    const refLine0 = hasReference
+      ? clamp(finite(referenceLineAtDistance(startRef.s), 0), -startSurfaceLimit, startSurfaceLimit)
+      : 0;
+
+    // Only apply deadbanded parabolic shift when tracking reference line or recovering
+    const dev0 = isPaceLine ? (startLateral - refLine0) : 0;
+    const raw0 = dev0;
+    const shift = Math.abs(raw0) <= ANCHOR_DEAD ? 0 : raw0 - Math.sign(raw0) * ANCHOR_DEAD;
+
+    // Parabolic constant-acceleration rejoin span: L = v * sqrt(2 * |shift| / REJOIN_A)
+    const vRejoin = Math.max(6.0, startSpeed);
+    const rejoinL = shift !== 0 ? vRejoin * Math.sqrt((2 * Math.abs(shift)) / REJOIN_A) : 0;
+    const rejoinSpan = Math.max(3.0, rejoinL);
+
     for (let index = 0; index < this.pointCount; index += 1) {
       const time = (horizon * index) / (this.pointCount - 1);
       const predictedSpeed = clamp(startSpeed + acceleration * time, 0, 95);
@@ -148,26 +221,35 @@ export class FrenetLatticePlanner {
       const forwardDistance = Math.max(0, startSpeed * time + 0.5 * acceleration * time * time);
       const blend = minimumJerk(time / Math.max(0.2, transitionTime));
 
-      const currentDistance = finite(vehicle?.distance, 0) + forwardDistance;
+      const currentDistance = startDistance + forwardDistance;
       const reference = track?.atDistance
         ? track.atDistance(currentDistance)
-        : { s: currentDistance, x: 0, y: 0, z: 0 };
+        : { s: currentDistance, x: 0, y: 0, z: 0, curvature: 0 };
 
-      const surfaceLimit = Math.min(
-        effectiveRoadMargin,
-        finite(track?.planningLateralLimit?.(reference.s, terminalLateral), effectiveRoadMargin) + kerbAllowance
-      );
+      const refLineVal = hasReference
+        ? finite(referenceLineAtDistance(reference.s), 0)
+        : 0;
 
-      const clampedTerminal = clamp(terminalLateral, -surfaceLimit, surfaceLimit);
-      const followsReference = typeof referenceLineAtDistance === 'function'
-        && (intentType === 'PRIMARY_INTENT' || intentType === 'RACING_LINE')
-        && Math.abs(desiredOffset) < 0.25;
+      const localLimit = track?.planningLateralLimit
+        ? track.planningLateralLimit(reference.s, refLineVal + terminalLateral)
+        : effectiveRoadMargin;
+      const surfaceLimit = Math.min(effectiveRoadMargin, finite(localLimit, effectiveRoadMargin) + kerbAllowance);
 
-      const guidedLateral = followsReference
-        ? clamp(finite(referenceLineAtDistance(reference.s), clampedTerminal), -surfaceLimit, surfaceLimit)
-        : clampedTerminal;
+      // Combine minimum-jerk intentional transition with (1-x)^2 parabolic line rejoin
+      let unclampedLateral;
+      if (isPaceLine && hasReference) {
+        const rejoinW = shift !== 0 ? parabolicRejoin(shift, forwardDistance, rejoinSpan) : 0;
+        unclampedLateral = clamp(refLineVal, -surfaceLimit, surfaceLimit) + rejoinW;
+      } else if (hasReference && intentType !== 'LANE_HOLD' && intentType !== 'RECOVER') {
+        // Tactical candidate relative to reference racing line
+        const targetQ = clamp(refLineVal + terminalLateral, -surfaceLimit, surfaceLimit);
+        unclampedLateral = startLateral + (targetQ - startLateral) * blend;
+      } else {
+        const targetQ = clamp(terminalLateral, -surfaceLimit, surfaceLimit);
+        unclampedLateral = startLateral + (targetQ - startLateral) * blend;
+      }
 
-      const unclampedLateral = startLateral + (guidedLateral - startLateral) * blend;
+      smoothQ[index] = unclampedLateral;
       const lateral = clamp(unclampedLateral, -surfaceLimit, surfaceLimit);
 
       let world;
@@ -253,20 +335,49 @@ export class FrenetLatticePlanner {
       });
     }
 
-    // Compute curvature and lateral acceleration along trajectory
-    for (let index = 1; index < points.length - 1; index += 1) {
-      const prev = points[index - 1];
+    // Station-stencil derivative differencing: compute dq/ds and d2q/ds2 on smooth deviation profile
+    const S = points.length;
+    const d1 = new Float64Array(S);
+    const d2 = new Float64Array(S);
+
+    for (let index = 0; index < S; index += 1) {
+      const im = index > 0 ? index - 1 : 0;
+      const ip = index < S - 1 ? index + 1 : S - 1;
+      const dsSpan = points[ip].forwardDistance - points[im].forwardDistance;
+      d1[index] = dsSpan > 0.01 ? (smoothQ[ip] - smoothQ[im]) / dsSpan : 0;
+
+      const ds1 = points[index].forwardDistance - points[im].forwardDistance;
+      const ds2 = points[ip].forwardDistance - points[index].forwardDistance;
+      const dsAvg = 0.5 * (ds1 + ds2);
+      d2[index] = (ip > index && index > im && dsAvg > 0.01 && ds1 > 0.005 && ds2 > 0.005)
+        ? ((smoothQ[ip] - smoothQ[index]) / ds2 - (smoothQ[index] - smoothQ[im]) / ds1) / dsAvg
+        : 0;
+    }
+
+    const gScratch = { kappa: 0, scale: 1 };
+
+    for (let index = 0; index < S; index += 1) {
       const curr = points[index];
-      const next = points[index + 1];
+      const ref = track?.atDistance ? track.atDistance(curr.s) : { curvature: 0, turnSign: 0 };
+      const rawCurv = finite(ref?.curvature, 0);
+      const turnSign = ref?.turnSign !== undefined ? ref.turnSign : (rawCurv > 0 ? 1 : 0);
+      const signedK = turnSign * rawCurv;
 
-      const segment = Math.max(0.5, Math.hypot(next.x - prev.x, next.z - prev.z) * 0.5);
-      const headingCurr = worldHeading(prev, curr);
-      const headingNext = worldHeading(curr, next);
-      const curvature = Math.abs(wrapAngle(headingNext - headingCurr)) / segment;
+      let kp = finite(ref?.curvRate, 0);
+      if (!ref?.curvRate && track?.atDistance) {
+        const refP = track.atDistance(curr.s + 2.0);
+        const refM = track.atDistance(curr.s - 2.0);
+        const sKP = finite(refP?.turnSign, 1) * finite(refP?.curvature, 0);
+        const sKM = finite(refM?.turnSign, 1) * finite(refM?.curvature, 0);
+        kp = (sKP - sKM) / 4.0;
+      }
 
-      curr.curvature = curvature;
-      maxCurvature = Math.max(maxCurvature, curvature);
-      maxLateralAcceleration = Math.max(maxLateralAcceleration, curr.predictedSpeed ** 2 * curvature);
+      pathGeom(signedK, kp, curr.lateral, d1[index], d2[index], gScratch);
+      curr.curvature = gScratch.kappa;
+      maxCurvature = Math.max(maxCurvature, gScratch.kappa);
+
+      const totalLatAccel = curr.predictedSpeed ** 2 * gScratch.kappa;
+      maxLateralAcceleration = Math.max(maxLateralAcceleration, totalLatAccel);
     }
 
     // Lateral dynamics budget
@@ -286,9 +397,12 @@ export class FrenetLatticePlanner {
     const avgSpeed = speedSum / this.pointCount;
 
     // Reward clipping inside apex curb during cornering
-    const trackPoint = track?.atDistance ? track.atDistance(vehicle?.distance ?? 0) : { curvature: 0 };
-    const trackCurv = finite(trackPoint?.curvature, 0);
-    const isInsideApex = (trackCurv > 0.003 && terminalLateral < 0) || (trackCurv < -0.003 && terminalLateral > 0);
+    const trackPoint = track?.atDistance ? track.atDistance(vehicle?.distance ?? 0) : { curvature: 0, turnSign: 0 };
+    const trackCurvMag = finite(trackPoint?.curvature, 0);
+    const trackSign = trackPoint?.turnSign !== undefined ? trackPoint.turnSign : 0;
+    const trackSignedCurv = trackSign * trackCurvMag;
+
+    const isInsideApex = (trackSignedCurv > 0.003 && terminalLateral < 0) || (trackSignedCurv < -0.003 && terminalLateral > 0);
     const kerbReward = (kerbAllowance > 0 && isInsideApex) ? (0.6 + aggression * 0.8) : 0;
     const rewardWidth = isInsideApex ? -(kerbReward + 0.5) : 0;
 
@@ -298,6 +412,7 @@ export class FrenetLatticePlanner {
     const costAccel = accelerationExcess * accelerationExcess * wAccel;
     const costJerk = (lateralDelta * 0.20 + (committed ? transitionTime * 1.0 : transitionTime * 0.22)) * wJerk;
     const costIntent = intentError * intentError * wIntent;
+
     const rewardProgress = -avgSpeed * wProg;
     const costHysteresis = (this.lastSelectedOffset !== null && Math.abs(terminalLateral - this.lastSelectedOffset) < 0.25) ? -22.0 : 0;
 
@@ -399,6 +514,30 @@ export class FrenetLatticePlanner {
           -margin * 0.65,
           margin * 0.65
         ];
+
+    // Zero-hesitation overtaking flank candidate generation
+    if (!recovering && trafficEntries && trafficEntries.length > 0) {
+      const egoExtents = getVehicleBoundingExtents(vehicle);
+      for (const entry of trafficEntries) {
+        if (!entry?.other || entry.other.finished || entry.other.despawned || entry.other.trafficGhost) continue;
+        const delta = finite(entry.delta, 999);
+        if (delta < -2.0 || delta > Math.max(25.0, lookAhead * 2.0)) continue;
+
+        const oppExtents = getVehicleBoundingExtents(entry.other);
+        const oppLat = finite(entry.otherLateral, finite(entry.other.surface?.lateral, 0));
+        const passGap = egoExtents.halfWidth + oppExtents.halfWidth + 0.95;
+
+        // If the opponent occupies or threatens the intended line, synthesize open flanking corridors
+        if (Math.abs(intendedOffset - oppLat) < passGap) {
+          const leftFlank = clamp(oppLat - passGap, -margin, margin);
+          const rightFlank = clamp(oppLat + passGap, -margin, margin);
+          const wideLeftFlank = clamp(oppLat - passGap - 0.75, -margin, margin);
+          const wideRightFlank = clamp(oppLat + passGap + 0.75, -margin, margin);
+
+          candidatePool.push(leftFlank, rightFlank, wideLeftFlank, wideRightFlank);
+        }
+      }
+    }
 
     const standardOffsets = uniqueOffsets(candidatePool, -margin, margin);
 

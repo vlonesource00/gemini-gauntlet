@@ -178,8 +178,8 @@ export class TacticalDefenseEngine {
     const lateralDelta = attackerLateral - currentLateral;
     const attackerLatVel = finite(challenger.otherLateralSpeed, finite(challenger.relativeLateralVelocity, 0));
     const attackerNose = finite(challenger.otherNoseTrackDeviation, 0);
-    const insideSign = -turnSign;
-    const outsideSign = turnSign;
+    const insideSign = turnSign;
+    const outsideSign = -turnSign;
 
     const isMovingInside = (attackerLateral * insideSign) > 0.4 || (attackerLatVel * insideSign) > 0.12 || (attackerNose * insideSign) > 0.03;
     const isPositionedOutside = (attackerLateral * outsideSign) > 0.5;
@@ -270,8 +270,8 @@ export class TacticalDefenseEngine {
     this.threatScore = threatScore;
 
     const turnSign = Math.sign(finite(turn?.turnSign, 1)) || 1;
-    const insideSign = -turnSign;
-    const outsideSign = turnSign;
+    const insideSign = turnSign;
+    const outsideSign = -turnSign;
     const inCorner = turnCurvature > 0.0035;
 
     // Detect wheel-to-wheel rubbing pressure
