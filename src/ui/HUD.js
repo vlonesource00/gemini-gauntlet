@@ -388,7 +388,7 @@ export class HUD {
       const finish = this.$('finish');
       if (finish) {
         finish.classList.remove('hidden');
-        this.$('finish-position').textContent = `P${String(player?.position || 1).padStart(2, '0')}`;
+        this.$('finish-position').textContent = `P${String(player?.racePosition || 1).padStart(2, '0')}`;
         this.$('finish-time').textContent = formatTime(player?.totalRaceTime || raceTime);
         this.$('finish-best-lap').textContent = formatTime(player?.bestLapTime || 0);
       }
@@ -402,7 +402,7 @@ export class HUD {
     });
 
     const rows = list.map((v, idx) => {
-      v.position = idx + 1;
+      v.racePosition = idx + 1;
       const leaderDist = list[0].distance + (list[0].completedLaps || 0) * (v.track?.length || 2704);
       const myDist = v.distance + (v.completedLaps || 0) * (v.track?.length || 2704);
       const gap = idx === 0 ? 0 : -(leaderDist - myDist);
@@ -472,7 +472,7 @@ export class HUD {
           const dotClass = mode.includes('ATTACK') || mode.includes('PASS') || mode.includes('DIVE') ? 'pass' : (mode.includes('DEFEND') ? 'defend' : (mode.includes('PIT') ? 'pit' : (mode.includes('RECOVER') ? 'recover' : 'race')));
           return `<div class="ai-roster-item">
             <span class="dot ${dotClass}"></span>
-            <b>P${String(v.position || idx + 1).padStart(2, '0')}</b>
+            <b>P${String(v.racePosition || idx + 1).padStart(2, '0')}</b>
             <span class="roster-name">${escapeHtml(v.name)}</span>
             <small>${mode}</small>
             <em>${(finite(v.speed) * 3.6).toFixed(0)}kph</em>
