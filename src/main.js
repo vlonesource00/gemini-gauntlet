@@ -171,6 +171,12 @@ const assets = new AssetLibrary({
   }
 });
 
+const dismissLoadingScreen = () => {
+  if (loadingScreen && !loadingScreen.classList.contains('dismissed')) {
+    loadingScreen.classList.add('dismissed');
+  }
+};
+
 let assetsReady = false;
 assets.preload().then((result) => {
   assetsReady = true;
@@ -181,7 +187,13 @@ assets.preload().then((result) => {
       ? 'PROCEDURAL FALLBACK ACTIVE'
       : '3D ASSETS ONLINE // 12-LAP GRAND PRIX SIMULATION READY';
   }
+  setTimeout(dismissLoadingScreen, 350);
+}).catch(() => {
+  dismissLoadingScreen();
 });
+
+// Safety fallback to ensure loading screen is always dismissed
+setTimeout(dismissLoadingScreen, 1200);
 
 // Simulation Clock & Race State
 let simTimeScale = 1.0;
