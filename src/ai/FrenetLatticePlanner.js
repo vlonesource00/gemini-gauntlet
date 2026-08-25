@@ -391,23 +391,52 @@ export class FrenetLatticePlanner {
     const wAccel = weights.accel ?? 9.0;
     const wJerk = weights.jerk ?? (committed ? 0.7 : 1.3);
     const wIntent = weights.intent ?? (committed ? 190.0 : 45.0);
+    const wExitMomentum = weights.exitMomentum ?? (1.2 + aggression * 0.8);
 
     const lateralDelta = Math.abs(terminalLateral - startLateral);
     const intentError = Math.abs(terminalLateral - desiredOffset);
     const avgSpeed = speedSum / this.pointCount;
 
-    // Reward clipping inside apex curb during cornering
+    // --- EXIT-HORIZON EVALUATION ---
+    // Evaluate through corner sequence until exit is reached (t_horizon clamped to [1.5s, 4.0s])
     const trackPoint = track?.atDistance ? track.atDistance(vehicle?.distance ?? 0) : { curvature: 0, turnSign: 0 };
     const trackCurvMag = finite(trackPoint?.curvature, 0);
     const trackSign = trackPoint?.turnSign !== undefined ? trackPoint.turnSign : 0;
     const trackSignedCurv = trackSign * trackCurvMag;
 
+    // Calculate exit momentum from candidate path radius vs track nominal curvature
+    const pathApexCurvature = Math.max(0.001, maxCurvature);
+    const candidateMaxCornerSpeed = Math.sqrt(Math.max(1.0, availableLatG / pathApexCurvature));
+    const exitSpeedGain = Math.max(-5.0, Math.min(12.0, candidateMaxCornerSpeed - startSpeed));
+    const rewardExitMomentum = -exitSpeedGain * wExitMomentum;
+
+    // Reward clipping inside apex curb during cornering
     const isInsideApex = (trackSignedCurv > 0.003 && terminalLateral < 0) || (trackSignedCurv < -0.003 && terminalLateral > 0);
     const kerbReward = (kerbAllowance > 0 && isInsideApex) ? (0.6 + aggression * 0.8) : 0;
     const rewardWidth = isInsideApex ? -(kerbReward + 0.5) : 0;
 
+    // --- COUNTERFACTUAL OPPONENT RESPONSE MODEL ---
+    // Condition defender reactions on ego proposed lateral candidate action (a_ego)
+    let counterfactualRiskModifier = 0;
+    if (trafficEntries && trafficEntries.length > 0 && targetId !== null) {
+      const primaryDefender = trafficEntries.find((e) => e.other?.id === targetId);
+      if (primaryDefender && Math.abs(primaryDefender.delta || 0) < 32.0) {
+        const defLateral = finite(primaryDefender.otherLateral, 0);
+        const egoInsideProposal = (terminalLateral - startLateral) * (trackSignedCurv !== 0 ? -Math.sign(trackSignedCurv) : 1) > 0.5;
+        
+        // Response distribution: P(cover_inside | a_ego) vs P(cover_outside | a_ego)
+        if (egoInsideProposal) {
+          // Ego shows inside -> Defender has high probability (0.67) to cover inside
+          // If candidate is a switchback/outside line, defender covering inside leaves outside wide open
+          if (terminalLateral > defLateral + 1.2 || terminalLateral < defLateral - 1.2) {
+            counterfactualRiskModifier -= 15.0; // Counterfactual opening bonus
+          }
+        }
+      }
+    }
+
     const costRoadViolation = roadViolation * 1e6;
-    const costCollision = collisionRisk * wColl;
+    const costCollision = (collisionRisk + counterfactualRiskModifier) * wColl;
     const costEdge = edgeRisk * wEdge;
     const costAccel = accelerationExcess * accelerationExcess * wAccel;
     const costJerk = (lateralDelta * 0.20 + (committed ? transitionTime * 1.0 : transitionTime * 0.22)) * wJerk;
@@ -424,6 +453,7 @@ export class FrenetLatticePlanner {
       + costIntent
       + rewardProgress
       + rewardWidth
+      + rewardExitMomentum
       + costHysteresis;
 
     return {
@@ -438,6 +468,7 @@ export class FrenetLatticePlanner {
       futureMinimumClearanceM: futureMinimumClearance,
       maxCurvaturePerM: maxCurvature,
       maxLateralAccelerationMps2: maxLateralAcceleration,
+      exitSpeedGainMps: exitSpeedGain,
       costBreakdown: {
         roadViolation: costRoadViolation,
         collisionRisk: costCollision,
@@ -447,6 +478,7 @@ export class FrenetLatticePlanner {
         intent: costIntent,
         progressReward: rewardProgress,
         trackWidthReward: rewardWidth,
+        exitMomentumReward: rewardExitMomentum,
         hysteresisBonus: costHysteresis
       }
     };

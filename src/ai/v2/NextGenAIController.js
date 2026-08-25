@@ -12,7 +12,6 @@
 import { TrafficAwareness } from '../TrafficAwareness.js';
 import { GlobalTimeOptimalEngine } from './GlobalTimeOptimalEngine.js';
 import { GameTheoreticCombatEngine } from './GameTheoreticCombatEngine.js';
-import { CoupledMPCCController } from './CoupledMPCCController.js';
 import { CombatDynamicsEngine } from './CombatDynamicsEngine.js';
 import { FrenetLatticePlanner } from '../FrenetLatticePlanner.js';
 import { PaceOptimizer } from '../PaceOptimizer.js';
@@ -45,7 +44,6 @@ export class NextGenAIController {
     this.awareness = new TrafficAwareness();
     this.optimalEngine = options.track ? new GlobalTimeOptimalEngine({ track: options.track }) : null;
     this.combatEngine = new GameTheoreticCombatEngine();
-    this.coupledMPCC = new CoupledMPCCController({ horizonSeconds: 2.5, nodeCount: 18 });
     this.trajectoryPlanner = new FrenetLatticePlanner({ pointCount: 24, horizonS: 3.2 });
     this.paceOptimizer = new PaceOptimizer({
       trailBrakingSkill: this._trailBrakingSkill,
