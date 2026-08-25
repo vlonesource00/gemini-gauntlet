@@ -358,10 +358,9 @@ export class NextGenAIController {
     const phaseChanged = (this.lastRacecraftPhase !== racecraftPhase);
     this.lastRacecraftPhase = racecraftPhase;
 
+    // Strict 25Hz replan rate limit to prevent high-frequency 120Hz trajectory flutter
     const shouldReplan = !this.trajectoryPlan
       || phaseChanged
-      || defending
-      || attacking
       || isOffTrack
       || this.planTimer >= 0.04;
 
