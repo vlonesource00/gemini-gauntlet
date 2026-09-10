@@ -155,7 +155,7 @@ export class PaceOptimizer {
     const aeroEffective = Math.max(0.72, aeroDownforceMultiplier * (1.0 - clamp(dirtyAirLoss, 0, 0.35)));
 
     // Calibrated realistic mechanical + aero lateral G
-    const classBaseG = vehicleClass === 'prototype' ? (1.48 + 1.10 * downforceFactor) : vehicleClass === 'gt' ? 1.25 : 1.02;
+    const classBaseG = vehicleClass === 'prototype' ? (1.48 + 1.10 * downforceFactor) : vehicleClass === 'gt' ? 1.13 : 0.94;
     const peakG = classBaseG * tireGripFactor * aeroEffective * (0.88 + skill * 0.12);
 
     // Banking bonus: a_lat_eff = g * (peakG * cos(theta) + sin(theta))
@@ -217,7 +217,7 @@ export class PaceOptimizer {
     const vClass = vehicle?.classKey || 'prototype';
 
     // 1. Calibrate dynamic sustained braking deceleration capacity a_B (m/s²)
-    const baseDecel = vClass === 'prototype' ? 10.8 : vClass === 'gt' ? 8.8 : 6.8;
+    const baseDecel = vClass === 'prototype' ? 10.5 : vClass === 'gt' ? 8.0 : 5.8;
     const brakingDecel = baseDecel * tireGripFactor * (0.85 + aggression * 0.25);
 
     // 2. Exact multi-distance lookahead scanning distances
@@ -354,11 +354,12 @@ export class PaceOptimizer {
     const satDir = Math.sign(alphaF);
     this.satAvg += (satF - this.satAvg) * clamp(safeDt * 6.0, 0, 1);
 
-    // Rear saturation: fade out path tracking and fade in yaw damper/countersteer
+    // Rear saturation: only trigger countersteer giveUp under genuine oversteer
     const satR = Math.abs(alphaR) / alphaPeak;
     this.satR = satR;
-    const giveUp = clamp((satR - 1.0) / 0.45, 0, 1);
-    const hold = 1.0 - giveUp;
+    const isOversteering = Math.abs(alphaR) > Math.abs(alphaF) + 0.035 && satR > 1.20;
+    const giveUp = isOversteering ? clamp((satR - 1.20) / 0.60, 0, 1) : 0;
+    const hold = clamp(1.0 - giveUp * 0.35, 0.65, 1.0);
 
     // --- 3. Integral Yaw-Rate Understeer Gradient Learner ---
     const rDes = effCurv * vSpeed;
@@ -372,10 +373,13 @@ export class PaceOptimizer {
       this.yawInt *= (1.0 - clamp(safeDt * 6.0, 0, 1));
     }
 
-    // --- 4. Countersteer Excess Body Slip ---
+    // --- 4. Countersteer Excess Body Slip & Slip Compensation ---
     const liveSlip = finite(slipAngle, Math.atan2(finite(vehicle?.localVelocity?.x, 0), Math.max(1.0, finite(vehicle?.localVelocity?.z, vSpeed))));
-    const betaRef = Math.min(Math.abs(alphaR) * BETA_SLACK + 0.035, BETA_CAP) * (1.0 - giveUp);
-    const betaExcess = liveSlip > betaRef ? liveSlip - betaRef : (liveSlip < -betaRef ? liveSlip + betaRef : 0);
+    const betaRef = Math.min(Math.abs(alphaR) * BETA_SLACK + 0.035, BETA_CAP);
+    const betaExcess = isOversteering
+      ? (liveSlip > betaRef ? liveSlip - betaRef : (liveSlip < -betaRef ? liveSlip + betaRef : 0))
+      : 0;
+    const slipComp = clamp(liveSlip * 0.35, -0.05, 0.05);
 
     // Curvature feedforward (rad)
     const ff = Math.atan(wheelBase * effCurv);
@@ -385,10 +389,11 @@ export class PaceOptimizer {
     const kBeta = K_BETA * (1.0 + GIVEUP_BETA * giveUp);
 
     // Total road-wheel steering angle demand (in RADIANS)
-    let cmd = ff * (1.0 - giveUp * 0.70)
+    let cmd = ff * (1.0 - giveUp * 0.30)
       + (finite(headingError, 0) * (recovering ? 1.65 : (committed ? 1.35 : 1.15)) + this.yawInt) * hold
       + kYaw * eYaw
-      + kBeta * betaExcess;
+      + kBeta * betaExcess
+      + slipComp;
 
     // --- 5. Front-Axle Saturation Guard (Anti-Plow / Anti-Scrub Back-Off) ---
     if (satDir !== 0 && Math.sign(cmd) === satDir) {
@@ -486,8 +491,8 @@ export class PaceOptimizer {
     if (speedError >= 0) {
       // Acceleration: ramp throttle smoothly to full power
       const exitBonus = (!straight && steerMagnitude < 0.28) ? 0.15 : 0;
-      const baseThrottle = following ? 0.35 : (straight ? 1.0 : (0.85 + exitBonus));
-      const minThrottle = following ? 0.12 : 0.45;
+      const baseThrottle = following ? 0.70 : (straight ? 1.0 : (0.85 + exitBonus));
+      const minThrottle = following ? 0.28 : 0.45;
       throttle = clamp(baseThrottle + finite(speedError) * 0.35, minThrottle, 1.0);
       brake = 0;
     } else if (speedError > coastThreshold) {

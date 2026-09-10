@@ -290,7 +290,31 @@ export class NextGenAIController {
     if (isOffTrack) this.recoveryTimer = 1.2;
     else this.recoveryTimer = Math.max(0, this.recoveryTimer - dt);
 
-    const recovering = isOffTrack || edgeDeviation || this.recoveryTimer > 0 || this.stallTime > 0.7;
+    const recovering = isOffTrack || this.recoveryTimer > 0 || this.stallTime > 0.7;
+
+    // Reverse recovery maneuver if pinned against barrier or stuck in runoff
+    if (isOffTrack && vehicle.speed < 1.6) {
+      this.stuckTimer = (this.stuckTimer || 0) + dt;
+      if (this.stuckTimer > 1.2 && (this.reverseDuration || 0) <= 0) {
+        this.reverseDuration = 2.0;
+        this.stuckTimer = 0;
+      }
+    } else {
+      this.stuckTimer = Math.max(0, (this.stuckTimer || 0) - dt * 2);
+    }
+
+    if ((this.reverseDuration || 0) > 0) {
+      this.reverseDuration -= dt;
+      const latSign = Math.sign(finite(current?.lateral, 0)) || 1;
+      vehicle.controls = {
+        throttle: 0.45,
+        brake: 0,
+        steer: clamp(latSign * 0.75, -1, 1),
+        handbrake: 0,
+        reverse: true
+      };
+      return;
+    }
 
     // Marshal recovery safeguard if stuck off-track
     if (isOffTrack && this.stallTime > 5.0 && vehicle.marshalRecoverTo) {
@@ -400,12 +424,24 @@ export class NextGenAIController {
 
     const trackingPoint = this.trajectoryPlan.trackingPoint ?? this.trajectoryPlan.points.at(-1);
     const plannedTargetOffset = finite(trackingPoint?.lateral, targetOffset);
-    const targetPos = {
+    let targetPos = {
       x: finite(trackingPoint?.x, vehicle.position.x),
       y: finite(trackingPoint?.y, vehicle.position.y),
       z: finite(trackingPoint?.z, vehicle.position.z),
       lateral: plannedTargetOffset
     };
+
+    if (recovering) {
+      const rejoinDistance = wrap(vehicle.distance + (isOffTrack ? 10.0 : 14.0), track.length);
+      const rejoinPoint = track.atDistance ? track.atDistance(rejoinDistance) : trackPointAtCar;
+      const rejoinWorld = track.lateralPoint ? track.lateralPoint(rejoinPoint, 0, 0) : rejoinPoint;
+      targetPos = {
+        x: finite(rejoinWorld?.x, vehicle.position.x),
+        y: vehicle.position.y,
+        z: finite(rejoinWorld?.z, vehicle.position.z),
+        lateral: 0
+      };
+    }
 
     // 5. Lateral Pursuit Steering & Orientation-Aware Rejoin
     const trackPointAtCar = track?.atDistance ? track.atDistance(vehicle.distance) : { tangent: { x: 0, z: 1 } };
@@ -453,7 +489,7 @@ export class NextGenAIController {
     }
     desiredSpeed = Math.min(desiredSpeed, supervisor.maxSpeed);
 
-    if (recovering) desiredSpeed = isOffTrack ? (isFacingBackwards ? 5.0 : 8.5) : 14.0;
+    if (recovering) desiredSpeed = isOffTrack ? (isFacingBackwards ? 5.0 : 8.5) : Math.max(16.0, physicalTargetSpeed * 0.75);
 
     // 7. Friction-Circle-Coupled Pedal Computation
     const speedError = desiredSpeed - vehicle.speed;
@@ -474,7 +510,7 @@ export class NextGenAIController {
       recovering,
       emergency: supervisor.emergency,
       defending,
-      following: supervisor.following,
+      following: supervisor.following && !attacking && !defending,
       tireGripFactor,
       dt
     });
@@ -748,29 +784,52 @@ export class NextGenAIController {
       const halfWidth = (vehicle?.width || 2.05) * 0.5 + (other.width || 2.05) * 0.5;
 
       const lateralClearance = Math.abs(side) - halfWidth;
-      const approachingLane = Math.abs(side + sideVelocity * 0.35) < halfWidth + 0.85;
+      // Lateral convergence toward our vehicle centerline:
+      // When side > 0, other is to our right; sideVelocity < 0 indicates movement toward us.
+      const lateralConvergence = -Math.sign(side) * sideVelocity;
 
-      // Check door-to-door side-by-side rubbing
-      const isSideBySide = Math.abs(ahead) < halfLength + 0.8 && lateralClearance < 0.9;
-      if (isSideBySide && Math.abs(closing) < 4.5 && Math.abs(sideVelocity) < 2.5) {
-        continue; // Allow door-to-door side rubbing without slamming brakes!
+      // 1. Longitudinally overlapping (side-by-side or passing alongside)
+      // When |ahead| < halfLength + 0.6, the vehicles are alongside each other.
+      // An in-line rear-end collision is physically impossible. Never clamp longitudinal speed!
+      const isAlongside = Math.abs(ahead) < halfLength + 0.6;
+      if (isAlongside) {
+        // If there is positive clearance or a light rub, allow uninhibited racing and passing
+        if (lateralClearance > -0.22 && Math.abs(closing) < 6.5 && lateralConvergence < 1.8) {
+          continue;
+        }
+        // Severe converging sideswipe while alongside: ease off gently to relieve the pinch
+        if (lateralClearance < -0.15 && lateralConvergence > 1.0) {
+          maxSpeed = Math.min(maxSpeed, Math.max(16.0, otherForwardSpeed - 2.0));
+        }
+        continue;
       }
 
-      // Check vehicle ahead in our corridor
-      if (ahead > 0 && ahead < 65.0 && (lateralClearance < 0.65 || approachingLane)) {
+      // 2. Obstacle ahead in our forward travel corridor
+      // In-corridor requires being physically in our lane OR converging directly across our path
+      const isInCorridor = (lateralClearance < 0.20)
+        || (lateralConvergence > 0.40 && (Math.abs(side) - lateralConvergence * 0.45) < halfWidth + 0.15);
+
+      if (ahead >= halfLength + 0.6 && ahead < 65.0 && isInCorridor) {
         nearestAheadDist = Math.min(nearestAheadDist, ahead);
-        const clearance = ahead - halfLength;
+        const clearance = ahead - halfLength; // Strictly positive bumper-to-bumper distance
+
         // Dynamic physics stopping distance: d = v_close * tau + v_close^2 / (2 * a_brake)
-        const safeMargin = 1.0 + closing * 0.18 + (closing * closing) / (2 * Math.max(4.0, brakeAcc));
-        
-        // Match opponent speed smoothly as we approach
-        const speedLimit = Math.max(0, otherForwardSpeed + (clearance - safeMargin) * 0.90);
+        const safeMargin = 1.2 + closing * 0.16 + (closing * closing) / (2 * Math.max(4.0, brakeAcc));
+
+        // When obstacle ahead is slow/stopped (< 6.0 m/s), maintain rolling bypass speed floor
+        // so the vehicle retains aerodynamic and steering authority to duck out and pass
+        const isSlowObstacle = otherForwardSpeed < 6.0;
+        const speedLimit = isSlowObstacle
+          ? Math.max(clearance > 2.2 ? 11.0 : (clearance > 1.0 ? 5.0 : 0), otherForwardSpeed + (clearance - safeMargin) * 0.85)
+          : Math.max(clearance > 2.0 ? 8.0 : 0, otherForwardSpeed + (clearance - safeMargin) * 0.85);
+
         if (speedLimit < maxSpeed) {
           maxSpeed = speedLimit;
-          following = true;
-          reason = 'TRAFFIC_PACING';
+          following = !isSlowObstacle && clearance < safeMargin + 3.0;
+          reason = isSlowObstacle ? 'STATIC_OBSTACLE_PACING' : 'TRAFFIC_PACING';
         }
 
+        // True imminent rear-end bumper touch
         if (clearance < Math.max(0.35, closing * 0.22)) {
           emergency = true;
           reason = 'IMMINENT_CONTACT';
@@ -778,14 +837,14 @@ export class NextGenAIController {
       }
     }
 
-    // Outward drift / track limit safeguard: gently ease off if drifting beyond kerbs
-    const physicalLimit = nominalHalfWidth + finite(track?.curbWidth, 1.05) * 0.5 - 0.35;
+    // Outward drift / track limit safeguard: gently ease off if drifting beyond track boundary
+    const physicalLimit = nominalHalfWidth - 0.70;
     const trackPoint = track?.atDistance ? track.atDistance(vehicle.distance) : null;
     if (trackPoint?.normal && Math.abs(current?.lateral || 0) > physicalLimit) {
       const outward = ((vehicle?.velocity?.x || 0) * trackPoint.normal.x + (vehicle?.velocity?.z || 0) * trackPoint.normal.z) * Math.sign(current?.lateral || 0);
-      if (outward > 0.5) {
+      if (outward > 0.15) {
         const excess = Math.abs(current?.lateral || 0) - physicalLimit;
-        maxSpeed = Math.min(maxSpeed, Math.max(16.0, vSpeed - excess * 4.0 - outward * 2.0));
+        maxSpeed = Math.min(maxSpeed, Math.max(12.0, vSpeed - excess * 5.0 - outward * 2.0));
         if (!emergency) reason = 'TRACK_EDGE_DECEL';
       }
     }

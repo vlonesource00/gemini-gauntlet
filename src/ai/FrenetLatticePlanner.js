@@ -231,7 +231,7 @@ export class FrenetLatticePlanner {
         : 0;
 
       const localLimit = track?.planningLateralLimit
-        ? track.planningLateralLimit(reference.s, refLineVal + terminalLateral)
+        ? track.planningLateralLimit(reference.s, terminalLateral)
         : effectiveRoadMargin;
       const surfaceLimit = Math.min(effectiveRoadMargin, finite(localLimit, effectiveRoadMargin) + kerbAllowance);
 
@@ -240,10 +240,6 @@ export class FrenetLatticePlanner {
       if (isPaceLine && hasReference) {
         const rejoinW = shift !== 0 ? parabolicRejoin(shift, forwardDistance, rejoinSpan) : 0;
         unclampedLateral = clamp(refLineVal, -surfaceLimit, surfaceLimit) + rejoinW;
-      } else if (hasReference && intentType !== 'LANE_HOLD' && intentType !== 'RECOVER') {
-        // Tactical candidate relative to reference racing line
-        const targetQ = clamp(refLineVal + terminalLateral, -surfaceLimit, surfaceLimit);
-        unclampedLateral = startLateral + (targetQ - startLateral) * blend;
       } else {
         const targetQ = clamp(terminalLateral, -surfaceLimit, surfaceLimit);
         unclampedLateral = startLateral + (targetQ - startLateral) * blend;
@@ -287,12 +283,12 @@ export class FrenetLatticePlanner {
 
         const lateralGap = Math.abs(lateral - opponentLateral);
 
-        // Spatial capsule collision geometry
-        const longitudinalEnvelope = egoExtents.halfLength + opponentExtents.halfLength + 0.40;
-        const lateralEnvelope = egoExtents.halfWidth + opponentExtents.halfWidth + 0.90;
+        // Physical spatial geometry
+        const physicalHalfWidth = egoExtents.halfWidth + opponentExtents.halfWidth; // ~2.05m
+        const physicalHalfLength = egoExtents.halfLength + opponentExtents.halfLength; // ~4.65m
 
-        const longitudinalClearance = Math.abs(longitudinalGap) - longitudinalEnvelope;
-        const lateralClearance = lateralGap - lateralEnvelope;
+        const longitudinalClearance = Math.abs(longitudinalGap) - (physicalHalfLength + 0.35);
+        const lateralClearance = lateralGap - physicalHalfWidth; // > 0 means clear daylight between bodies!
         const combinedClearance = Math.max(longitudinalClearance, lateralClearance);
 
         minimumClearance = Math.min(minimumClearance, combinedClearance);
@@ -300,23 +296,30 @@ export class FrenetLatticePlanner {
           futureMinimumClearance = Math.min(futureMinimumClearance, combinedClearance);
         }
 
-        const isPassTarget = targetId !== null && entry.other.id === targetId;
-        const initialTargetSeparation = Math.abs(startLateral - opponentStart);
-        const separatingPassTrajectory = isPassTarget
-          && (Math.abs(terminalLateral - opponentStart) >= 2.6
-            || (Math.abs(longitudinalGap) > 2.0 && lateralGap >= initialTargetSeparation - 0.08));
+        // Check if candidate establishes a viable passing lane
+        const terminalClearance = Math.abs(terminalLateral - opponentTarget) - physicalHalfWidth;
+        const isViablePassLane = terminalClearance >= 0.15;
 
-        const isSlowObstaclePass = isPassTarget && entry.other.speed < 15.0 && Math.abs(terminalLateral - opponentStart) >= 2.6;
+        // Physical collision occurs when BOTH longitudinal AND lateral footprints overlap
+        const isPhysicalOverlap = longitudinalClearance < 0 && lateralClearance < 0;
+        const isGentleSideRub = isPhysicalOverlap
+          && lateralClearance > -0.22
+          && Math.abs(entry.relativeLongitudinalVelocity || 0) < 4.5
+          && Math.abs(entry.relativeLateralVelocity || 0) < 1.8;
 
-        if (longitudinalClearance < 0 && lateralClearance < 0 && !separatingPassTrajectory && !isSlowObstaclePass) {
+        if (isPhysicalOverlap && !isGentleSideRub && !isViablePassLane) {
           predictedCollisions += 1;
           collisionRisk += 25000 + (-longitudinalClearance + 0.2) * (-lateralClearance + 0.2) * 2500;
-        } else if (!isSlowObstaclePass && !separatingPassTrajectory) {
+        } else if (isGentleSideRub) {
+          // Allow gentle door rubbing with moderate cost so open space is preferred when available
+          collisionRisk += 35.0 + (-lateralClearance) * 120.0;
+        } else {
+          // Smooth proximity penalty for tight corridors
           const distAbs = Math.abs(longitudinalGap);
           const proximityHorizon = Math.max(4.5, 8.5 - aggression * 2.0);
-          if (distAbs < proximityHorizon && lateralClearance < 1.0) {
+          if (distAbs < proximityHorizon && lateralClearance < 0.85) {
             const timeDiscount = Math.max(0.2, 1.0 - time / Math.max(0.5, horizon));
-            collisionRisk += (proximityHorizon - distAbs) * (1.0 - lateralClearance) * 12 * timeDiscount;
+            collisionRisk += (proximityHorizon - distAbs) * Math.max(0, 0.85 - lateralClearance) * 14 * timeDiscount;
           }
         }
       }
@@ -402,7 +405,7 @@ export class FrenetLatticePlanner {
     const trackSign = trackPoint?.turnSign !== undefined ? trackPoint.turnSign : 0;
     const trackSignedCurv = trackSign * trackCurvMag;
 
-    const isInsideApex = (trackSignedCurv > 0.003 && terminalLateral < 0) || (trackSignedCurv < -0.003 && terminalLateral > 0);
+    const isInsideApex = (trackSignedCurv > 0.003 && terminalLateral > 0) || (trackSignedCurv < -0.003 && terminalLateral < 0);
     const kerbReward = (kerbAllowance > 0 && isInsideApex) ? (0.6 + aggression * 0.8) : 0;
     const rewardWidth = isInsideApex ? -(kerbReward + 0.5) : 0;
 

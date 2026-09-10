@@ -309,12 +309,14 @@ export class GameTheoreticCombatEngine {
       const fTtc = ttc <= 4.5 ? Math.pow(1.0 - ttc / 4.5, 2) : 0;
       const fCorner = Math.exp(-multiApex.primaryDist / 45.0) * saturate(multiApex.primaryCurv / 0.003);
 
-      const isClosingThreat = (gap < 10.0)
-        || (gap <= 24.0 && closingSpeed >= 0.30)
-        || (gap <= 42.0 && closingSpeed >= 0.60 && multiApex.primaryDist < 85.0)
-        || (ttc < 3.2);
+      const isClosingThreat = (gap < 10.0 && closingSpeed > 0.20 && vSpeed > 14.0)
+        || (gap <= 24.0 && closingSpeed >= 0.40 && vSpeed > 16.0)
+        || (gap <= 42.0 && closingSpeed >= 0.80 && multiApex.primaryDist < 85.0 && vSpeed > 20.0)
+        || (ttc < 3.0 && closingSpeed > 0.35 && vSpeed > 16.0);
 
-      const isAttackerRealThreat = closingSpeed > 0.15 || gap < 10.0 || (ttc < 3.5 && gap < 20.0);
+      const isAttackerRealThreat = (closingSpeed > 0.30 && vSpeed > 14.0)
+        || (gap < 7.0 && closingSpeed > 0.15 && vSpeed > 12.0)
+        || (ttc < 3.0 && gap < 20.0 && vSpeed > 16.0);
 
       this.threatScore = isAttackerRealThreat
         ? saturate(fGap * 0.30 + fClose * 0.25 + fTtc * 0.25 + fCorner * 0.15 + (isClosingThreat ? 0.30 : 0.0))
@@ -428,11 +430,10 @@ export class GameTheoreticCombatEngine {
         this.switchbackStage = 'NONE';
         isAttacking = false;
       } else if (isSideBySide) {
-        // Resilient Side-by-Side Overlap Combat (Never back out)
+        // Resilient Side-by-Side Overlap Combat (Never back out, keep assigned established flank)
         this.attackMode = 'SIDE_BY_SIDE';
-        const opponentSide = opponentLat >= 0 ? 1 : -1;
-        const assignedSide = -opponentSide;
-        atkTargetLat = clamp(opponentLat + assignedSide * (this.carWidth + 0.55), -maxMargin, maxMargin);
+        const mySide = currentLat >= opponentLat ? 1 : -1;
+        atkTargetLat = clamp(opponentLat + mySide * (this.carWidth + 0.65), -maxMargin, maxMargin);
         atkDesiredSpeed = Math.max(optimalSample.targetSpeed, targetSpeed + 6.5);
         atkNotes = 'ATTACK_SIDE_BY_SIDE_HOLD';
       } else if (isStraight && gap > 4.5) {
@@ -453,7 +454,7 @@ export class GameTheoreticCombatEngine {
           atkTargetLat = clamp(opponentLat, -maxMargin * 0.88, maxMargin * 0.88);
           atkNotes = 'ATTACK_SLINGSHOT_DRAFTING';
         }
-      } else if (isApproachingCorner && isInsideOpen && gap < 42.0) {
+      } else if (isApproachingCorner && isInsideOpen && gap < 28.0 && vSpeed > 22.0 && closingSpeed > 0.5) {
         // Fearless Inside Apex Divebomb (-3.6G threshold trail-braking delta)
         this.attackMode = 'DIVEBOMB';
         this.divebombCommitted = true;
@@ -467,7 +468,7 @@ export class GameTheoreticCombatEngine {
           atkDesiredSpeed = Math.max(optimalSample.targetSpeed, targetSpeed + 6.5 + aggression * 3.5);
           atkNotes = 'ATTACK_FEARLESS_IBR_DIVEBOMB';
         }
-      } else if (isApproachingCorner && !isInsideOpen) {
+      } else if (isApproachingCorner && !isInsideOpen && gap < 28.0 && vSpeed > 22.0) {
         // Diamond Line Switchback Undercut (Late apex counter to inside defender)
         this.attackMode = 'SWITCHBACK';
         this.attackIntensity = 0.90;
@@ -483,6 +484,31 @@ export class GameTheoreticCombatEngine {
           atkTargetLat = clamp(primaryInsideSign * (maxMargin * 0.50), -maxMargin, maxMargin);
           atkDesiredSpeed = Math.max(optimalSample.targetSpeed * 1.10, targetSpeed + 7.0);
           atkNotes = 'ATTACK_SWITCHBACK_EXIT_UNDERCUT';
+        }
+      } else {
+        // Dynamic Overtake Corridor Selection (Dual-Flank Bypass)
+        const isSlower = targetSpeed < vSpeed - 1.5 || targetSpeed < 20.0 || gap < 22.0;
+        if (isSlower) {
+          this.attackMode = 'OVERTAKE';
+          const leftSpace = maxMargin + opponentLat;
+          const rightSpace = maxMargin - opponentLat;
+          const minPassWidth = this.carWidth + 0.65;
+          let passSide = 0;
+          if (currentLat > opponentLat + 0.35 && rightSpace >= minPassWidth) {
+            passSide = 1;
+          } else if (currentLat < opponentLat - 0.35 && leftSpace >= minPassWidth) {
+            passSide = -1;
+          } else {
+            passSide = leftSpace >= rightSpace ? -1 : 1;
+          }
+          const targetPassOffset = opponentLat + passSide * Math.min(3.2, Math.max(minPassWidth, (passSide < 0 ? leftSpace : rightSpace) * 0.55));
+          atkTargetLat = clamp(targetPassOffset, -maxMargin, maxMargin);
+          atkDesiredSpeed = Math.max(optimalSample.targetSpeed, targetSpeed + 6.0 + aggression * 3.5);
+          atkNotes = 'ATTACK_OVERTAKE_BYPASS';
+        } else {
+          atkTargetLat = optimalLat;
+          atkDesiredSpeed = optimalSample.targetSpeed;
+          atkNotes = 'ATTACK_PURSUIT_LINE';
         }
       }
     } else {
