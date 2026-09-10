@@ -79,6 +79,7 @@ export class NextGenAIController {
     this.debugEnabled = true;
     this.debugState = null;
     this.trajectoryPlan = null;
+    this.lapLineBias = 0;
 
     // ERS state
     this.ersPlan = {
@@ -335,11 +336,18 @@ export class NextGenAIController {
       dt
     });
 
+    const currentPoint = track?.atDistance ? track.atDistance(vehicle.distance) : { curvature: 0 };
+    const signedCurv = finite(currentPoint?.curvature, 0);
+    const currentCurv = Math.abs(signedCurv);
+
     const optCurrent = this.optimalEngine?.sampleAtDistance?.(vehicle.distance, vehicle.classKey);
     const defending = tactical.role === 'DEFEND' || tactical.role === 'DUAL_COMBAT' || tactical.defenseMode !== 'PACE';
     const attacking = tactical.role === 'ATTACK' || tactical.role === 'DUAL_COMBAT' || tactical.attackMode !== 'NONE';
     let tacticalMode = recovering ? 'RECOVER' : (tactical.role === 'DUAL_COMBAT' ? 'DUAL_COMBAT' : (defending ? 'DEFEND' : (attacking ? 'ATTACK' : 'PACE')));
-    let targetOffset = recovering ? 0 : (tactical.role === 'PACE' ? (optCurrent?.lateral ?? 0) : clamp(tactical.targetLateral, -baseRoadMargin, baseRoadMargin));
+
+    const basePaceLateral = optCurrent?.lateral ?? 0;
+    const adaptedPaceLateral = this._adaptLapLine(vehicle, basePaceLateral, track, signedCurv, dt);
+    let targetOffset = recovering ? 0 : (tactical.role === 'PACE' ? clamp(adaptedPaceLateral, -baseRoadMargin, baseRoadMargin) : clamp(tactical.targetLateral, -baseRoadMargin, baseRoadMargin));
     let targetId = attacking ? this.combatEngine.attackTargetId : (defending ? this.combatEngine.defenseTargetId : null);
     let tacticalReason = recovering ? (isOffTrack ? 'OFF_TRACK_RECOVERY' : 'STALL_RECOVERY') : tactical.notes;
 
@@ -350,10 +358,6 @@ export class NextGenAIController {
     }
 
     // 4. Multi-Candidate Frenet Lattice Trajectory Planning
-    const currentPoint = track?.atDistance ? track.atDistance(vehicle.distance) : { curvature: 0 };
-    const signedCurv = finite(currentPoint?.curvature, 0);
-    const currentCurv = Math.abs(signedCurv);
-
     const dynamicLookahead = this.computeLookahead(vehicle.speed, currentCurv);
     const lookAheadDist = recovering
       ? clamp(10.0 + vehicle.speed * 0.42, 10.0, 20.0)
@@ -491,7 +495,24 @@ export class NextGenAIController {
 
     if (recovering) desiredSpeed = isOffTrack ? (isFacingBackwards ? 5.0 : 8.5) : Math.max(16.0, physicalTargetSpeed * 0.75);
 
-    // 7. Friction-Circle-Coupled Pedal Computation
+    // 7. Coupled Model Predictive Contouring (MPCC) State Step
+    const mpccOut = this.coupledMPCC.step({
+      vehicle,
+      track,
+      tacticalTarget: {
+        targetLateral: plannedTargetOffset,
+        desiredSpeed,
+        dMin: -baseRoadMargin,
+        dMax: baseRoadMargin
+      },
+      dt,
+      tireGripFactor,
+      aggression: this._aggression,
+      recovering,
+      defending,
+      committed: defending || attacking
+    });
+
     const speedError = desiredSpeed - vehicle.speed;
     const straight = Math.abs(signedCurv) < 0.0030;
     const liveLatAccel = Math.abs(finite(vehicle.speed, 0) * finite(vehicle.yawRate, 0));
@@ -635,7 +656,9 @@ export class NextGenAIController {
       lateralError: finite(lateralError),
       recovering: Boolean(recovering),
       
-      // Candidate Trajectory Lattice
+      // Candidate Trajectory Lattice & NMPCC Predictive Horizon
+      coupledMPCC: this.coupledMPCC?.telemetry,
+      mpccHorizon: this.coupledMPCC?.predPoints,
       candidates: this.trajectoryPlan?.candidates ?? [],
       bestCandidate: this.trajectoryPlan,
       trajectory: this.trajectoryPlan,
@@ -850,5 +873,52 @@ export class NextGenAIController {
     }
 
     return { maxSpeed, emergency, reason, nearestAheadDist, following };
+  }
+
+  /**
+   * Human-like lap-by-lap line adaptation & organic dynamic exploration.
+   * Dynamically modulates turn-in, apex, and exit lines per lap based on:
+   * 1. Lap progression: multi-harmonic organic variation across consecutive laps
+   * 2. Tire wear & thermal degradation: widens corner entry and squares off corners to preserve front grip
+   * 3. Understeer gradient: adapts line width when front axle scrub is detected
+   * @private
+   */
+  _adaptLapLine(vehicle, baseLateral, track, curvature, dt = 0.016) {
+    const trackLength = Math.max(500, finite(track?.totalLength ?? track?.length, 2704.6));
+    const dist = finite(vehicle?.distance, 0);
+    const lap = Math.floor(dist / trackLength);
+    const s = wrap(dist, trackLength);
+    const curvMag = Math.abs(finite(curvature, 0));
+
+    // 1. Multi-harmonic organic variation across laps (seeded uniquely per car and lap)
+    // Simulates human line exploration (+/- 0.22m) without driving off-track
+    const carOffset = (this.index * 137.5) % 1000;
+    const lapAngle = (lap * 1.618 + carOffset * 0.01) % (Math.PI * 2);
+    const sNorm = s / trackLength;
+
+    const harm1 = Math.sin(sNorm * 6.0 * Math.PI + lapAngle) * 0.18;
+    const harm2 = Math.cos(sNorm * 14.0 * Math.PI + lapAngle * 1.414) * 0.10;
+    // Taper organic variation in high-curvature apexes where precise line adherence is vital
+    const organicDelta = (harm1 + harm2) * (1.0 - clamp(curvMag * 35.0, 0, 0.70));
+
+    // 2. Tire wear & understeer adaptation
+    // When tires degrade, human drivers widen corner entries and take a later geometric apex to reduce scrub
+    const maxTireWear = Math.max(0, ...(vehicle?.wheels ?? []).map((w) => finite(w.wear, 0)));
+    const wearFactor = clamp(maxTireWear, 0, 1.0);
+    const understeerFactor = clamp((this.coupledMPCC?.satAvg ?? this.paceOptimizer?.satAvg ?? 0), 0, 1.5);
+
+    let wearDelta = 0;
+    if (curvMag > 0.002) {
+      // For left turns (curv > 0), apex is to the left (-lat), so entry is to the right (+lat).
+      // Widening entry means moving away from the apex direction.
+      const turnSign = Math.sign(curvature);
+      wearDelta = -turnSign * (wearFactor * 0.24 + understeerFactor * 0.12);
+    }
+
+    // 3. Smooth temporal blending to prevent steering jerk
+    const targetAdaptation = organicDelta + wearDelta;
+    this.lapLineBias = damp(this.lapLineBias || 0, targetAdaptation, 4.0, dt);
+
+    return baseLateral + this.lapLineBias;
   }
 }

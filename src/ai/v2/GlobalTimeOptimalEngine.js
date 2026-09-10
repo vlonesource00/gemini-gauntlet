@@ -31,7 +31,7 @@ function getTrackCacheKey(track, roadHalfWidth, curbWidth) {
   const rw = finite(track.roadHalfWidth ?? roadHalfWidth, 8.2).toFixed(2);
   const cw = finite(track.curbWidth ?? curbWidth, 1.25).toFixed(2);
   const sampleCount = track.samples?.length ?? 0;
-  return `${id}_${length}_${rw}_${cw}_${sampleCount}`;
+  return `v3_${id}_${length}_${rw}_${cw}_${sampleCount}`;
 }
 
 /**
@@ -335,7 +335,7 @@ export class GlobalTimeOptimalEngine {
   _solveOptimalGeometricLine() {
     const N = this.nodeCount;
     const ds = this.ds;
-    const maxReach = Math.max(2.1, this.roadHalfWidth - 1.05 + Math.min(0.65, this.curbWidth * 0.5));
+    const maxReach = Math.max(2.1, Math.min(5.25, this.roadHalfWidth - 2.10));
     const d1 = 1 / (12 * ds);
     const d2 = 1 / (12 * ds * ds);
     const g = { kappa: 0, scale: 1 };
