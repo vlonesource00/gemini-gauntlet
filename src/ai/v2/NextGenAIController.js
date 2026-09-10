@@ -16,7 +16,7 @@ import { CoupledMPCCController } from './CoupledMPCCController.js';
 import { CombatDynamicsEngine } from './CombatDynamicsEngine.js';
 import { FrenetLatticePlanner } from '../FrenetLatticePlanner.js';
 import { PaceOptimizer } from '../PaceOptimizer.js';
-import { clamp, wrap, wrapAngle } from '../../core/math.js';
+import { clamp, wrap, wrapAngle, damp } from '../../core/math.js';
 
 const finite = (val, fallback = 0) => (Number.isFinite(val) ? val : fallback);
 const offRoad = (c) => c?.zone === 'grass' || c?.zone === 'runoff';
@@ -71,6 +71,9 @@ export class NextGenAIController {
     this.stallTime = 0;
     this.lastDistance = null;
     this.steerCommand = 0;
+    this.humanSteer = 0;
+    this.smoothedOffset = 0;
+    this.supervisor = null;
     this.marshalRecoveries = 0;
     this.referenceProfile = null;
     this.debugEnabled = true;
@@ -438,11 +441,17 @@ export class NextGenAIController {
       recovering
     });
 
-    // 6. Longitudinal Desired Speed Synchronization
+    // 6. Dynamic Multi-Agent Physics Collision & Track-Edge Supervisor
+    const supervisor = (vehicles && vehicles.length > 1)
+      ? this._superviseTraffic(vehicle, vehicles, track, current, dt)
+      : { maxSpeed: Infinity, emergency: false, reason: 'CLEAR', nearestAheadDist: Infinity, following: false };
+    this.supervisor = supervisor;
+
     let desiredSpeed = physicalTargetSpeed;
     if (tactical.desiredSpeed) {
       desiredSpeed = Math.min(physicalTargetSpeed, Math.max(desiredSpeed, tactical.desiredSpeed));
     }
+    desiredSpeed = Math.min(desiredSpeed, supervisor.maxSpeed);
 
     if (recovering) desiredSpeed = isOffTrack ? (isFacingBackwards ? 5.0 : 8.5) : 14.0;
 
@@ -463,8 +472,9 @@ export class NextGenAIController {
       currentCurvature: signedCurv,
       straight,
       recovering,
-      emergency: false,
+      emergency: supervisor.emergency,
       defending,
+      following: supervisor.following,
       tireGripFactor,
       dt
     });
@@ -699,5 +709,87 @@ export class NextGenAIController {
     if (vehicle.cooldownTime > 16 && vehicle.speed < 0.6) {
       vehicle.despawned = true;
     }
+  }
+
+  /**
+   * Continuous Physics-Based Multi-Agent Collision & Track-Edge Supervisor.
+   * Models relative closing velocities, stopping distance margins, and side-by-side rubbing.
+   * Eliminates rear-end collisions while preserving authoritative door-to-door combat.
+   * @private
+   */
+  _superviseTraffic(vehicle, vehicles, track, current, dt) {
+    const vSpeed = finite(vehicle?.speed, 0);
+    const forward = vehicle?.forward ?? { x: -Math.sin(vehicle?.yaw || 0), z: Math.cos(vehicle?.yaw || 0) };
+    const right = vehicle?.right ?? { x: forward.z, z: -forward.x };
+    const vClass = vehicle?.classKey || 'prototype';
+    const brakeAcc = vClass === 'prototype' ? 15.0 : (vClass === 'gt' ? 11.5 : 9.8);
+    const nominalHalfWidth = finite(track?.roadHalfWidth, 6.5);
+    const edgeMargin = Math.max(2.4, nominalHalfWidth - 1.15);
+
+    let maxSpeed = Infinity;
+    let emergency = false;
+    let reason = 'CLEAR';
+    let nearestAheadDist = Infinity;
+    let following = false;
+
+    for (const other of vehicles || []) {
+      if (!other || other === vehicle || other.finished || other.despawned || other.trafficGhost) continue;
+      const dx = finite(other.position.x) - finite(vehicle.position.x);
+      const dz = finite(other.position.z) - finite(vehicle.position.z);
+      const ahead = dx * forward.x + dz * forward.z;
+      const side = dx * right.x + dz * right.z;
+
+      const otherVel = other.velocity ?? { x: 0, z: 0 };
+      const otherForwardSpeed = finite(otherVel.x * forward.x + otherVel.z * forward.z, finite(other.speed, 0));
+      const closing = Math.max(0, vSpeed - otherForwardSpeed);
+      const sideVelocity = (otherVel.x - (vehicle?.velocity?.x || 0)) * right.x + (otherVel.z - (vehicle?.velocity?.z || 0)) * right.z;
+
+      const halfLength = (vehicle?.length || 4.65) * 0.5 + (other.length || 4.65) * 0.5;
+      const halfWidth = (vehicle?.width || 2.05) * 0.5 + (other.width || 2.05) * 0.5;
+
+      const lateralClearance = Math.abs(side) - halfWidth;
+      const approachingLane = Math.abs(side + sideVelocity * 0.35) < halfWidth + 0.85;
+
+      // Check door-to-door side-by-side rubbing
+      const isSideBySide = Math.abs(ahead) < halfLength + 0.8 && lateralClearance < 0.9;
+      if (isSideBySide && Math.abs(closing) < 4.5 && Math.abs(sideVelocity) < 2.5) {
+        continue; // Allow door-to-door side rubbing without slamming brakes!
+      }
+
+      // Check vehicle ahead in our corridor
+      if (ahead > 0 && ahead < 65.0 && (lateralClearance < 0.65 || approachingLane)) {
+        nearestAheadDist = Math.min(nearestAheadDist, ahead);
+        const clearance = ahead - halfLength;
+        // Dynamic physics stopping distance: d = v_close * tau + v_close^2 / (2 * a_brake)
+        const safeMargin = 1.0 + closing * 0.18 + (closing * closing) / (2 * Math.max(4.0, brakeAcc));
+        
+        // Match opponent speed smoothly as we approach
+        const speedLimit = Math.max(0, otherForwardSpeed + (clearance - safeMargin) * 0.90);
+        if (speedLimit < maxSpeed) {
+          maxSpeed = speedLimit;
+          following = true;
+          reason = 'TRAFFIC_PACING';
+        }
+
+        if (clearance < Math.max(0.35, closing * 0.22)) {
+          emergency = true;
+          reason = 'IMMINENT_CONTACT';
+        }
+      }
+    }
+
+    // Outward drift / track limit safeguard: gently ease off if drifting beyond kerbs
+    const physicalLimit = nominalHalfWidth + finite(track?.curbWidth, 1.05) * 0.5 - 0.35;
+    const trackPoint = track?.atDistance ? track.atDistance(vehicle.distance) : null;
+    if (trackPoint?.normal && Math.abs(current?.lateral || 0) > physicalLimit) {
+      const outward = ((vehicle?.velocity?.x || 0) * trackPoint.normal.x + (vehicle?.velocity?.z || 0) * trackPoint.normal.z) * Math.sign(current?.lateral || 0);
+      if (outward > 0.5) {
+        const excess = Math.abs(current?.lateral || 0) - physicalLimit;
+        maxSpeed = Math.min(maxSpeed, Math.max(16.0, vSpeed - excess * 4.0 - outward * 2.0));
+        if (!emergency) reason = 'TRACK_EDGE_DECEL';
+      }
+    }
+
+    return { maxSpeed, emergency, reason, nearestAheadDist, following };
   }
 }

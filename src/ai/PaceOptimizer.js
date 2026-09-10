@@ -366,10 +366,10 @@ export class PaceOptimizer {
 
     // Anti-windup: freeze & decay integrator during saturation or near lock limit
     const currentSteerAngle = finite(previous, 0) * maxSteerAngle;
-    if (satF < 1.0 && giveUp === 0 && Math.abs(currentSteerAngle) < maxSteerAngle * 0.95) {
-      this.yawInt = clamp(this.yawInt + eYaw * K_YAW_I * safeDt, -K_YAW_I_MAX, K_YAW_I_MAX);
+    if (satF < 1.0 && giveUp === 0 && Math.abs(currentSteerAngle) < maxSteerAngle * 0.95 && Math.abs(finite(headingError, 0)) > 0.04) {
+      this.yawInt = clamp(this.yawInt + eYaw * K_YAW_I * safeDt, -0.06, 0.06);
     } else {
-      this.yawInt *= (1.0 - clamp(safeDt * 3.0, 0, 1));
+      this.yawInt *= (1.0 - clamp(safeDt * 6.0, 0, 1));
     }
 
     // --- 4. Countersteer Excess Body Slip ---
@@ -407,7 +407,7 @@ export class PaceOptimizer {
 
     // Fast unwinding rate prevents yaw overshoots / snap back
     const isUnwinding = Math.sign(targetSteer) !== Math.sign(finite(previous)) || Math.abs(targetSteer) < Math.abs(finite(previous));
-    const rate = isUnwinding ? 18.0 : (recovering ? 16.0 : (committed ? 10.0 : 8.0));
+    const rate = isUnwinding ? 16.0 : (recovering ? 14.0 : (committed ? 11.0 : 9.0));
     const maxDelta = rate * clamp(safeDt, 0.005, 0.05);
 
     const steer = clamp(
@@ -438,6 +438,7 @@ export class PaceOptimizer {
     recovering = false,
     emergency = false,
     defending = false,
+    following = false,
     tireGripFactor = 1.0,
     dirtyAirLoss = 0,
     dt = 0.016
@@ -485,7 +486,9 @@ export class PaceOptimizer {
     if (speedError >= 0) {
       // Acceleration: ramp throttle smoothly to full power
       const exitBonus = (!straight && steerMagnitude < 0.28) ? 0.15 : 0;
-      throttle = clamp((straight ? 1.0 : (0.85 + exitBonus)) + finite(speedError) * 0.35, 0.45, 1.0);
+      const baseThrottle = following ? 0.35 : (straight ? 1.0 : (0.85 + exitBonus));
+      const minThrottle = following ? 0.12 : 0.45;
+      throttle = clamp(baseThrottle + finite(speedError) * 0.35, minThrottle, 1.0);
       brake = 0;
     } else if (speedError > coastThreshold) {
       // Momentum carry & smooth coasting: ZERO BRAKES
@@ -546,12 +549,12 @@ export class PaceOptimizer {
     }
 
     // Mid-corner apex drive: maintain positive throttle floor (60%) for downforce and rear load
-    if (throttle > 0.05 && isCornering && vSpeed > 6.0 && brake < 0.05 && this.satR < 1.1) {
+    if (throttle > 0.05 && isCornering && vSpeed > 6.0 && brake < 0.05 && this.satR < 1.1 && !following) {
       throttle = Math.max(throttle, 0.60);
     }
 
     // Instant 100% full throttle launch on steering unwind or straights
-    if (speedError > -0.80 && steerMagnitude < 0.38 && brake < 0.05 && Math.abs(finite(slipAngle, 0)) < 0.14) {
+    if (!following && speedError > -0.80 && steerMagnitude < 0.38 && brake < 0.05 && Math.abs(finite(slipAngle, 0)) < 0.14) {
       throttle = 1.0;
     }
 
