@@ -222,7 +222,8 @@ export class GameTheoreticCombatEngine {
 
     const roadHalfW = finite(track?.roadHalfWidth, this.roadHalfWidth);
     const curbW = finite(track?.curbWidth, this.curbWidth);
-    const maxMargin = Math.max(2.1, Math.min(5.2, roadHalfW - 1.80 + Math.min(0.50, curbW * 0.40)));
+    // Utilize full physical track width respecting vehicle half-width
+    const maxMargin = Math.max(2.1, Math.min(5.35, roadHalfW - 1.20 + Math.min(0.50, curbW * 0.40)));
 
     // Lockout timer for recently passed cars
     this.targetLockTimer = Math.max(0, this.targetLockTimer - dt);
@@ -244,10 +245,10 @@ export class GameTheoreticCombatEngine {
     this.multiApexState = multiApex;
     this.compoundTurnDetected = multiApex.isCompound;
 
-    const isApproachingCorner = multiApex.primaryCurv > 0.0045;
+    const isApproachingCorner = multiApex.primaryCurv > 0.0042;
     const isStraight = multiApex.primaryCurv < 0.0028;
     const primaryInsideSign = multiApex.primarySign; // Inside lateral sign (+1 for left turn, -1 for right turn)
-    const insideOffset = clamp(primaryInsideSign * (maxMargin * 0.78), -maxMargin, maxMargin);
+    const insideOffset = clamp(primaryInsideSign * (maxMargin * 0.85), -maxMargin, maxMargin);
 
     // Scan traffic entries (Challenger behind, Target ahead)
     const entries = traffic?.entries ?? [];
@@ -284,16 +285,14 @@ export class GameTheoreticCombatEngine {
       return true;
     });
 
-    let tacticalRole = 'PACE';
-    let targetLateral = optimalLat;
-    let desiredSpeed = optimalSample.targetSpeed;
-    let dMin = -maxMargin;
-    let dMax = maxMargin;
-    let combatNotes = 'OPTIMAL_RACING_LINE';
+    // =========================================================================
+    // 1. EVALUATE DEFENSE THREAD (Stackelberg Leader)
+    // =========================================================================
+    let isDefending = false;
+    let defTargetLat = optimalLat;
+    let defDesiredSpeed = optimalSample.targetSpeed;
+    let defNotes = 'PACE';
 
-    // =========================================================================
-    // 1. STACKELBERG LEADER DEFENSE GAME
-    // =========================================================================
     if (challenger && challenger.delta > -45.0) {
       const gap = Math.abs(challenger.delta);
       const challengerSpeed = finite(challenger.other?.speed ?? challenger.otherForwardSpeed, vSpeed);
@@ -302,7 +301,6 @@ export class GameTheoreticCombatEngine {
       const ttc = closingSpeed > 0.20 ? bodyGap / closingSpeed : (closingSpeed > -0.2 ? bodyGap / 0.25 : 99.0);
 
       const rawAttackerLat = finite(challenger.otherLateral ?? challenger.other?.surface?.lateral, currentLat);
-      // Low-pass exponential feint filtering (anti-weave)
       this.filteredAttackerLateral = damp(this.filteredAttackerLateral, rawAttackerLat, 6.5, dt);
 
       // Composite Stackelberg threat score T(t) in [0, 1]
@@ -310,8 +308,6 @@ export class GameTheoreticCombatEngine {
       const fClose = saturate((closingSpeed + 0.4) / 4.8);
       const fTtc = ttc <= 4.5 ? Math.pow(1.0 - ttc / 4.5, 2) : 0;
       const fCorner = Math.exp(-multiApex.primaryDist / 45.0) * saturate(multiApex.primaryCurv / 0.003);
-      const lateralSeparation = Math.abs(rawAttackerLat - currentLat);
-      const fLat = 1.0 - saturate((lateralSeparation - 1.4) / 8.0);
 
       const isClosingThreat = (gap < 10.0)
         || (gap <= 24.0 && closingSpeed >= 0.30)
@@ -325,75 +321,58 @@ export class GameTheoreticCombatEngine {
         : 0;
 
       if ((isClosingThreat || this.threatScore > 0.35 || this.defenseDwellTimer > 0) && isAttackerRealThreat) {
-        tacticalRole = 'DEFEND';
+        isDefending = true;
         this.defenseTargetId = challenger.other?.id ?? null;
         this.defenseTimer += dt;
-        this.defenseDwellTimer = 0.65; // Hysteresis hold
+        this.defenseDwellTimer = 0.65;
 
-        // Determine preferred defensive corridor
         let preferredDefensiveOffset = insideOffset;
-
         if (isStraight) {
-          // On straights, if challenger is pulling out or threatening slipstream, defend the inside or break tow
           const attackerOffsetSign = Math.sign(this.filteredAttackerLateral) || 1;
           preferredDefensiveOffset = Math.abs(this.filteredAttackerLateral) > 1.2
             ? clamp(this.filteredAttackerLateral * 0.75, -maxMargin * 0.75, maxMargin * 0.75)
             : clamp(insideOffset * 0.65, -maxMargin * 0.75, maxMargin * 0.75);
         }
 
-        // FIA Single Defensive Move Rule: Lock direction upon initial commitment
+        // FIA Single Defensive Move Rule
         if (!this.oneMoveLocked || this.lockedDefensiveLane === null) {
           this.defenseDirection = Math.sign(preferredDefensiveOffset) || primaryInsideSign;
           this.lockedDefensiveLane = preferredDefensiveOffset;
           this.oneMoveLocked = true;
         }
 
-        // Strict Anti-Weave: hold committed lateral side without reversing
         const lockedSign = this.defenseDirection;
         const defensiveTargetLat = (lockedSign === primaryInsideSign)
           ? insideOffset
-          : clamp(lockedSign * (maxMargin * 0.72), -maxMargin, maxMargin);
+          : clamp(lockedSign * (maxMargin * 0.75), -maxMargin, maxMargin);
 
         if (isStraight && gap > 11.0 && closingSpeed > 0.6) {
-          // A. Break Tow (Stepped lateral shift on straight)
           this.defenseMode = 'BREAK_TOW';
-          targetLateral = clamp(defensiveTargetLat * 0.70, -maxMargin * 0.72, maxMargin * 0.72);
-          dMin = targetLateral - 1.2;
-          dMax = targetLateral + 1.2;
-          combatNotes = 'DEFEND_BREAK_TOW';
+          defTargetLat = clamp(defensiveTargetLat * 0.70, -maxMargin * 0.75, maxMargin * 0.75);
+          defNotes = 'DEFEND_BREAK_TOW';
         } else if (isApproachingCorner || gap < 15.0 || ttc < 2.4) {
-          // B. Apex Shielding (Pin inside curb tight, denying room completely)
           this.defenseMode = 'APEX_SHIELD';
-
-          // Multi-apex chicane adaptation: blend cleanly between apex 1 and apex 2 setup
           if (multiApex.isChicane && multiApex.primaryDist < 12.0) {
             const secondaryInsideSign = multiApex.secondarySign;
             const transitionBlend = saturate((12.0 - multiApex.primaryDist) / 12.0);
-            const secondaryInsideOffset = secondaryInsideSign * (maxMargin * 0.78);
-            targetLateral = lerp(insideOffset, secondaryInsideOffset, transitionBlend * 0.60);
-            combatNotes = 'DEFEND_CHICANE_MULTI_APEX_SHIELD';
+            const secondaryInsideOffset = secondaryInsideSign * (maxMargin * 0.85);
+            defTargetLat = lerp(insideOffset, secondaryInsideOffset, transitionBlend * 0.60);
+            defNotes = 'DEFEND_CHICANE_MULTI_APEX_SHIELD';
           } else {
-            targetLateral = insideOffset;
-            combatNotes = 'DEFEND_APEX_SHIELD';
+            defTargetLat = insideOffset;
+            defNotes = 'DEFEND_APEX_SHIELD';
           }
-
-          dMin = targetLateral - 0.45;
-          dMax = targetLateral + 0.45;
         } else if (!isStraight && gap < 8.0) {
-          // C. Exit Squeeze (Drift out smoothly to leave exactly 1 car width at outside edge)
           this.defenseMode = 'EXIT_SQUEEZE';
-          const outsideBoundary = clamp(-primaryInsideSign * (maxMargin - this.carWidth - 0.25), -maxMargin, maxMargin);
-          targetLateral = outsideBoundary;
-          dMin = Math.min(targetLateral, 0) - 0.35;
-          dMax = Math.max(targetLateral, 0) + 0.35;
-          combatNotes = 'DEFEND_EXIT_SQUEEZE';
+          const outsideBoundary = clamp(-primaryInsideSign * (maxMargin - this.carWidth - 0.20), -maxMargin, maxMargin);
+          defTargetLat = outsideBoundary;
+          defNotes = 'DEFEND_EXIT_SQUEEZE';
         } else {
           this.defenseMode = 'LOCK_LANE';
-          targetLateral = defensiveTargetLat;
-          combatNotes = 'DEFEND_HOLD_LANE';
+          defTargetLat = defensiveTargetLat;
+          defNotes = 'DEFEND_HOLD_LANE';
         }
       } else {
-        // Threat dissipated: graceful dwell return
         this.defenseDwellTimer = Math.max(0, this.defenseDwellTimer - dt);
         if (this.defenseDwellTimer <= 0) {
           this.defenseMode = 'PACE';
@@ -418,10 +397,15 @@ export class GameTheoreticCombatEngine {
     }
 
     // =========================================================================
-    // 2. ITERATIVE BEST RESPONSE (IBR) ATTACK GAME
+    // 2. EVALUATE ATTACK THREAD (Iterative Best Response & Fearless Divebomb)
     // =========================================================================
-    if (tacticalRole !== 'DEFEND' && targetAhead && targetAhead.delta < 50.0) {
-      tacticalRole = 'ATTACK';
+    let isAttacking = false;
+    let atkTargetLat = optimalLat;
+    let atkDesiredSpeed = optimalSample.targetSpeed;
+    let atkNotes = 'NONE';
+
+    if (targetAhead && targetAhead.delta < 55.0) {
+      isAttacking = true;
       this.attackTargetId = targetAhead.other?.id ?? null;
       this.attackTimer += dt;
 
@@ -430,11 +414,10 @@ export class GameTheoreticCombatEngine {
       const opponentLat = finite(targetAhead.otherLateral ?? targetAhead.other?.surface?.lateral, 0);
       const closingSpeed = Math.max(0, vSpeed - targetSpeed);
 
-      // Check if inside line is open (opponent is not hugging inside apex curb)
-      const isInsideOpen = Math.abs(opponentLat - insideOffset) > 2.0;
-      const isSideBySide = Math.abs(gap) < this.carLength * 1.2;
+      // Check if inside line is open (opponent is leaving space on inside curb)
+      const isInsideOpen = Math.abs(opponentLat - insideOffset) > 1.6;
+      const isSideBySide = Math.abs(gap) < this.carLength * 1.35;
 
-      // Pass completion check (car established clear forward progress)
       if (gap < -2.2) {
         this.passedTargetId = this.attackTargetId;
         this.targetLockTimer = 16.0;
@@ -443,78 +426,66 @@ export class GameTheoreticCombatEngine {
         this.attackTimer = 0;
         this.divebombCommitted = false;
         this.switchbackStage = 'NONE';
-        tacticalRole = 'PACE';
-        combatNotes = 'OVERTAKE_COMPLETED_RESUME_PACE';
+        isAttacking = false;
       } else if (isSideBySide) {
-        // A. Resilient Side-by-Side Overlap Combat
+        // Resilient Side-by-Side Overlap Combat (Never back out)
         this.attackMode = 'SIDE_BY_SIDE';
         const opponentSide = opponentLat >= 0 ? 1 : -1;
         const assignedSide = -opponentSide;
-        targetLateral = clamp(opponentLat + assignedSide * (this.carWidth + 0.65), -maxMargin, maxMargin);
-        desiredSpeed = Math.max(desiredSpeed, targetSpeed + 6.0);
-        dMin = Math.min(targetLateral - 0.5, currentLat - 0.3);
-        dMax = Math.max(targetLateral + 0.5, currentLat + 0.3);
-        combatNotes = 'ATTACK_SIDE_BY_SIDE_HOLD';
-      } else if (isStraight && gap > 4.8) {
-        // B. Straightaway High-Speed Slipstream Slingshot
+        atkTargetLat = clamp(opponentLat + assignedSide * (this.carWidth + 0.55), -maxMargin, maxMargin);
+        atkDesiredSpeed = Math.max(optimalSample.targetSpeed, targetSpeed + 6.5);
+        atkNotes = 'ATTACK_SIDE_BY_SIDE_HOLD';
+      } else if (isStraight && gap > 4.5) {
+        // High-Speed Slipstream Slingshot (+18 m/s closing speed floor)
         this.attackMode = 'SLINGSHOT';
-        const straightClosingFloor = 14.0 + aggression * 4.0; // Up to +18 m/s closing speed floor
-        desiredSpeed = Math.max(desiredSpeed, targetSpeed + straightClosingFloor);
+        const straightClosingFloor = 14.0 + aggression * 4.5;
+        atkDesiredSpeed = Math.max(optimalSample.targetSpeed, targetSpeed + straightClosingFloor);
 
-        // Calculate dynamic pull-out timing
-        const dynamicPulloutDist = clamp(closingSpeed * 1.15 + 4.8, 6.5, 24.0);
-        const shouldPullOut = gap <= dynamicPulloutDist || gap < 16.0;
+        const dynamicPulloutDist = clamp(closingSpeed * 1.2 + 4.5, 6.0, 24.0);
+        const shouldPullOut = gap <= dynamicPulloutDist || gap < 15.0;
 
         if (shouldPullOut) {
-          // Punch out into clear lateral lane
           const pullSide = opponentLat >= 0 ? -1 : 1;
-          targetLateral = clamp(opponentLat + pullSide * 3.8, -maxMargin, maxMargin);
-          combatNotes = 'ATTACK_SLINGSHOT_PUNCH_OUT';
+          atkTargetLat = clamp(opponentLat + pullSide * 3.6, -maxMargin, maxMargin);
+          atkNotes = 'ATTACK_SLINGSHOT_PUNCH_OUT';
         } else {
           // Ride the slipstream tow pocket directly behind
-          targetLateral = clamp(opponentLat, -maxMargin * 0.85, maxMargin * 0.85);
-          combatNotes = 'ATTACK_SLINGSHOT_DRAFTING';
+          atkTargetLat = clamp(opponentLat, -maxMargin * 0.88, maxMargin * 0.88);
+          atkNotes = 'ATTACK_SLINGSHOT_DRAFTING';
         }
-      } else if (isApproachingCorner && isInsideOpen && gap < 36.0) {
-        // C. Fearless Inside Divebomb (-3.5G Threshold Deceleration)
+      } else if (isApproachingCorner && isInsideOpen && gap < 42.0) {
+        // Fearless Inside Apex Divebomb (-3.6G threshold trail-braking delta)
         this.attackMode = 'DIVEBOMB';
         this.divebombCommitted = true;
-        this.attackIntensity = 0.95;
+        this.attackIntensity = 0.96;
+        atkTargetLat = insideOffset;
 
-        // Multi-apex chicane divebomb control: regulate exit speed for secondary apex
         if (multiApex.isChicane) {
-          targetLateral = insideOffset;
-          desiredSpeed = Math.max(optimalSample.targetSpeed * 0.98, targetSpeed + 5.5);
-          combatNotes = 'ATTACK_CHICANE_IBR_DIVEBOMB';
+          atkDesiredSpeed = Math.max(optimalSample.targetSpeed * 0.99, targetSpeed + 6.0);
+          atkNotes = 'ATTACK_CHICANE_IBR_DIVEBOMB';
         } else {
-          targetLateral = insideOffset;
-          desiredSpeed = Math.max(optimalSample.targetSpeed, targetSpeed + 6.0 + aggression * 3.0);
-          combatNotes = 'ATTACK_FEARLESS_IBR_DIVEBOMB';
+          atkDesiredSpeed = Math.max(optimalSample.targetSpeed, targetSpeed + 6.5 + aggression * 3.5);
+          atkNotes = 'ATTACK_FEARLESS_IBR_DIVEBOMB';
         }
-
-        dMin = insideOffset - 0.55;
-        dMax = insideOffset + 0.75;
       } else if (isApproachingCorner && !isInsideOpen) {
-        // D. Diamond Line Switchback Undercut (Late apex counter to inside defender)
+        // Diamond Line Switchback Undercut (Late apex counter to inside defender)
         this.attackMode = 'SWITCHBACK';
-        this.attackIntensity = 0.88;
-
+        this.attackIntensity = 0.90;
         const isAtApex = multiApex.primaryDist < 12.0;
+
         if (!isAtApex) {
-          // Stage 1: Stay wider on entry to square off corner radius
           this.switchbackStage = 'ENTRY_WIDE';
-          targetLateral = clamp(-primaryInsideSign * (maxMargin * 0.75), -maxMargin, maxMargin);
-          desiredSpeed = optimalSample.targetSpeed * 0.96; // Controlled entry
-          combatNotes = 'ATTACK_SWITCHBACK_WIDE_ENTRY';
+          atkTargetLat = clamp(-primaryInsideSign * (maxMargin * 0.82), -maxMargin, maxMargin);
+          atkDesiredSpeed = optimalSample.targetSpeed * 0.97;
+          atkNotes = 'ATTACK_SWITCHBACK_WIDE_ENTRY';
         } else {
-          // Stage 2: Cut underneath defender on exit with maximum longitudinal drive
           this.switchbackStage = 'EXIT_UNDERCUT';
-          targetLateral = clamp(primaryInsideSign * (maxMargin * 0.45), -maxMargin, maxMargin);
-          desiredSpeed = Math.max(optimalSample.targetSpeed * 1.08, targetSpeed + 6.5);
-          combatNotes = 'ATTACK_SWITCHBACK_EXIT_UNDERCUT';
+          atkTargetLat = clamp(primaryInsideSign * (maxMargin * 0.50), -maxMargin, maxMargin);
+          atkDesiredSpeed = Math.max(optimalSample.targetSpeed * 1.10, targetSpeed + 7.0);
+          atkNotes = 'ATTACK_SWITCHBACK_EXIT_UNDERCUT';
         }
       }
-    } else if (tacticalRole !== 'DEFEND') {
+    } else {
       this.attackMode = 'NONE';
       this.attackTargetId = null;
       this.attackTimer = 0;
@@ -524,8 +495,63 @@ export class GameTheoreticCombatEngine {
     }
 
     // =========================================================================
-    // 3. MULTI-APEX RUNOFF PREVENTION & DYNAMIC CORRIDOR ENVELOPE
+    // 3. DUAL-THREAD TACTICAL SYNTHESIS (Simultaneous Attack & Defense)
     // =========================================================================
+    let tacticalRole = 'PACE';
+    let targetLateral = optimalLat;
+    let desiredSpeed = optimalSample.targetSpeed;
+    let dMin = -maxMargin;
+    let dMax = maxMargin;
+    let combatNotes = 'OPTIMAL_RACING_LINE';
+
+    if (isDefending && isAttacking) {
+      tacticalRole = 'DUAL_COMBAT';
+
+      if (this.attackMode === 'DIVEBOMB') {
+        // Diving inside target ahead naturally closes the inside on the challenger behind!
+        targetLateral = atkTargetLat;
+        desiredSpeed = Math.max(atkDesiredSpeed, defDesiredSpeed + 3.0);
+        dMin = targetLateral - 0.50;
+        dMax = targetLateral + 0.65;
+        combatNotes = 'COMBAT_DUAL_DIVE_AND_SHIELD';
+      } else if (this.attackMode === 'SWITCHBACK') {
+        // Carry diamond entry while maintaining high speed so car behind cannot lunge
+        targetLateral = atkTargetLat;
+        desiredSpeed = Math.max(atkDesiredSpeed, vSpeed + 1.5);
+        dMin = targetLateral - 0.70;
+        dMax = targetLateral + 0.70;
+        combatNotes = 'COMBAT_DUAL_SWITCHBACK_AND_DEFEND';
+      } else if (this.attackMode === 'SLINGSHOT') {
+        // Slingshot forward while breaking tow for the car behind
+        targetLateral = atkTargetLat;
+        desiredSpeed = Math.max(atkDesiredSpeed, defDesiredSpeed + 4.0);
+        dMin = targetLateral - 1.0;
+        dMax = targetLateral + 1.0;
+        combatNotes = 'COMBAT_DUAL_SLINGSHOT_TOW_BREAK';
+      } else {
+        // Side by side combat: hold assigned flank firmly
+        targetLateral = atkTargetLat;
+        desiredSpeed = Math.max(atkDesiredSpeed, defDesiredSpeed);
+        dMin = targetLateral - 0.50;
+        dMax = targetLateral + 0.50;
+        combatNotes = 'COMBAT_DUAL_TACTICAL_HOLD';
+      }
+    } else if (isDefending) {
+      tacticalRole = 'DEFEND';
+      targetLateral = defTargetLat;
+      desiredSpeed = defDesiredSpeed;
+      dMin = (this.defenseMode === 'APEX_SHIELD') ? targetLateral - 0.45 : targetLateral - 1.2;
+      dMax = (this.defenseMode === 'APEX_SHIELD') ? targetLateral + 0.45 : targetLateral + 1.2;
+      combatNotes = defNotes;
+    } else if (isAttacking) {
+      tacticalRole = 'ATTACK';
+      targetLateral = atkTargetLat;
+      desiredSpeed = atkDesiredSpeed;
+      dMin = (this.attackMode === 'DIVEBOMB') ? targetLateral - 0.55 : targetLateral - 1.2;
+      dMax = (this.attackMode === 'DIVEBOMB') ? targetLateral + 0.75 : targetLateral + 1.2;
+      combatNotes = atkNotes;
+    }
+
     // Ensure target lateral never exceeds physical track limits or curb boundary
     targetLateral = clamp(targetLateral, -maxMargin, maxMargin);
     dMin = clamp(Math.min(dMin, targetLateral), -maxMargin, maxMargin);

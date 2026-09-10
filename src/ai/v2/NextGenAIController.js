@@ -268,10 +268,10 @@ export class NextGenAIController {
 
     const nominalHalfWidth = finite(track.roadHalfWidth, 6.5);
     const kerbAllowance = Math.min(0.8, finite(track.curbWidth, 1.05) * 0.65) * this._kerbUsage;
-    const baseRoadMargin = Math.max(2.1, Math.min(5.2, nominalHalfWidth - 1.80 + kerbAllowance));
+    const baseRoadMargin = Math.max(2.1, Math.min(5.35, nominalHalfWidth - 1.20 + kerbAllowance));
     const currentSurfaceMargin = finite(
       track.planningLateralLimit?.(vehicle.distance, current?.lateral),
-      nominalHalfWidth - 1.80
+      nominalHalfWidth - 1.20
     );
     const edgeDeviation = Math.abs(finite(current?.lateral, 0)) > currentSurfaceMargin + 0.55;
 
@@ -309,9 +309,9 @@ export class NextGenAIController {
     });
 
     const optCurrent = this.optimalEngine?.sampleAtDistance?.(vehicle.distance, vehicle.classKey);
-    const defending = tactical.role === 'DEFEND';
-    const attacking = tactical.role === 'ATTACK';
-    let tacticalMode = recovering ? 'RECOVER' : (defending ? 'DEFEND' : attacking ? 'ATTACK' : 'PACE');
+    const defending = tactical.role === 'DEFEND' || tactical.role === 'DUAL_COMBAT' || tactical.defenseMode !== 'PACE';
+    const attacking = tactical.role === 'ATTACK' || tactical.role === 'DUAL_COMBAT' || tactical.attackMode !== 'NONE';
+    let tacticalMode = recovering ? 'RECOVER' : (tactical.role === 'DUAL_COMBAT' ? 'DUAL_COMBAT' : (defending ? 'DEFEND' : (attacking ? 'ATTACK' : 'PACE')));
     let targetOffset = recovering ? 0 : (tactical.role === 'PACE' ? (optCurrent?.lateral ?? 0) : clamp(tactical.targetLateral, -baseRoadMargin, baseRoadMargin));
     let targetId = attacking ? this.combatEngine.attackTargetId : (defending ? this.combatEngine.defenseTargetId : null);
     let tacticalReason = recovering ? (isOffTrack ? 'OFF_TRACK_RECOVERY' : 'STALL_RECOVERY') : tactical.notes;
@@ -559,8 +559,8 @@ export class NextGenAIController {
 
     const challenger = traffic?.behind;
     const targetId = tactical.attackMode !== 'NONE' ? this.combatEngine.attackTargetId : (tactical.defenseMode !== 'PACE' ? this.combatEngine.defenseTargetId : null);
-    const defending = tactical.role === 'DEFEND';
-    const attacking = tactical.role === 'ATTACK';
+    const defending = tactical.role === 'DEFEND' || tactical.role === 'DUAL_COMBAT' || tactical.defenseMode !== 'PACE';
+    const attacking = tactical.role === 'ATTACK' || tactical.role === 'DUAL_COMBAT' || tactical.attackMode !== 'NONE';
     const speedError = finite(desiredSpeed - vehicle.speed);
     const clearance = finite(this.trajectoryPlan?.minimumClearanceM, 99);
     const isSafe = Boolean(this.trajectoryPlan?.collisionFree ?? true);
