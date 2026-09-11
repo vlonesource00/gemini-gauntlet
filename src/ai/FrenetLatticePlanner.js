@@ -135,7 +135,7 @@ export class QuinticPolynomial {
 
     this.c3 = (20 * dq - (8 * this.v1 + 12 * this.v0) * this.T - (3 * this.a0 - this.a1) * T2) / (2 * T3);
     this.c4 = (-30 * dq + (14 * this.v1 + 16 * this.v0) * this.T + (3 * this.a0 - 2 * this.a1) * T2) / (2 * T4);
-    this.c5 = (12 * dq - 6 * (this.v1 + this.v0) * this.T - (this.a1 - this.a0) * T2) / (2 * T5);
+    this.c5 = (12 * dq - 6 * (this.v1 + this.v0) * this.T + (this.a1 - this.a0) * T2) / (2 * T5);
   }
 
   eval(t) {
