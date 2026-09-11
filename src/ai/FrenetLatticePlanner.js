@@ -194,6 +194,62 @@ export class TwoStageSpline {
   }
 }
 
+/**
+ * Compute Frenet frame kinematics (lateral velocity, longitudinal progress rate,
+ * normal acceleration, and lateral acceleration qDDot) relative to an offset curve.
+ *
+ * Exact offset Frenet formulation:
+ *   a_N = qDDot + (1 - kappa * q) * kappa * sDot^2
+ *   qDDot = a_N - (1 - kappa * q) * kappa * sDot^2
+ *
+ * @param {Object} params
+ * @param {{ x: number, z: number }} [params.velocity] - Vehicle planar world velocity
+ * @param {{ x: number, z: number }} [params.acceleration] - Vehicle planar world acceleration
+ * @param {number} [params.lateral=0] - Current lateral displacement q from reference centerline
+ * @param {{ x: number, z: number }} params.tangent - Track unit tangent vector
+ * @param {{ x: number, z: number }} params.normal - Track unit normal vector (left-positive)
+ * @param {number} [params.curvature=0] - Track unsigned curvature magnitude (1/R)
+ * @param {number} [params.turnSign=1] - Direction of turn (+1 for left, -1 for right)
+ * @returns {{ qDot: number, sDotMeasured: number, sDot: number, aDotN: number, qDDot: number, denom: number }}
+ */
+export function computeFrenetKinematics({
+  velocity,
+  acceleration,
+  lateral = 0,
+  tangent,
+  normal,
+  curvature = 0,
+  turnSign = 1
+}) {
+  const vx = finite(velocity?.x, 0);
+  const vz = finite(velocity?.z, 0);
+  const qDot = normal ? (vx * normal.x + vz * normal.z) : 0;
+  const sDotMeasured = tangent ? (vx * tangent.x + vz * tangent.z) : 0;
+
+  const kappaTrack = (turnSign ?? 1) * finite(curvature, 0);
+  const currentLateral = finite(lateral, 0);
+  const oneMinusKappaQ = 1.0 - kappaTrack * currentLateral;
+  const denom = Math.abs(oneMinusKappaQ) < 0.1
+    ? Math.sign(oneMinusKappaQ || 1) * 0.1
+    : oneMinusKappaQ;
+
+  const sDot = sDotMeasured / denom;
+
+  const ax = finite(acceleration?.x, 0);
+  const az = finite(acceleration?.z, 0);
+  const aDotN = normal ? (ax * normal.x + az * normal.z) : 0;
+  const qDDot = aDotN - denom * kappaTrack * sDot * sDot;
+
+  return {
+    qDot,
+    sDotMeasured,
+    sDot,
+    aDotN,
+    qDDot,
+    denom
+  };
+}
+
 export class FrenetLatticePlanner {
   /**
    * @param {Object} [options]
@@ -713,17 +769,22 @@ export class FrenetLatticePlanner {
     if (ref0 && ref0.normal && ref0.tangent) {
       const vx = finite(vehicle?.velocity?.x, finite(vehicle?.speed, 0) * Math.sin(vehicle?.yaw || 0));
       const vz = finite(vehicle?.velocity?.z, finite(vehicle?.speed, 0) * Math.cos(vehicle?.yaw || 0));
-      qDotMeasured = vx * ref0.normal.x + vz * ref0.normal.z;
-      sDotMeasured = vx * ref0.tangent.x + vz * ref0.tangent.z;
-
-      const kappaTrack = (ref0.turnSign ?? 1) * finite(ref0.curvature, 0);
-      const denom = Math.max(0.1, 1.0 - kappaTrack * currentLateral);
-      const sDot = sDotMeasured / denom;
-
       const ax = finite(vehicle?.acceleration?.x, 0);
       const az = finite(vehicle?.acceleration?.z, 0);
-      const aDotN = ax * ref0.normal.x + az * ref0.normal.z;
-      qDDotMeasured = aDotN - sDot * sDot * kappaTrack;
+
+      const kinematics = computeFrenetKinematics({
+        velocity: { x: vx, z: vz },
+        acceleration: { x: ax, z: az },
+        lateral: currentLateral,
+        tangent: ref0.tangent,
+        normal: ref0.normal,
+        curvature: ref0.curvature,
+        turnSign: ref0.turnSign
+      });
+
+      qDotMeasured = kinematics.qDot;
+      sDotMeasured = kinematics.sDotMeasured;
+      qDDotMeasured = kinematics.qDDot;
     }
 
     // Active-trajectory warm start: reconcile plan derivatives with measured physical velocity
@@ -1212,7 +1273,11 @@ export class FrenetLatticePlanner {
       intentType: selected.intentType,
       candidates: visualCandidates,
       committed,
-      recovering: Boolean(recovering)
+      recovering: Boolean(recovering),
+      curve: selected.curve,
+      poly: selected.poly,
+      startV,
+      startA
     };
   }
 }
