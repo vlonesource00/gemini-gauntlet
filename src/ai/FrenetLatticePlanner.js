@@ -476,6 +476,8 @@ export class FrenetLatticePlanner {
     urgent = false,
     roadMargin = null,
     kerbAllowance = 0,
+    dMin = null,
+    dMax = null,
     lookAhead = 12,
     trackingDistance = null,
     referenceLineAtDistance = null,
@@ -486,7 +488,9 @@ export class FrenetLatticePlanner {
     const maximumSurfaceMargin = Math.max(2.1, nominalHalfWidth - 1.18 + kerbAllowance);
     const margin = Math.max(1.8, finite(roadMargin, maximumSurfaceMargin));
 
-    const intendedOffset = clamp(finite(desiredOffset), -margin, margin);
+    const minBound = Number.isFinite(dMin) ? Math.max(-margin, dMin) : -margin;
+    const maxBound = Number.isFinite(dMax) ? Math.min(margin, dMax) : margin;
+    const intendedOffset = clamp(finite(desiredOffset), minBound, maxBound);
     const committed = pitActive || ['SLINGSHOT', 'ATTACK', 'ATTACK_LEFT', 'ATTACK_RIGHT', 'ATTACK_INSIDE', 'ATTACK_OUTSIDE', 'DIVEBOMB', 'SWITCHBACK', 'DEFEND_LEFT', 'DEFEND_RIGHT', 'DEFEND_INSIDE', 'BREAK_TOW', 'APEX_SHIELD', 'EXIT_SQUEEZE'].includes(racecraftPhase);
     const urgentManeuver = committed || recovering || urgent;
 
@@ -496,7 +500,7 @@ export class FrenetLatticePlanner {
       for (const tc of tacticalCandidates) {
         if (Number.isFinite(tc.offset)) {
           customOffsetEntries.push({
-            offset: clamp(tc.offset, -margin, margin),
+            offset: clamp(tc.offset, minBound, maxBound),
             intentType: tc.intentType || 'TACTICAL',
             transitionScales: tc.transitionScales || null
           });
@@ -506,7 +510,7 @@ export class FrenetLatticePlanner {
 
     // Generate balanced left, center, right, and evasive candidates
     const oppositeLane = intendedOffset > 0.5 ? -Math.min(margin * 0.75, intendedOffset) : (intendedOffset < -0.5 ? Math.min(margin * 0.75, -intendedOffset) : 0);
-    const candidatePool = recovering
+    const rawPool = recovering
       ? [intendedOffset, currentLateral, 0]
       : [
           intendedOffset,
@@ -517,6 +521,9 @@ export class FrenetLatticePlanner {
           -margin * 0.65,
           margin * 0.65
         ];
+    const candidatePool = committed
+      ? rawPool.map((c) => clamp(c, minBound, maxBound))
+      : rawPool;
 
     // Zero-hesitation overtaking flank candidate generation
     if (!recovering && trafficEntries && trafficEntries.length > 0) {

@@ -1,9 +1,9 @@
 /**
  * NextGenAIController.js (V2 Main Controller Orchestrator)
  * Unites the 4-Layer Hybrid AI Architecture:
- * - Layer 1: 2D Free-Boundary Optimal Profile Solver (GlobalTimeOptimalEngine)
- * - Layer 2: Stackelberg Leader Defense & IBR Divebomb Attack (GameTheoreticCombatEngine)
- * - Layer 3: Coupled Friction-Circle Trail-Braking & Apex Exit Power (CoupledMPCC + PaceOptimizer + Lattice)
+ * - Layer 1: Multi-Scale Curvature Profile & Analytical Velocity Solver (GlobalTimeOptimalEngine)
+ * - Layer 2: Predictive Adversarial Racecraft Engine (GameTheoreticCombatEngine)
+ * - Layer 3: Coupled Physics-Informed Saturated Feedback Controller (CoupledMPCC + PaceOptimizer + Lattice)
  * - Layer 4: Combat Dynamics: Contact-Tolerant Elastic Rubbing & Slip-Slope Power Sliding (CombatDynamicsEngine)
  * - Perception: Multi-agent spatial awareness & swept corridor hazard scanning (TrafficAwareness)
  * - Telemetry: Full export of candidate lattice matrices, G-G friction states, and thought labels for AIDebugSuiteRenderer
@@ -336,9 +336,13 @@ export class NextGenAIController {
       dt
     });
 
-    const currentPoint = track?.atDistance ? track.atDistance(vehicle.distance) : { curvature: 0 };
-    const signedCurv = finite(currentPoint?.curvature, 0);
-    const currentCurv = Math.abs(signedCurv);
+    const currentPoint = track?.atDistance ? track.atDistance(vehicle.distance) : { curvature: 0, turnSign: 0 };
+    const rawCurv = Math.abs(finite(currentPoint?.curvature, 0));
+    const currentTurnSign = finite(currentPoint?.turnSign, 0);
+    // Steering-signed curvature: positive steers right, negative steers left.
+    // In Track.js and shadow.js, turnSign is -1 for right turn, +1 for left turn.
+    const signedCurv = -currentTurnSign * rawCurv;
+    const currentCurv = rawCurv;
 
     const optCurrent = this.optimalEngine?.sampleAtDistance?.(vehicle.distance, vehicle.classKey);
     const defending = tactical.role === 'DEFEND' || tactical.role === 'DUAL_COMBAT' || tactical.defenseMode !== 'PACE';
@@ -415,6 +419,8 @@ export class NextGenAIController {
         urgent: defending || attacking || isOffTrack,
         roadMargin: baseRoadMargin,
         kerbAllowance,
+        dMin: tactical.dMin ?? -baseRoadMargin,
+        dMax: tactical.dMax ?? baseRoadMargin,
         trackingDistance,
         referenceLineAtDistance: (s) => {
           if (isMatchingTrack && typeof this.referenceProfile?.paceAtDistance === 'function') {
@@ -488,8 +494,11 @@ export class NextGenAIController {
     this.supervisor = supervisor;
 
     let desiredSpeed = physicalTargetSpeed;
-    if (tactical.desiredSpeed) {
-      desiredSpeed = Math.min(physicalTargetSpeed, Math.max(desiredSpeed, tactical.desiredSpeed));
+    if (optCurrent?.targetSpeed && Number.isFinite(optCurrent.targetSpeed)) {
+      desiredSpeed = Math.min(desiredSpeed, optCurrent.targetSpeed);
+    }
+    if (Number.isFinite(tactical.desiredSpeed) && tactical.desiredSpeed > 0) {
+      desiredSpeed = clamp(tactical.desiredSpeed, physicalTargetSpeed * 0.70, physicalTargetSpeed * 1.15);
     }
     desiredSpeed = Math.min(desiredSpeed, supervisor.maxSpeed);
 
@@ -502,8 +511,10 @@ export class NextGenAIController {
       tacticalTarget: {
         targetLateral: plannedTargetOffset,
         desiredSpeed,
-        dMin: -baseRoadMargin,
-        dMax: baseRoadMargin
+        headingError,
+        targetPos,
+        dMin: tactical.dMin ?? -baseRoadMargin,
+        dMax: tactical.dMax ?? baseRoadMargin
       },
       dt,
       tireGripFactor,
@@ -537,13 +548,24 @@ export class NextGenAIController {
     });
 
     // 8. Layer 4: Combat Dynamics & Slip-Slope Limit Tracking
+    // Actuator Authority: In normal/tactical mode, Coupled MPCC provides closed-loop
+    // contouring steering, friction-budgeted braking, and launch power.
+    // Under recovery or emergency intervention, supervisor/recovery overrides prevail.
+    const activeSteer = recovering ? this.steerCommand : (mpccOut?.steer ?? this.steerCommand);
+    const activeThrottle = supervisor.emergency
+      ? 0
+      : (recovering ? rawPedals.throttle : (mpccOut?.throttle ?? rawPedals.throttle));
+    const activeBrake = supervisor.emergency
+      ? 1.0
+      : (recovering ? rawPedals.brake : (mpccOut?.brake ?? rawPedals.brake));
+
     const finalControls = this.dynamicsEngine.process({
       vehicle,
       traffic,
       controls: {
-        steer: clamp(this.steerCommand, -1, 1),
-        throttle: rawPedals.throttle,
-        brake: rawPedals.brake
+        steer: clamp(activeSteer, -1, 1),
+        throttle: activeThrottle,
+        brake: activeBrake
       },
       dt
     });

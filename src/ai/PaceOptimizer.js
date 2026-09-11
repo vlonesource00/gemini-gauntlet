@@ -217,7 +217,7 @@ export class PaceOptimizer {
     const vClass = vehicle?.classKey || 'prototype';
 
     // 1. Calibrate dynamic sustained braking deceleration capacity a_B (m/s²)
-    const baseDecel = vClass === 'prototype' ? 10.5 : vClass === 'gt' ? 8.0 : 5.8;
+    const baseDecel = vClass === 'prototype' ? 10.5 : vClass === 'gt' ? 7.5 : 5.4;
     const brakingDecel = baseDecel * tireGripFactor * (0.85 + aggression * 0.25);
 
     // 2. Exact multi-distance lookahead scanning distances
@@ -226,7 +226,7 @@ export class PaceOptimizer {
     ];
 
     let speedLimit = 95.0; // Track velocity ceiling
-    const previewBuffer = Math.max(0, vSpeed * 0.18);
+    const previewBuffer = Math.max(0, vSpeed * 0.22);
 
     const derate = this._derate({ vehicle, track, targetOffset: insideLineOffset });
     const effectiveSkill = (skill ?? 0.85) * this.paceTrim * derate;
@@ -325,11 +325,8 @@ export class PaceOptimizer {
     const maxSteerAngle = finite(vehicle?.spec?.steering?.maxAngle, 0.55);
     const alphaPeak = finite(vehicle?.spec?.tire?.alphaPeak, (vClass === 'prototype' ? 0.115 : 0.140));
 
-    // Sign-correct curvature: if currentCurvature is unsigned or opposing headingError
-    const rawCurv = finite(currentCurvature, 0);
-    const effCurv = (Math.abs(finite(headingError, 0)) > 0.03 && Math.sign(rawCurv) !== Math.sign(finite(headingError, 0)))
-      ? -rawCurv
-      : rawCurv;
+    // Canonical signed curvature (positive right, negative left)
+    const effCurv = finite(currentCurvature, 0);
 
     // --- 1. Extract Contact Patch Slip Angles ---
     let alphaF = 0;

@@ -67,9 +67,9 @@ export class CombatDynamicsEngine {
     // =========================================================================
     // Dynamic breakaway threshold: Prototype tires generate peak lateral load at ~6.5° (0.115 rad).
     // Genuine oversteer breakaway occurs at > 7.5° (0.130 rad).
-    // Oversteer breakaway occurs when rear tire saturation exceeds critical threshold (> 18° / 0.32 rad) with diverging yaw rate
+    // Oversteer breakaway occurs when body slip and yaw rate exceed critical limits of tire adhesion
     const absSlip = Math.abs(slipAngle);
-    const isSpinBreakaway = absSlip > 0.32 && Math.abs(yawRate) > 1.25;
+    const isSpinBreakaway = absSlip > 0.38 && Math.abs(yawRate) > 1.45;
     this.powerSlideActive = false;
 
     if (isSpinBreakaway && vSpeed > 3.0) {

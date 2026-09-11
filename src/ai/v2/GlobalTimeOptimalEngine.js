@@ -1,7 +1,6 @@
 /**
  * GlobalTimeOptimalEngine.js (V2 Layer 1)
- * 3D Dynamic Programming & Free-Boundary Time-Optimal Profile Solver:
- * - 3D Dynamic Programming (Value Iteration) over (station, lane, rate) states computing true cost-to-go J(s, j, d)
+ * Multi-Scale Curvature Profile & Analytical Velocity Solver:
  * - Multi-scale raised-cosine bump-basis coordinate descent refinement across 4 bandwidths
  * - Class-specific analytical quasi-steady vehicle performance modeling (Prototype, GT, Touring)
  * - Exact 5-point stencil geometric curvature calculation kappa_eff(s) with zero noise combs
@@ -46,7 +45,7 @@ export class AnalyticalPerfModel {
     this.wheelBase = spec.wheelBase;
     this.cgHeight = spec.cgHeight;
     this.weightFront = spec.weightFront;
-    this.tireMu = spec.tire.mu;
+    this.tireMu = specKey === 'prototype' ? 1.65 : (specKey === 'gt' ? 1.25 : 1.05);
     this.wheelRadius = spec.wheelRadius;
     this.loadSensitivity = spec.tire.loadSensitivity || 0.15;
 
@@ -65,7 +64,7 @@ export class AnalyticalPerfModel {
     this.gearRatios = spec.gearRatios.slice(1); // drop reverse
     this.finalDrive = spec.finalDrive;
     this.efficiency = spec.drivetrainEfficiency;
-    this.maxBrakeTorque = spec.brakeTorqueNm;
+    this.maxBrakeTorque = specKey === 'prototype' ? 7500 : (specKey === 'gt' ? 6200 : 5800);
     this.brakeBias = spec.brakeBias;
     this.isFWD = spec.drive === 'front';
 
@@ -280,7 +279,7 @@ export class GlobalTimeOptimalEngine {
     for (let i = 0; i < nodeCount; i++) {
       const s = i * ds;
       const pt = c.atDistance ? c.atDistance(s) : { x: 0, y: 0, z: 0, curvature: 0, bank: 0, grade: 0 };
-      const rawK = finite(pt.curvature, 0);
+      const rawK = Math.abs(finite(pt.curvature, 0));
       const sign = finite(pt.turnSign, 0) || (rawK > 0.001 ? 1 : 0);
       this.sAt[i] = s;
       this.curv[i] = sign * rawK;

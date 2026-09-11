@@ -1,6 +1,6 @@
 /**
  * CoupledMPCCController.js (V2 Layer 3 Coupled Dynamics)
- * Coupled Spatio-Temporal Model Predictive Contouring Controller (120Hz/400Hz):
+ * Coupled Physics-Informed Saturated Feedback Controller & Sampled Horizon Preview:
  * 
  * 1. 400Hz/120Hz Physics-Informed Front-Axle Slip Saturation Guard (Anti-Plow / Anti-Scrub):
  *    - Monitors front axle slip angle alphaF = 0.5 * (alpha_FL + alpha_FR).
@@ -271,7 +271,9 @@ export class CoupledMPCCController {
     const alphaPeak = finite(vehicle?.spec?.tire?.alphaPeak, (vClass === 'prototype' ? 0.115 : 0.140));
     const safeDt = clamp(finite(dt, 0.016), 0.001, 0.05);
 
-    const targetLateral = finite(tacticalTarget?.targetLateral, 0);
+    const dMin = Number.isFinite(tacticalTarget?.dMin) ? tacticalTarget.dMin : -8.5;
+    const dMax = Number.isFinite(tacticalTarget?.dMax) ? tacticalTarget.dMax : 8.5;
+    const targetLateral = clamp(finite(tacticalTarget?.targetLateral, 0), dMin, dMax);
     const desiredSpeed = Math.max(8.0, finite(tacticalTarget?.desiredSpeed, 50.0));
 
     // 1. Friction Limits (Downforce-Scaled Peak Lateral & Longitudinal Accelerations)
@@ -298,38 +300,35 @@ export class CoupledMPCCController {
     const trackHeading = Math.atan2(finite(refPoint.tangent?.x, 0), finite(refPoint.tangent?.z, 1));
     const rawHeadingToTrack = wrapAngle(trackHeading - yaw);
 
-    // Heading towards lookahead target point
-    const headingToLookahead = Math.atan2(
-      finite(targetWorld.x, 0) - finite(vehicle?.position?.x, 0),
-      finite(targetWorld.z, 0) - finite(vehicle?.position?.z, 0)
-    );
-    const rawHeadingToLookahead = wrapAngle(headingToLookahead - yaw);
-
-    const lookaheadWeight = clamp(0.55 + aggression * 0.15, 0.50, 0.85);
-    let headingError = wrapAngle(
-      rawHeadingToLookahead * lookaheadWeight + rawHeadingToTrack * (1.0 - lookaheadWeight)
-    );
+    // Local target displacement in vehicle frame (Z forward, X right)
+    const dx = finite(targetWorld.x, 0) - finite(vehicle?.position?.x, 0);
+    const dz = finite(targetWorld.z, 0) - finite(vehicle?.position?.z, 0);
+    const lx = dx * Math.cos(yaw) - dz * Math.sin(yaw);
+    const dist2 = Math.max(6.0, dx * dx + dz * dz);
+    // Geometric pure-pursuit road-wheel angle demand (radians)
+    const pursuitAngle = Math.atan2(2 * wheelBase * lx, dist2);
 
     const isFacingBackwards = Math.abs(rawHeadingToTrack) > Math.PI * 0.55;
-    if (recovering && isFacingBackwards) {
-      headingError = Math.sign(rawHeadingToTrack) * -1.2;
-    }
+    const rejoinHeadingError = (recovering && isFacingBackwards)
+      ? Math.sign(rawHeadingToTrack) * -1.2
+      : 0;
 
-    // Stanley cross-track error: error = targetLateral - currentLat (positive -> steer right)
-    const crossTrackError = targetLateral - currentLat;
-    const effectiveStanleyGain = (this.stanleyGain + aggression * 0.40) * (committed ? 1.15 : 1.0);
-    const stanleyAngle = Math.atan2(
-      effectiveStanleyGain * crossTrackError,
-      this.stanleySoftening + vSpeed
+    // Bounded Stanley cross-track fine correction (radians): lateral > 0 is left; positive steer turns right
+    const crossTrackError = currentLat - targetLateral;
+    const stanleyAngle = clamp(
+      Math.atan2(this.stanleyGain * crossTrackError, this.stanleySoftening + vSpeed * 1.5),
+      -0.08,
+      0.08
     );
+    const headingError = wrapAngle(Math.atan2(dx, dz) - yaw);
 
-    // Curvature feedforward with preview (using signed curvature with turnSign)
+    // Curvature feedforward with preview (turnSign: +1 left, -1 right; steering ff: +right, -left)
     const previewDistance = clamp(vSpeed * 0.30, 2.5, 20.0);
     const previewPoint = track?.atDistance ? track.atDistance(vDist + previewDistance) : refPoint;
-    const rawCurvCurrent = finite(refPoint.curvature, 0);
-    const rawCurvPreview = finite(previewPoint.curvature, 0);
-    const signCurrent = finite(refPoint.turnSign, 0) || (rawCurvCurrent > 0.001 ? 1 : 0);
-    const signPreview = finite(previewPoint.turnSign, 0) || (rawCurvPreview > 0.001 ? 1 : 0);
+    const rawCurvCurrent = Math.abs(finite(refPoint.curvature, 0));
+    const rawCurvPreview = Math.abs(finite(previewPoint.curvature, 0));
+    const signCurrent = -finite(refPoint.turnSign, 0);
+    const signPreview = -finite(previewPoint.turnSign, 0);
     const signedCurvCurrent = signCurrent * rawCurvCurrent;
     const signedCurvPreview = signPreview * rawCurvPreview;
     const effectiveCurvature = signedCurvCurrent * 0.35 + signedCurvPreview * 0.65;
@@ -360,44 +359,56 @@ export class CoupledMPCCController {
     const satDir = Math.sign(alphaF);
     this.satAvg += (satF - this.satAvg) * clamp(safeDt * 6.0, 0, 1);
 
-    // Rear saturation guard: fade out path tracking and fade in yaw damper/countersteer
+    // Rear saturation guard: only trigger countersteer giveUp under genuine oversteer
     const satR = Math.abs(alphaR) / alphaPeak;
     this.satR = satR;
-    const giveUp = clamp((satR - 1.0) / 0.45, 0, 1);
-    const hold = 1.0 - giveUp;
+    const isOversteering = Math.abs(alphaR) > Math.abs(alphaF) + 0.035 && satR > 1.20;
+    const giveUp = isOversteering ? clamp((satR - 1.20) / 0.60, 0, 1) : 0;
+    const hold = clamp(1.0 - giveUp * 0.35, 0.65, 1.0);
 
     // Integral yaw-rate understeer gradient learner
     const rDes = effectiveCurvature * vSpeed;
     const eYaw = rDes - yawRate;
-    if (satF < 1.0 && giveUp === 0 && Math.abs(this.prevSteer) < 0.95) {
+    if (satF < 1.0 && giveUp === 0 && Math.abs(this.prevSteer) < 0.95 && Math.abs(headingError) > 0.04) {
       this.yawInt = clamp(this.yawInt + eYaw * K_YAW_I * safeDt, -K_YAW_I_MAX, K_YAW_I_MAX);
     } else {
       this.yawInt *= (1.0 - clamp(safeDt * 3.0, 0, 1));
     }
 
-    // Dynamic yaw damping & sideslip excess countersteering
+    // Dynamic yaw damping & sideslip excess countersteering (only under genuine oversteer)
     const localVx = finite(vehicle?.localVelocity?.x, 0);
     const localVz = Math.max(2.5, Math.abs(finite(vehicle?.localVelocity?.z, vSpeed)));
     const slipAngle = Math.atan2(localVx, localVz);
-    const betaRef = Math.min(Math.abs(alphaR) * BETA_SLACK + 0.035, BETA_CAP) * (1.0 - giveUp);
-    const betaExcess = slipAngle > betaRef ? slipAngle - betaRef : (slipAngle < -betaRef ? slipAngle + betaRef : 0);
+    const betaRef = Math.min(Math.abs(alphaR) * BETA_SLACK + 0.035, BETA_CAP);
+    const betaExcess = isOversteering
+      ? (slipAngle > betaRef ? slipAngle - betaRef : (slipAngle < -betaRef ? slipAngle + betaRef : 0))
+      : 0;
 
     const kYaw = this.yawDampingGain * (1.0 + GIVEUP_YAW * giveUp) * (committed ? 1.25 : 1.0);
     const kBeta = this.slipCompensationGain * (1.0 + GIVEUP_BETA * giveUp);
 
-    let rawSteerCmd = kinematicFeedforward * (1.0 - giveUp * 0.70)
-      + (headingError * this.headingGain + stanleyAngle + this.yawInt) * hold
-      - kYaw * (yawRate - rDes)
-      + kBeta * betaExcess;
+    const targetHeadingError = Number.isFinite(tacticalTarget?.headingError)
+      ? tacticalTarget.headingError
+      : headingError;
 
-    // Front-Axle Slip Saturation Guard (Anti-Plow / Anti-Scrub Back-Off)
-    if (satDir !== 0 && Math.sign(rawSteerCmd) === satDir) {
+    const headingGain = recovering ? 1.65 : (committed ? 1.35 : 1.15);
+
+    let rawSteerAngleRad = (recovering && isFacingBackwards)
+      ? rejoinHeadingError
+      : (kinematicFeedforward * (1.0 - giveUp * 0.30)
+          + (targetHeadingError * headingGain + this.yawInt) * hold
+          + kYaw * eYaw
+          + kBeta * betaExcess
+          + clamp(slipAngle * 0.35, -0.05, 0.05));
+
+    // Front-axle slip saturation back-off in radians
+    if (satDir !== 0 && Math.sign(rawSteerAngleRad) === satDir) {
       const over = clamp((satF - 1.0) / 0.10, 0, 1);
       if (over > 0) {
-        const optimalSteer = (alphaPeak * 1.12 + Math.abs(slipAngle) + (wheelBase * 0.52 * Math.abs(yawRate)) / vSpeed) / maxSteerAngle;
-        const allow = Math.max(optimalSteer, Math.abs(kinematicFeedforward) * 0.85);
-        const capped = satDir * Math.min(Math.abs(rawSteerCmd), allow);
-        rawSteerCmd += (capped - rawSteerCmd) * over;
+        const optimalSteerRad = alphaPeak * 1.15 + (wheelBase * 0.52 * Math.abs(yawRate)) / vSpeed;
+        const allow = Math.max(optimalSteerRad, Math.abs(kinematicFeedforward) * 0.85);
+        const capped = satDir * Math.min(Math.abs(rawSteerAngleRad), allow);
+        rawSteerAngleRad += (capped - rawSteerAngleRad) * over;
       }
     }
 
@@ -408,11 +419,11 @@ export class CoupledMPCCController {
       ? 0.85
       : (giveUp > 0.1 ? Math.max(baseLimit, 0.65) : baseLimit);
 
-    const targetSteer = clamp(rawSteerCmd, -maxSteerLimit, maxSteerLimit);
+    const targetSteer = clamp(rawSteerAngleRad / maxSteerAngle, -maxSteerLimit, maxSteerLimit);
 
-    // Actuator slew rate limiting
+    // Actuator slew rate limiting: rapid unwinding prevents snap-back overshoot
     const isUnwinding = Math.sign(targetSteer) !== Math.sign(this.prevSteer) || Math.abs(targetSteer) < Math.abs(this.prevSteer);
-    const activeRate = isUnwinding ? this.steerRate * 1.5 : this.steerRate;
+    const activeRate = isUnwinding ? 16.0 : (recovering ? 14.0 : (committed ? 11.0 : 9.0));
     const maxDelta = activeRate * clamp(safeDt, 0.005, 0.05);
 
     const steer = clamp(
@@ -453,13 +464,12 @@ export class CoupledMPCCController {
       throttle = 0;
       rawBrake = clamp((-speedError - Math.abs(coastThreshold)) * 0.38 + 0.15, 0.10, 1.0);
 
-      if (isCornering || latUtilization > 0.12) {
+      brake = rawBrake;
+      if (isCornering || latUtilization > 0.08) {
         trailBrakingActive = true;
         const latFactor = clamp(this.trailBrakingSkill * latUtilization * 0.90, 0, 0.98);
         trailFactor = Math.sqrt(Math.max(0.04, 1.0 - Math.pow(latFactor, 2)));
-        brake = clamp(rawBrake * trailFactor * remainingLongBudget, 0.04, 1.0);
-      } else {
-        brake = rawBrake;
+        brake = Math.min(rawBrake, trailFactor);
       }
     } else if (speedError <= 0) {
       // Coasting / momentum carry
@@ -492,8 +502,8 @@ export class CoupledMPCCController {
       }
     }
 
-    // Rear axle saturation slip stabilization: prevent snap oversteer
-    if (Math.abs(alphaR) > alphaPeak * 1.05) {
+    // Rear axle saturation slip stabilization: prevent snap oversteer at speed
+    if (vSpeed > 8.0 && Math.abs(alphaR) > alphaPeak * 1.05) {
       const overR = Math.abs(alphaR) / alphaPeak - 1.05;
       if (throttle > 0) {
         throttle = Math.max(0.20, throttle * clamp(1.0 - overR * 3.2, 0.20, 1.0));
@@ -503,17 +513,22 @@ export class CoupledMPCCController {
       }
     }
 
-    // Rate-limit brake pressure
-    const maxBrakeRate = brake > this.prevBrake ? 24.0 : 18.0;
-    const maxBrakeDelta = maxBrakeRate * clamp(safeDt, 0.005, 0.05);
-    brake = clamp(
-      this.prevBrake + clamp(brake - this.prevBrake, -maxBrakeDelta, maxBrakeDelta),
-      0,
-      1.0
-    );
+    // Rate-limit brake pressure (immediate release when accelerating)
+    if (speedError >= 0 || throttle > 0.05) {
+      brake = 0;
+      this.prevBrake = 0;
+    } else {
+      const maxBrakeRate = brake > this.prevBrake ? 24.0 : 18.0;
+      const maxBrakeDelta = maxBrakeRate * clamp(safeDt, 0.005, 0.05);
+      brake = clamp(
+        this.prevBrake + clamp(brake - this.prevBrake, -maxBrakeDelta, maxBrakeDelta),
+        0,
+        1.0
+      );
+      this.prevBrake = brake;
+    }
 
     this.prevThrottle = throttle;
-    this.prevBrake = brake;
 
     // 5. Update Zero-GC Prediction Horizon for 3D Visual Telemetry Overlays
     const dtHorizon = this.horizonS / (this.nodeCount - 1);

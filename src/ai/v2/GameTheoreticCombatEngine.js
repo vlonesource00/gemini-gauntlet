@@ -1,8 +1,8 @@
 /**
  * GameTheoreticCombatEngine.js (V2 Layer 2)
- * Adversarial Game-Theoretic Racecraft Engine:
- * - Formulates Attack and Defense as dynamic Stackelberg Leader-Follower & Iterative Best Response (IBR) games
- * - Defense (Stackelberg Leader):
+ * Predictive Adversarial Racecraft Engine:
+ * - Dynamic tactical attack and defense state transitions with multi-agent threat assessment
+ * - Defense:
  *     - Proactive inside lane claim up to 45m ahead of braking zones
  *     - FIA Single Defensive Move Rule enforcement & anti-weave feint filtering
  *     - Apex shielding (APEX_SHIELD): pins inside apex curb tight (0.35m-0.5m margin)
@@ -232,7 +232,8 @@ export class GameTheoreticCombatEngine {
     }
 
     // Sample Layer 1 globally optimal baseline profile
-    const optimalSample = optimalProfile?.sampleAtDistance?.(vDist) ?? {
+    const vClass = vehicle?.classKey || 'gt';
+    const optimalSample = optimalProfile?.sampleAtDistance?.(vDist, vClass) ?? {
       lateral: 0,
       lineLateral: 0,
       targetSpeed: Math.max(25.0, vSpeed),
