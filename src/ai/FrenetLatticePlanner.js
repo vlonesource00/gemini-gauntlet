@@ -760,6 +760,14 @@ export class FrenetLatticePlanner {
       }
     }
 
+    const corridorSpan = maxBound - minBound;
+    if (corridorSpan > 0.1) {
+      const stepCount = 7;
+      for (let i = 0; i <= stepCount; i++) {
+        rawPool.push(minBound + (i / stepCount) * corridorSpan);
+      }
+    }
+
     if (!recovering && Math.abs(intendedOffset - currentLateral) > 0.4) {
       rawPool.push(
         currentLateral + 0.33 * (intendedOffset - currentLateral),
