@@ -112,17 +112,17 @@ export class AnalyticalPerfModel {
   }
 
   latAccel(v) {
-    const baseG = (this.key === 'prototype' ? 1.55 : (this.key === 'gt' ? 1.25 : 1.05));
-    const maxG = (this.key === 'prototype' ? 2.04 : (this.key === 'gt' ? 1.58 : 1.28));
-    const downforceG = (this.downforce(v) / Math.max(1, this.weight)) * (this.key === 'prototype' ? 0.38 : 0.25);
+    const baseG = (this.key === 'prototype' ? 1.55 : (this.key === 'gt' ? 1.14 : 0.98));
+    const maxG = (this.key === 'prototype' ? 2.04 : (this.key === 'gt' ? 1.25 : 1.10));
+    const downforceG = (this.downforce(v) / Math.max(1, this.weight)) * (this.key === 'prototype' ? 0.38 : 0.10);
     const latG = Math.min(maxG, baseG + downforceG);
     return latG * G;
   }
 
   brakeAccel(v, grade = 0) {
-    const baseG = (this.key === 'prototype' ? 1.95 : (this.key === 'gt' ? 1.35 : 1.10));
-    const maxG = (this.key === 'prototype' ? 2.85 : (this.key === 'gt' ? 1.85 : 1.45));
-    const downforceG = (this.downforce(v) / Math.max(1, this.weight)) * (this.key === 'prototype' ? 0.65 : 0.40);
+    const baseG = (this.key === 'prototype' ? 1.95 : (this.key === 'gt' ? 0.90 : 0.75));
+    const maxG = (this.key === 'prototype' ? 2.85 : (this.key === 'gt' ? 1.15 : 0.95));
+    const downforceG = (this.downforce(v) / Math.max(1, this.weight)) * (this.key === 'prototype' ? 0.65 : 0.15);
     const brakeG = Math.min(maxG, baseG + downforceG);
     return brakeG * G + G * Math.sin(grade);
   }

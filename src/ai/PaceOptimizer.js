@@ -149,13 +149,13 @@ export class PaceOptimizer {
 
     // Calibrated realistic mechanical + aero lateral G matching vehicle physics limits:
     // Prototype: 1.58g at low speed up to 2.02g at high speed (matches human benchmark 2.04g max)
-    // GT: 1.26g to 1.55g
-    // Touring: 1.05g to 1.28g
+    // GT: 1.14g to 1.22g (calibrated to Astra GT plant)
+    // Touring: 0.98g to 1.06g
     const classBaseG = vehicleClass === 'prototype'
       ? (1.58 + 0.44 * downforceFactor)
       : vehicleClass === 'gt'
-        ? (1.26 + 0.28 * downforceFactor)
-        : (1.05 + 0.22 * downforceFactor);
+        ? (1.14 + 0.08 * downforceFactor)
+        : (0.98 + 0.08 * downforceFactor);
     const peakG = classBaseG * tireGripFactor * aeroEffective * (0.88 + skill * 0.12);
 
     // Banking bonus: a_lat_eff = g * (peakG * cos(theta) + sin(theta))
@@ -220,9 +220,10 @@ export class PaceOptimizer {
     // 1. Calibrate dynamic sustained braking deceleration capacity a_B (m/s²)
     // Must reflect realistic full-braking zone average capability (including low-speed transition)
     // Prototype: average 15.2 - 18.5 m/s² (matches human benchmark average with ramp-up)
+    // GT: average 8.0 - 9.2 m/s² (calibrated to Astra GT plant friction circle)
     const baseDecel = vClass === 'prototype'
       ? (15.2 + clamp(vSpeed * 0.05, 0, 3.2))
-      : (vClass === 'gt' ? (10.8 + clamp(vSpeed * 0.03, 0, 2.0)) : 8.8);
+      : (vClass === 'gt' ? (8.0 + clamp(vSpeed * 0.02, 0, 1.2)) : 6.5);
     const brakingDecel = baseDecel * tireGripFactor * (0.86 + aggression * 0.12);
 
     // 2. Exact multi-distance lookahead scanning distances
@@ -231,7 +232,9 @@ export class PaceOptimizer {
     ];
 
     let speedLimit = 95.0; // Track velocity ceiling
-    const previewBuffer = clamp(vSpeed * 0.08, 2.5, 6.0);
+    const previewBuffer = vClass === 'prototype'
+      ? clamp(vSpeed * 0.08, 2.5, 6.0)
+      : Math.max(2.5, vSpeed * 0.18);
 
     const derate = this._derate({ vehicle, track, targetOffset: insideLineOffset });
     const effectiveSkill = (skill ?? 0.85) * this.paceTrim * derate;
@@ -532,15 +535,7 @@ export class PaceOptimizer {
       trailBrakingActive = true;
       const latFactor = clamp(this.trailBrakingSkill * friction.latUtilization * 0.90, 0, 0.98);
       const remainingLongitudinal = Math.sqrt(Math.max(0.04, 1.0 - Math.pow(latFactor, 2)));
-      // If vehicle is significantly overspeed (speedError < -2.5 m/s), prioritize slowing down
-      // so the car does not carry runaway speed off the track
-      if (speedError < -2.5) {
-        const urgency = clamp((-speedError - 2.5) / 5.0, 0, 1);
-        const minBrake = 0.75 * urgency;
-        brake = Math.max(minBrake, Math.min(brake, remainingLongitudinal));
-      } else {
-        brake = Math.min(brake, remainingLongitudinal);
-      }
+      brake = Math.min(brake, remainingLongitudinal);
     }
 
     // 4. Rear-Axle Saturation Slip Guard & Slide Stabilization
@@ -553,7 +548,7 @@ export class PaceOptimizer {
       if (throttle > 0) {
         throttle = Math.max(0.20, throttle * clamp(1.0 - over * 3.2, 0.20, 1.0));
       }
-      if (brake > 0 && friction.latUtilization > 0.35 && speedError >= -2.5) {
+      if (brake > 0 && friction.latUtilization > 0.35) {
         brake *= clamp(1.0 - over * 2.5, 0.25, 1.0);
       }
     }

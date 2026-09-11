@@ -348,7 +348,7 @@ export class ResearchAIController {
     const currentPoint = track?.atDistance ? track.atDistance(vehicle.distance) : { curvature: 0, turnSign: 0 };
     const rawCurv = finite(currentPoint?.curvature, 0);
     const sign = finite(currentPoint?.turnSign, 0) || (rawCurv > 0.001 ? 1 : 0);
-    const signedCurv = sign * rawCurv;
+    const signedCurv = -sign * rawCurv;
     const currentCurv = Math.abs(rawCurv);
 
     // Curvature-Adaptive Apex Lookahead Horizon
@@ -641,13 +641,12 @@ export class ResearchAIController {
 
     // 8. Low-Level Pedal Control & Trail Braking
     const speedError = desiredSpeed - vehicle.speed;
-    const pedalSpeedError = speedError < -0.2 ? Math.min(-6.5, speedError * 2.5 - 3.5) : speedError;
     const straight = Math.abs(signedCurv) < 0.0030;
     const liveLatAccel = Math.abs(finite(vehicle.speed, 0) * finite(vehicle.yawRate, 0));
 
     const pedals = this.paceOptimizer.computePedals({
       vehicle,
-      speedError: pedalSpeedError,
+      speedError,
       desiredSpeed,
       headingError,
       lateralAccel: liveLatAccel,

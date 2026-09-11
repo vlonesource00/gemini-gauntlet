@@ -81,11 +81,9 @@ export class CombatDynamicsEngine {
       
       steer = clamp(counterSteer, -maxCounterSteer, maxCounterSteer);
 
-      // Stability throttle: maintain baseline drive torque (0.25) to prevent snap lift-off oversteer,
-      // while capping upper throttle (0.45) to prevent excessive wheelspin power oversteer.
-      if (brake < 0.05) {
-        throttle = clamp(throttle, 0.25, 0.45);
-      }
+      // Emergency breakaway throttle cap: cap upper throttle to prevent excessive
+      // wheelspin power-oversteer without forcing a minimum throttle floor during an active spin
+      throttle = Math.min(throttle, 0.25);
     }
 
     return {
