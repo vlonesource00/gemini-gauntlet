@@ -753,6 +753,13 @@ export class FrenetLatticePlanner {
           margin * 0.65
         ];
 
+    if (!recovering) {
+      const spanSteps = [-0.85, -0.65, -0.45, -0.25, 0.25, 0.45, 0.65, 0.85];
+      for (const factor of spanSteps) {
+        rawPool.push(factor * margin);
+      }
+    }
+
     if (!recovering && Math.abs(intendedOffset - currentLateral) > 0.4) {
       rawPool.push(
         currentLateral + 0.33 * (intendedOffset - currentLateral),
