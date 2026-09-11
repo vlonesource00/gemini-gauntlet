@@ -1017,10 +1017,50 @@ export class FrenetLatticePlanner {
       addVisualCandidate(cand);
     }
 
-    // 7. Fill remainder up to 28-32 candidates from remaining candidate pool
+    // 7. Fill remainder up to 24-30 candidates from remaining candidate pool
     for (const cand of candidateTrajectories) {
       if (visualCandidates.length >= 30) break;
       addVisualCandidate(cand);
+    }
+
+    // 8. If traffic or tight corridor filtered control pool below 24 candidates,
+    // evaluate remaining exploration offsets strictly for diagnostic introspection
+    if (visualCandidates.length < 24) {
+      const extraOffsets = uniqueOffsets(candidatePool.concat(rawPool), -margin * 1.05, margin * 1.05, 0.12);
+      for (const offset of extraOffsets) {
+        if (visualCandidates.length >= 26) break;
+        if (candidateTrajectories.some((c) => Math.abs(c.terminalLateral - offset) < 0.12)) continue;
+        for (const scale of defaultScales) {
+          if (visualCandidates.length >= 26) break;
+          const diagCand = this._evaluateCandidate({
+            vehicle,
+            track,
+            startLateral: currentLateral,
+            terminalLateral: offset,
+            desiredOffset: intendedOffset,
+            transitionTime: nominalTransition * scale,
+            targetSpeed,
+            trafficEntries,
+            roadMargin: margin,
+            committed: urgentManeuver,
+            aggression: clamp(finite(aggression, 0.5), 0, 1),
+            horizon,
+            targetId,
+            referenceLineAtDistance,
+            kerbAllowance,
+            intentType: 'EXPLORATION',
+            racecraftPhase,
+            weights,
+            curve: null,
+            startV,
+            startA,
+            previousPlan,
+            dtSinceLastPlan
+          });
+          diagCand.selected = false;
+          addVisualCandidate(diagCand);
+        }
+      }
     }
 
     for (const cand of visualCandidates) {
