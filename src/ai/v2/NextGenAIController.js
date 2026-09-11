@@ -504,7 +504,26 @@ export class NextGenAIController {
       desiredSpeed = Math.min(desiredSpeed, optCurrent.targetSpeed);
     }
     if (Number.isFinite(tactical.desiredSpeed) && tactical.desiredSpeed > 0) {
-      desiredSpeed = clamp(tactical.desiredSpeed, physicalTargetSpeed * 0.70, physicalTargetSpeed * 1.15);
+      // Context-sensitive tactical overspeed schedule:
+      // Straights (|curv| < 0.003): up to +12-15% for draft/slingshot
+      // Mild bends (0.003 <= |curv| < 0.008): +4-7%
+      // Real corners (|curv| >= 0.008): +0-2% (physical target acts as ceiling)
+      // Elevated stability risk: 0% or slightly below baseline to prevent overdriving
+      const curvAbs = Math.abs(signedCurv);
+      const stabilityRisk = this.coupledMPCC?.telemetry?.stabilityRisk ?? 0;
+      let overspeedCap = 1.0;
+      if (stabilityRisk > 0.35) {
+        overspeedCap = 0.96;
+      } else if (stabilityRisk > 0.15) {
+        overspeedCap = 1.00;
+      } else if (curvAbs < 0.0030) {
+        overspeedCap = 1.15;
+      } else if (curvAbs < 0.0080) {
+        overspeedCap = 1.06;
+      } else {
+        overspeedCap = 1.02;
+      }
+      desiredSpeed = clamp(tactical.desiredSpeed, physicalTargetSpeed * 0.70, physicalTargetSpeed * overspeedCap);
     }
     desiredSpeed = Math.min(desiredSpeed, supervisor.maxSpeed);
 

@@ -39,6 +39,7 @@ export class CombatDynamicsEngine {
       finite(vehicle?.localVelocity?.x, 0),
       Math.max(2.0, Math.abs(finite(vehicle?.localVelocity?.z, vSpeed)))
     );
+    const absSlip = Math.abs(slipAngle);
 
     // =========================================================================
     // 1. CONTACT-TOLERANT LATERAL RUBBING EQUILIBRIUM
@@ -54,8 +55,8 @@ export class CombatDynamicsEngine {
       // Genuine side-by-side rubbing contact (< 1.85m separation)
       if (Math.abs(longGap) < this.carLength * 0.85 && Math.abs(latGap) < this.carWidth * 0.90) {
         this.rubbingActive = true;
-        // Never lift or brake due to light side-by-side rubbing contact!
-        if (throttle > 0.1 && brake < 0.05) {
+        // Maintain drive momentum during side-by-side rubbing contact unless already breaking away
+        if (throttle > 0.1 && brake < 0.05 && absSlip < 0.20) {
           throttle = Math.max(throttle, 0.45);
         }
         break;
@@ -63,28 +64,27 @@ export class CombatDynamicsEngine {
     }
 
     // =========================================================================
-    // 2. SLIP-SLOPE EXTREMUM SEEKING & POWER-SLIDE COUNTER-STEER
+    // 2. LAST-LINE EMERGENCY SPIN BREAKAWAY CATCH
     // =========================================================================
-    // Dynamic breakaway threshold: Prototype tires generate peak lateral load at ~6.5° (0.115 rad).
-    // Genuine oversteer breakaway occurs at > 7.5° (0.130 rad).
-    // Oversteer breakaway occurs when body slip and yaw rate exceed critical limits of tire adhesion
-    const absSlip = Math.abs(slipAngle);
-    const isSpinBreakaway = absSlip > 0.38 && Math.abs(yawRate) > 1.45;
+    // Emergency catch activates under severe yaw/sideslip excursions (> 0.26 rad ~ 15 deg)
+    // where upstream feedback was insufficient to prevent breakaway.
+    const isSpinBreakaway = absSlip > 0.26 && Math.abs(yawRate) > 1.25;
     this.powerSlideActive = false;
 
     if (isSpinBreakaway && vSpeed > 3.0) {
       this.powerSlideActive = true;
-      const excessSlip = absSlip - 0.32;
+      const excessSlip = absSlip - 0.22;
 
-      const maxCounterSteer = clamp(3.6 / Math.max(4.0, vSpeed) + 0.08, 0.12, 0.45);
+      const maxCounterSteer = clamp(3.8 / Math.max(4.0, vSpeed) + 0.10, 0.15, 0.55);
       // Active countersteer opposite to yaw rate to arrest yaw angular momentum
-      const counterSteer = -Math.sign(yawRate) * clamp(excessSlip * 1.2 + Math.abs(yawRate) * 0.10, 0.05, maxCounterSteer);
+      const counterSteer = -Math.sign(yawRate) * clamp(excessSlip * 1.35 + Math.abs(yawRate) * 0.12, 0.08, maxCounterSteer);
       
       steer = clamp(counterSteer, -maxCounterSteer, maxCounterSteer);
 
-      // Stability throttle: maintain drive torque to prevent snap lift-off oversteer
+      // Stability throttle: maintain baseline drive torque (0.25) to prevent snap lift-off oversteer,
+      // while capping upper throttle (0.45) to prevent excessive wheelspin power oversteer.
       if (brake < 0.05) {
-        throttle = clamp(throttle, 0.25, 0.65);
+        throttle = clamp(throttle, 0.25, 0.45);
       }
     }
 

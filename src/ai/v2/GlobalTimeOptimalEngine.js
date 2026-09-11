@@ -30,7 +30,7 @@ function getTrackCacheKey(track, roadHalfWidth, curbWidth, specFingerprint = '')
   const rw = finite(track.roadHalfWidth ?? roadHalfWidth, 8.2).toFixed(2);
   const cw = finite(track.curbWidth ?? curbWidth, 1.25).toFixed(2);
   const sampleCount = track.samples?.length ?? 0;
-  return `v4_${id}_${length}_${rw}_${cw}_${sampleCount}_${specFingerprint}`;
+  return `v5_${id}_${length}_${rw}_${cw}_${sampleCount}_${specFingerprint}`;
 }
 
 /**
@@ -43,33 +43,46 @@ export class AnalyticalPerfModel {
     this.key = typeof specKey === 'string' ? specKey : (spec.classKey || 'custom');
     this.mass = finite(spec.mass, 1290);
     this.weight = this.mass * G;
-    this.wheelBase = finite(spec.wheelBase, 2.70);
-    this.cgHeight = finite(spec.cgHeight, 0.35);
-    this.weightFront = finite(spec.weightFront, 0.50);
-    this.tireMu = finite(spec.tireMu ?? spec.tire?.grip, (this.key === 'prototype' ? 1.65 : (this.key === 'gt' ? 1.25 : 1.05)));
-    this.wheelRadius = finite(spec.wheelRadius, 0.33);
-    this.loadSensitivity = finite(spec.tire?.loadSensitivity || spec.loadSensitivity, 0.15);
+    this.wheelBase = finite(spec.wheelBase ?? spec.wheelbase, 2.78);
+    this.trackWidth = finite(spec.trackWidth ?? spec.track, 1.72);
+    this.cgHeight = finite(spec.cgHeight ?? spec.cg, 0.43);
+    this.weightFront = finite(spec.weightFront ?? spec.frontWeight, 0.47);
+    this.wheelRadius = finite(spec.wheelRadius ?? spec.radius, 0.335);
+    this.wheelInertia = finite(spec.wheelInertia, 1.9);
+    this.yawInertia = finite(spec.yawInertia, 2030);
+    this.steeringLock = finite(spec.steeringLock, 0.48);
+    this.loadSensitivity = finite(spec.tire?.loadSensitivity ?? spec.loadSensitivity, 0.13);
+
+    // Tire friction coefficient: separate grip scale from physical friction coefficient mu.
+    // In Astra, physical lateral force peak is 1.48 * tyreGrip.
+    const rawMu = spec.tireMu ?? spec.tire?.frictionCoeff ?? (spec.tire?.grip != null ? spec.tire.grip * 1.48 : (spec.tyreGrip != null ? spec.tyreGrip * 1.48 : null));
+    this.tireMu = finite(rawMu, (this.key === 'prototype' ? 1.65 : (this.key === 'gt' ? 1.48 : 1.15)));
 
     // Aero
     const aero = spec.aero || {};
-    this.area = finite(aero.area, 1.9);
-    this.cd = finite(aero.cd, 0.64);
-    this.clFront = finite(aero.frontCl, (aero.cl ? aero.cl * 0.45 : 0.88));
-    this.clRear = finite(aero.rearCl, (aero.cl ? aero.cl * 0.55 : 1.16));
-    this.clTotal = (aero.cl != null) ? aero.cl : (this.clFront + this.clRear);
+    this.area = finite(aero.area ?? spec.area, 1.9);
+    this.cd = finite(aero.cd ?? spec.cd, 0.64);
+    const frontAero = finite(spec.frontAero ?? aero.frontAero, 0.43);
+    const clTotal = (aero.cl != null) ? aero.cl : ((spec.cl != null) ? spec.cl : 2.25);
+    this.clFront = finite(aero.frontCl, clTotal * frontAero);
+    this.clRear = finite(aero.rearCl, clTotal * (1 - frontAero));
+    this.clTotal = clTotal;
     this.groundEffect = finite(aero.groundEffect, 0);
     this.designRideHeight = finite(aero.designRideHeight, 0.06);
 
     // Drivetrain & Brakes
-    this.maxTorque = finite(spec.maxTorqueNm, 650);
-    this.gearRatios = (Array.isArray(spec.gearRatios) && spec.gearRatios.length > 1)
-      ? spec.gearRatios.slice(1)
-      : (spec.gearRatios || [3.0, 2.1, 1.6, 1.3, 1.1, 0.9]);
-    this.finalDrive = finite(spec.finalDrive, 3.4);
+    this.maxTorque = finite(spec.maxTorqueNm ?? spec.maxTorque, 575);
+    const rawGears = spec.gearRatios ?? spec.gears;
+    if (Array.isArray(rawGears) && rawGears.length > 1) {
+      this.gearRatios = rawGears[0] === 0 ? rawGears.slice(1) : rawGears;
+    } else {
+      this.gearRatios = [3.05, 2.12, 1.62, 1.29, 1.06, 0.88];
+    }
+    this.finalDrive = finite(spec.finalDrive, 3.8);
     this.efficiency = finite(spec.drivetrainEfficiency, 0.92);
-    this.maxBrakeTorque = finite(spec.maxBrakeTorque, (this.key === 'prototype' ? 7500 : (this.key === 'gt' ? 6200 : 5800)));
+    this.maxBrakeTorque = finite(spec.maxBrakeTorque ?? spec.brakeTorque, 6200);
     this.brakeBias = finite(spec.brakeBias, 0.58);
-    this.isFWD = spec.drive === 'front';
+    this.isFWD = (spec.drive ?? 'rear') === 'front';
 
     // Fast tabulated performance arrays on a 0.5 m/s grid
     this.topSpeed = this._calcTopSpeed();

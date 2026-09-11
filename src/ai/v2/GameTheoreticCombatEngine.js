@@ -102,6 +102,9 @@ export class GameTheoreticCombatEngine {
     this.targetLockTimer = 0;
     this.attackTimer = 0;
     this.attackIntensity = 0;
+    this.attackSide = 0;
+    this.attackSideLocked = false;
+    this.passClearDwell = 0;
     this.switchbackStage = 'NONE';
     this.divebombCommitted = false;
 
@@ -269,14 +272,25 @@ export class GameTheoreticCombatEngine {
       ? entries.find((e) => e.other?.id === this.attackTargetId)
       : null;
 
-    if (activeAttackEntry && (activeAttackEntry.delta < -1.8 || (activeAttackEntry.delta < 0.2 && vSpeed >= finite(activeAttackEntry.other?.speed, 0) + 2.0 && this.attackTimer > 1.0))) {
-      this.passedTargetId = this.attackTargetId;
-      this.targetLockTimer = 16.0;
-      this.attackMode = 'NONE';
-      this.attackTargetId = null;
-      this.attackTimer = 0;
-      this.divebombCommitted = false;
-      this.switchbackStage = 'NONE';
+    const requiredPassClearance = this.carLength + 0.65;
+    if (activeAttackEntry) {
+      if (activeAttackEntry.delta < -requiredPassClearance) {
+        this.passClearDwell += dt;
+        if (this.passClearDwell >= 0.20) {
+          this.passedTargetId = this.attackTargetId;
+          this.targetLockTimer = 16.0;
+          this.attackMode = 'NONE';
+          this.attackTargetId = null;
+          this.attackTimer = 0;
+          this.divebombCommitted = false;
+          this.switchbackStage = 'NONE';
+          this.attackSideLocked = false;
+          this.attackSide = 0;
+          this.passClearDwell = 0;
+        }
+      } else {
+        this.passClearDwell = 0;
+      }
     }
 
     const targetAhead = entries.find((e) => {
@@ -421,95 +435,125 @@ export class GameTheoreticCombatEngine {
       const isInsideOpen = Math.abs(opponentLat - insideOffset) > 1.6;
       const isSideBySide = Math.abs(gap) < this.carLength * 1.35;
 
-      if (gap < -2.2) {
-        this.passedTargetId = this.attackTargetId;
-        this.targetLockTimer = 16.0;
-        this.attackMode = 'NONE';
-        this.attackTargetId = null;
-        this.attackTimer = 0;
-        this.divebombCommitted = false;
-        this.switchbackStage = 'NONE';
-        isAttacking = false;
-      } else if (isSideBySide) {
-        // Resilient Side-by-Side Overlap Combat (Never back out, keep assigned established flank)
-        this.attackMode = 'SIDE_BY_SIDE';
-        const mySide = currentLat >= opponentLat ? 1 : -1;
-        atkTargetLat = clamp(opponentLat + mySide * (this.carWidth + 0.65), -maxMargin, maxMargin);
-        atkDesiredSpeed = Math.max(optimalSample.targetSpeed, targetSpeed + 6.5);
-        atkNotes = 'ATTACK_SIDE_BY_SIDE_HOLD';
-      } else if (isStraight && gap > 4.5) {
-        // High-Speed Slipstream Slingshot (+18 m/s closing speed floor)
-        this.attackMode = 'SLINGSHOT';
-        const straightClosingFloor = 14.0 + aggression * 4.5;
-        atkDesiredSpeed = Math.max(optimalSample.targetSpeed, targetSpeed + straightClosingFloor);
-
-        const dynamicPulloutDist = clamp(closingSpeed * 1.2 + 4.5, 6.0, 24.0);
-        const shouldPullOut = gap <= dynamicPulloutDist || gap < 15.0;
-
-        if (shouldPullOut) {
-          const pullSide = opponentLat >= 0 ? -1 : 1;
-          atkTargetLat = clamp(opponentLat + pullSide * 3.6, -maxMargin, maxMargin);
-          atkNotes = 'ATTACK_SLINGSHOT_PUNCH_OUT';
-        } else {
-          // Ride the slipstream tow pocket directly behind
-          atkTargetLat = clamp(opponentLat, -maxMargin * 0.88, maxMargin * 0.88);
-          atkNotes = 'ATTACK_SLINGSHOT_DRAFTING';
-        }
-      } else if (isApproachingCorner && isInsideOpen && gap < 28.0 && vSpeed > 22.0 && closingSpeed > 0.5) {
-        // Fearless Inside Apex Divebomb (-3.6G threshold trail-braking delta)
-        this.attackMode = 'DIVEBOMB';
-        this.divebombCommitted = true;
-        this.attackIntensity = 0.96;
-        atkTargetLat = insideOffset;
-
-        if (multiApex.isChicane) {
-          atkDesiredSpeed = Math.max(optimalSample.targetSpeed * 0.99, targetSpeed + 6.0);
-          atkNotes = 'ATTACK_CHICANE_IBR_DIVEBOMB';
-        } else {
-          atkDesiredSpeed = Math.max(optimalSample.targetSpeed, targetSpeed + 6.5 + aggression * 3.5);
-          atkNotes = 'ATTACK_FEARLESS_IBR_DIVEBOMB';
-        }
-      } else if (isApproachingCorner && !isInsideOpen && gap < 28.0 && vSpeed > 22.0) {
-        // Diamond Line Switchback Undercut (Late apex counter to inside defender)
-        this.attackMode = 'SWITCHBACK';
-        this.attackIntensity = 0.90;
-        const isAtApex = multiApex.primaryDist < 12.0;
-
-        if (!isAtApex) {
-          this.switchbackStage = 'ENTRY_WIDE';
-          atkTargetLat = clamp(-primaryInsideSign * (maxMargin * 0.82), -maxMargin, maxMargin);
-          atkDesiredSpeed = optimalSample.targetSpeed * 0.97;
-          atkNotes = 'ATTACK_SWITCHBACK_WIDE_ENTRY';
-        } else {
-          this.switchbackStage = 'EXIT_UNDERCUT';
-          atkTargetLat = clamp(primaryInsideSign * (maxMargin * 0.50), -maxMargin, maxMargin);
-          atkDesiredSpeed = Math.max(optimalSample.targetSpeed * 1.10, targetSpeed + 7.0);
-          atkNotes = 'ATTACK_SWITCHBACK_EXIT_UNDERCUT';
+      if (gap < -requiredPassClearance) {
+        this.passClearDwell += dt;
+        if (this.passClearDwell >= 0.20) {
+          this.passedTargetId = this.attackTargetId;
+          this.targetLockTimer = 16.0;
+          this.attackMode = 'NONE';
+          this.attackTargetId = null;
+          this.attackTimer = 0;
+          this.divebombCommitted = false;
+          this.switchbackStage = 'NONE';
+          this.attackSideLocked = false;
+          this.attackSide = 0;
+          this.passClearDwell = 0;
+          isAttacking = false;
         }
       } else {
-        // Dynamic Overtake Corridor Selection (Dual-Flank Bypass)
-        const isSlower = targetSpeed < vSpeed - 1.5 || targetSpeed < 20.0 || gap < 22.0;
-        if (isSlower) {
-          this.attackMode = 'OVERTAKE';
-          const leftSpace = maxMargin + opponentLat;
-          const rightSpace = maxMargin - opponentLat;
-          const minPassWidth = this.carWidth + 0.65;
-          let passSide = 0;
-          if (currentLat > opponentLat + 0.35 && rightSpace >= minPassWidth) {
-            passSide = 1;
-          } else if (currentLat < opponentLat - 0.35 && leftSpace >= minPassWidth) {
-            passSide = -1;
-          } else {
-            passSide = leftSpace >= rightSpace ? -1 : 1;
+        this.passClearDwell = 0;
+      }
+
+      if (isAttacking) {
+        if (isSideBySide) {
+          // Resilient Side-by-Side Overlap Combat (Keep assigned locked flank with guaranteed daylight)
+          this.attackMode = 'SIDE_BY_SIDE';
+          if (!this.attackSideLocked || this.attackSide === 0) {
+            this.attackSide = currentLat >= opponentLat ? 1 : -1;
+            this.attackSideLocked = true;
           }
-          const targetPassOffset = opponentLat + passSide * Math.min(3.2, Math.max(minPassWidth, (passSide < 0 ? leftSpace : rightSpace) * 0.55));
-          atkTargetLat = clamp(targetPassOffset, -maxMargin, maxMargin);
-          atkDesiredSpeed = Math.max(optimalSample.targetSpeed, targetSpeed + 6.0 + aggression * 3.5);
-          atkNotes = 'ATTACK_OVERTAKE_BYPASS';
+          const mySide = this.attackSide;
+          const minDaylight = 0.35;
+          atkTargetLat = clamp(opponentLat + mySide * (this.carWidth + minDaylight), -maxMargin, maxMargin);
+          atkDesiredSpeed = Math.min(optimalSample.targetSpeed * 1.04, Math.max(optimalSample.targetSpeed * 0.95, targetSpeed + 2.5));
+          atkNotes = 'ATTACK_SIDE_BY_SIDE_HOLD';
+        } else if (isStraight && gap > 4.5) {
+          // High-Speed Slipstream Slingshot
+          this.attackMode = 'SLINGSHOT';
+          const straightClosingFloor = 10.0 + aggression * 3.5;
+          atkDesiredSpeed = Math.max(optimalSample.targetSpeed, targetSpeed + straightClosingFloor);
+
+          const dynamicPulloutDist = clamp(closingSpeed * 1.2 + 4.5, 6.0, 24.0);
+          const shouldPullOut = gap <= dynamicPulloutDist || gap < 15.0;
+
+          if (shouldPullOut) {
+            if (!this.attackSideLocked || this.attackSide === 0) {
+              this.attackSide = opponentLat >= 0 ? -1 : 1;
+            }
+            const pullSide = this.attackSide;
+            atkTargetLat = clamp(opponentLat + pullSide * 3.2, -maxMargin, maxMargin);
+            atkNotes = 'ATTACK_SLINGSHOT_PUNCH_OUT';
+          } else {
+            // Ride the slipstream tow pocket directly behind
+            atkTargetLat = clamp(opponentLat, -maxMargin * 0.88, maxMargin * 0.88);
+            atkNotes = 'ATTACK_SLINGSHOT_DRAFTING';
+          }
+        } else if (isApproachingCorner && isInsideOpen && gap < 28.0 && vSpeed > 22.0 && closingSpeed > 0.5) {
+          // Inside Apex Pass
+          this.attackMode = 'DIVEBOMB';
+          this.divebombCommitted = true;
+          this.attackIntensity = 0.96;
+          if (!this.attackSideLocked || this.attackSide === 0) {
+            this.attackSide = primaryInsideSign;
+            this.attackSideLocked = true;
+          }
+          atkTargetLat = insideOffset;
+
+          if (multiApex.isChicane) {
+            atkDesiredSpeed = Math.max(optimalSample.targetSpeed * 0.99, targetSpeed + 3.5);
+            atkNotes = 'ATTACK_CHICANE_IBR_DIVEBOMB';
+          } else {
+            atkDesiredSpeed = Math.max(optimalSample.targetSpeed * 1.02, targetSpeed + 4.0);
+            atkNotes = 'ATTACK_FEARLESS_IBR_DIVEBOMB';
+          }
+        } else if (isApproachingCorner && !isInsideOpen && gap < 28.0 && vSpeed > 22.0) {
+          // Diamond Line Switchback Undercut (Late apex counter to inside defender)
+          this.attackMode = 'SWITCHBACK';
+          this.attackIntensity = 0.90;
+          if (!this.attackSideLocked || this.attackSide === 0) {
+            this.attackSide = -primaryInsideSign;
+            this.attackSideLocked = true;
+          }
+          const isAtApex = multiApex.primaryDist < 12.0;
+
+          if (!isAtApex) {
+            this.switchbackStage = 'ENTRY_WIDE';
+            atkTargetLat = clamp(-primaryInsideSign * (maxMargin * 0.82), -maxMargin, maxMargin);
+            atkDesiredSpeed = optimalSample.targetSpeed * 0.97;
+            atkNotes = 'ATTACK_SWITCHBACK_WIDE_ENTRY';
+          } else {
+            this.switchbackStage = 'EXIT_UNDERCUT';
+            atkTargetLat = clamp(primaryInsideSign * (maxMargin * 0.50), -maxMargin, maxMargin);
+            atkDesiredSpeed = Math.max(optimalSample.targetSpeed * 1.04, targetSpeed + 3.5);
+            atkNotes = 'ATTACK_SWITCHBACK_EXIT_UNDERCUT';
+          }
         } else {
-          atkTargetLat = optimalLat;
-          atkDesiredSpeed = optimalSample.targetSpeed;
-          atkNotes = 'ATTACK_PURSUIT_LINE';
+          // Dynamic Overtake Corridor Selection (Dual-Flank Bypass)
+          const isSlower = targetSpeed < vSpeed - 1.5 || targetSpeed < 20.0 || gap < 22.0;
+          if (isSlower) {
+            this.attackMode = 'OVERTAKE';
+            const leftSpace = maxMargin + opponentLat;
+            const rightSpace = maxMargin - opponentLat;
+            const minPassWidth = this.carWidth + 0.65;
+            if (!this.attackSideLocked || this.attackSide === 0) {
+              if (currentLat > opponentLat + 0.35 && rightSpace >= minPassWidth) {
+                this.attackSide = 1;
+              } else if (currentLat < opponentLat - 0.35 && leftSpace >= minPassWidth) {
+                this.attackSide = -1;
+              } else {
+                this.attackSide = leftSpace >= rightSpace ? -1 : 1;
+              }
+            }
+            const passSide = this.attackSide;
+            const targetPassOffset = opponentLat + passSide * Math.min(3.2, Math.max(minPassWidth, (passSide < 0 ? leftSpace : rightSpace) * 0.55));
+            atkTargetLat = clamp(targetPassOffset, -maxMargin, maxMargin);
+            atkDesiredSpeed = Math.min(optimalSample.targetSpeed * 1.04, targetSpeed + 3.0 + aggression * 2.0);
+            atkNotes = 'ATTACK_OVERTAKE_BYPASS';
+          } else {
+            atkTargetLat = optimalLat;
+            atkDesiredSpeed = optimalSample.targetSpeed;
+            atkNotes = 'ATTACK_PURSUIT_LINE';
+          }
         }
       }
     } else {
@@ -519,6 +563,9 @@ export class GameTheoreticCombatEngine {
       this.attackIntensity = 0;
       this.switchbackStage = 'NONE';
       this.divebombCommitted = false;
+      this.attackSideLocked = false;
+      this.attackSide = 0;
+      this.passClearDwell = 0;
     }
 
     // =========================================================================
@@ -588,6 +635,10 @@ export class GameTheoreticCombatEngine {
       role: tacticalRole,
       defenseMode: this.defenseMode,
       attackMode: this.attackMode,
+      attackTargetId: this.attackTargetId,
+      attackSide: this.attackSide,
+      attackSideLocked: this.attackSideLocked,
+      passedTargetId: this.passedTargetId,
       targetLateral,
       desiredSpeed,
       dMin,

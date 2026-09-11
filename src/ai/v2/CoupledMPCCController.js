@@ -33,6 +33,7 @@ import { clamp, wrapAngle, saturate } from '../../core/math.js';
 
 const G = 9.80665;
 const finite = (val, fallback = 0) => (Number.isFinite(val) ? val : fallback);
+const lerp = (a, b, t) => a + (b - a) * clamp(t, 0, 1);
 
 // Driver / dynamics tuning constants shared across car classes
 const K_LAT = 2.45;        // Stanley lateral cross-track gain
@@ -360,33 +361,49 @@ export class CoupledMPCCController {
     const satDir = Math.sign(alphaF);
     this.satAvg += (satF - this.satAvg) * clamp(safeDt * 6.0, 0, 1);
 
-    // Rear saturation guard: only trigger countersteer giveUp under genuine oversteer
+    // Body sideslip beta = atan2(localVx, localVz)
+    const localVx = finite(vehicle?.localVelocity?.x, 0);
+    const localVz = Math.max(2.5, Math.abs(finite(vehicle?.localVelocity?.z, vSpeed)));
+    const beta = Math.atan2(localVx, localVz);
+    const absBeta = Math.abs(beta);
+
+    // Rear axle slip saturation
     const satR = Math.abs(alphaR) / alphaPeak;
     this.satR = satR;
-    const isOversteering = Math.abs(alphaR) > Math.abs(alphaF) + 0.035 && satR > 1.20;
-    const giveUp = isOversteering ? clamp((satR - 1.20) / 0.60, 0, 1) : 0;
-    const hold = clamp(1.0 - giveUp * 0.35, 0.65, 1.0);
 
-    // Integral yaw-rate understeer gradient learner
+    // Desired yaw rate from curvature and speed
     const rDes = effectiveCurvature * vSpeed;
     const eYaw = rDes - yawRate;
-    if (satF < 1.0 && giveUp === 0 && Math.abs(this.prevSteer) < 0.95 && Math.abs(headingError) > 0.04) {
+
+    // Progressive Multi-Signal Stability Risk Metric:
+    // Signal 1: Rear axle slip utilization (soft warning at 0.92, strong intervention at 1.15)
+    const rearRisk = saturate((satR - 0.92) / (1.15 - 0.92));
+    // Signal 2: Body sideslip (soft warning at 0.08 rad ~ 4.6 deg, strong intervention at 0.20 rad ~ 11.5 deg)
+    const betaRisk = saturate((absBeta - 0.08) / (0.20 - 0.08));
+    // Signal 3: Yaw-rate tracking error (soft at 0.15 rad/s, strong at 0.55 rad/s)
+    const yawRisk = saturate((Math.abs(eYaw) - 0.15) / 0.40);
+
+    // Coherent combination: oversteer requires elevated rear slip combined with sideslip or yaw error
+    const oversteerEvidence = Math.max(betaRisk, yawRisk * 0.85);
+    const stabilityRisk = saturate(rearRisk * 0.65 + oversteerEvidence * 0.45 + (rearRisk > 0.4 && betaRisk > 0.4 ? 0.25 : 0));
+    const giveUp = stabilityRisk;
+    const hold = clamp(1.0 - stabilityRisk * 0.35, 0.55, 1.0);
+
+    // Integral yaw-rate understeer gradient learner (freeze/decay during any stability risk)
+    if (satF < 1.0 && stabilityRisk < 0.10 && Math.abs(this.prevSteer) < 0.95 && Math.abs(headingError) > 0.04) {
       this.yawInt = clamp(this.yawInt + eYaw * K_YAW_I * safeDt, -K_YAW_I_MAX, K_YAW_I_MAX);
     } else {
       this.yawInt *= (1.0 - clamp(safeDt * 3.0, 0, 1));
     }
 
-    // Dynamic yaw damping & sideslip excess countersteering (only under genuine oversteer)
-    const localVx = finite(vehicle?.localVelocity?.x, 0);
-    const localVz = Math.max(2.5, Math.abs(finite(vehicle?.localVelocity?.z, vSpeed)));
-    const slipAngle = Math.atan2(localVx, localVz);
+    // Dynamic yaw damping & sideslip excess countersteering scaled progressively with stability risk
     const betaRef = Math.min(Math.abs(alphaR) * BETA_SLACK + 0.035, BETA_CAP);
-    const betaExcess = isOversteering
-      ? (slipAngle > betaRef ? slipAngle - betaRef : (slipAngle < -betaRef ? slipAngle + betaRef : 0))
+    const betaExcess = stabilityRisk > 0.08
+      ? (beta > betaRef ? beta - betaRef : (beta < -betaRef ? beta + betaRef : 0))
       : 0;
 
-    const kYaw = this.yawDampingGain * (1.0 + GIVEUP_YAW * giveUp) * (committed ? 1.25 : 1.0);
-    const kBeta = this.slipCompensationGain * (1.0 + GIVEUP_BETA * giveUp);
+    const kYaw = this.yawDampingGain * (1.0 + GIVEUP_YAW * stabilityRisk) * (committed ? 1.25 : 1.0);
+    const kBeta = this.slipCompensationGain * (1.0 + GIVEUP_BETA * stabilityRisk);
 
     const targetHeadingError = Number.isFinite(tacticalTarget?.headingError)
       ? tacticalTarget.headingError
@@ -396,11 +413,11 @@ export class CoupledMPCCController {
 
     let rawSteerAngleRad = (recovering && isFacingBackwards)
       ? rejoinHeadingError
-      : (kinematicFeedforward * (1.0 - giveUp * 0.30)
+      : (kinematicFeedforward * (1.0 - stabilityRisk * 0.30)
           + (targetHeadingError * headingGain + this.yawInt) * hold
           + kYaw * eYaw
           + kBeta * betaExcess
-          + clamp(slipAngle * 0.35, -0.05, 0.05));
+          + clamp(beta * 0.35, -0.05, 0.05));
 
     // Front-axle slip saturation back-off in radians
     if (satDir !== 0 && Math.sign(rawSteerAngleRad) === satDir) {
@@ -418,7 +435,7 @@ export class CoupledMPCCController {
 
     const maxSteerLimit = recovering
       ? 0.85
-      : (giveUp > 0.1 ? Math.max(baseLimit, 0.65) : baseLimit);
+      : (stabilityRisk > 0.2 ? Math.max(baseLimit, 0.65) : baseLimit);
 
     const targetSteer = clamp(rawSteerAngleRad / maxSteerAngle, -maxSteerLimit, maxSteerLimit);
 
@@ -480,18 +497,16 @@ export class CoupledMPCCController {
     } else {
       // ACCELERATION & APEX EXIT POWER LAUNCH ZONE
       brake = 0;
-      const rawThrottle = clamp(0.95 + speedError * 0.25, 0.70, 1.0);
+      const rawThrottle = clamp(0.95 + speedError * 0.25, 0.50, 1.0);
 
       if (isCornering) {
-        const unwindPower = 1.0 - this.unwindFactor * Math.pow(steerMag, 1.1) * 0.18;
-        exitFactor = clamp(remainingLongBudget * unwindPower, 0.65, 1.0);
-        throttle = clamp(rawThrottle * exitFactor, 0.35, 1.0);
+        // Budget power based on remaining friction and steering unwind
+        const unwindPower = 1.0 - this.unwindFactor * Math.pow(steerMag, 1.1) * 0.25;
+        exitFactor = clamp(remainingLongBudget * unwindPower, 0.25, 1.0);
+        throttle = clamp(rawThrottle * exitFactor, 0.20, 1.0);
 
-        if (vSpeed > 6.0 && !isStraight) {
-          throttle = Math.max(throttle, 0.50);
-        }
-
-        if (steerMag < 0.35 || speedError > 0) {
+        // Full throttle power launch only enabled on corner exit when stable and unwinding
+        if (steerMag < 0.18 && stabilityRisk < 0.15 && latUtilization < 0.65) {
           throttle = 1.0;
           launchActive = true;
           unwindBonus = 1.0;
@@ -503,16 +518,30 @@ export class CoupledMPCCController {
       }
     }
 
-    // Rear axle saturation slip stabilization: prevent snap oversteer at speed
-    if (vSpeed > 8.0 && Math.abs(alphaR) > alphaPeak * 1.05) {
-      const overR = Math.abs(alphaR) / alphaPeak - 1.05;
+    const throttleBeforeStability = throttle;
+
+    // Progressive Stability Risk Power Modulation:
+    // Cap throttle progressively as stability risk grows (from 1.0 down to 0.18 at high risk, down to 0.05 in emergency)
+    if (throttle > 0 && stabilityRisk > 0.10) {
+      const throttleCap = stabilityRisk > 0.85
+        ? lerp(0.18, 0.05, (stabilityRisk - 0.85) / 0.15)
+        : lerp(1.0, 0.18, (stabilityRisk - 0.10) / 0.75);
+      throttle = Math.min(throttle, throttleCap);
+    }
+
+    // Rear axle saturation slip stabilization: prevent snap oversteer at speed without forcing minimum throttle
+    if (vSpeed > 8.0 && satR > 1.05) {
+      const overR = satR - 1.05;
       if (throttle > 0) {
-        throttle = Math.max(0.20, throttle * clamp(1.0 - overR * 3.2, 0.20, 1.0));
+        // Scale down throttle with overR; do not force a minimum floor like Math.max(0.20)!
+        throttle *= clamp(1.0 - overR * 3.5, 0.0, 1.0);
       }
       if (brake > 0 && latUtilization > 0.35) {
         brake *= clamp(1.0 - overR * 2.5, 0.25, 1.0);
       }
     }
+
+    const throttleAfterStability = throttle;
 
     // Rate-limit brake pressure (immediate release when accelerating)
     if (speedError >= 0 || throttle > 0.05) {
@@ -554,7 +583,7 @@ export class CoupledMPCCController {
     }
 
     // 6. Extremum-Seeking Pace Trim Observer
-    this._observe({ vehicle, lateralError: currentLat, slipAngle, dt: safeDt });
+    this._observe({ vehicle, lateralError: currentLat, slipAngle: beta, dt: safeDt });
 
     // 7. Populate Structured Telemetry Container
     const out = this.telemetry;
@@ -599,6 +628,29 @@ export class CoupledMPCCController {
       yawInt: this.yawInt,
       paceTrim: this.paceTrim
     };
+    out.stability = {
+      bodySlipRad: beta,
+      bodySlipDeg: beta * 180 / Math.PI,
+      rearUtilization: satR,
+      frontUtilization: satF,
+      yawDesired: rDes,
+      yawError: eYaw,
+      stabilityRisk,
+      stabilityIntervention: stabilityRisk > 0.15,
+      emergencyCatchActive: false,
+      throttleBeforeStability,
+      throttleAfterStability
+    };
+    out.bodySlipRad = beta;
+    out.rearUtilization = satR;
+    out.frontUtilization = satF;
+    out.yawDesired = rDes;
+    out.yawError = eYaw;
+    out.stabilityRisk = stabilityRisk;
+    out.stabilityIntervention = stabilityRisk > 0.15;
+    out.emergencyCatchActive = false;
+    out.throttleBeforeStability = throttleBeforeStability;
+    out.throttleAfterStability = throttleAfterStability;
 
     return out;
   }

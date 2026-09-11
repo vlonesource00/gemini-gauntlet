@@ -302,24 +302,26 @@ export class FrenetLatticePlanner {
 
         // Physical collision occurs when BOTH longitudinal AND lateral footprints overlap
         const isPhysicalOverlap = longitudinalClearance < 0 && lateralClearance < 0;
-        const isGentleSideRub = isPhysicalOverlap
-          && lateralClearance > -0.22
-          && Math.abs(entry.relativeLongitudinalVelocity || 0) < 4.5
-          && Math.abs(entry.relativeLateralVelocity || 0) < 1.8;
+        // Tiny numerical tolerance (0.06m) for simulation discretization noise; anything deeper is a severe collision event
+        const isIncidentalNumericalContact = isPhysicalOverlap
+          && lateralClearance > -0.06
+          && Math.abs(entry.relativeLongitudinalVelocity || 0) < 3.5
+          && Math.abs(entry.relativeLateralVelocity || 0) < 1.2;
 
-        if (isPhysicalOverlap && !isGentleSideRub && !isViablePassLane) {
+        if (isPhysicalOverlap && !isIncidentalNumericalContact) {
+          // Intermediate physical overlap is ALWAYS a collision; terminal pass lane viability NEVER excuses intermediate collision!
           predictedCollisions += 1;
-          collisionRisk += 25000 + (-longitudinalClearance + 0.2) * (-lateralClearance + 0.2) * 2500;
-        } else if (isGentleSideRub) {
-          // Allow gentle door rubbing with moderate cost so open space is preferred when available
-          collisionRisk += 35.0 + (-lateralClearance) * 120.0;
+          collisionRisk += 35000 + (-longitudinalClearance + 0.25) * (-lateralClearance + 0.25) * 3500;
+        } else if (isIncidentalNumericalContact) {
+          // Soft numerical contact cost
+          collisionRisk += 75.0 + (-lateralClearance) * 250.0;
         } else {
           // Smooth proximity penalty for tight corridors
           const distAbs = Math.abs(longitudinalGap);
           const proximityHorizon = Math.max(4.5, 8.5 - aggression * 2.0);
           if (distAbs < proximityHorizon && lateralClearance < 0.85) {
             const timeDiscount = Math.max(0.2, 1.0 - time / Math.max(0.5, horizon));
-            collisionRisk += (proximityHorizon - distAbs) * Math.max(0, 0.85 - lateralClearance) * 14 * timeDiscount;
+            collisionRisk += (proximityHorizon - distAbs) * Math.max(0, 0.85 - lateralClearance) * 16 * timeDiscount;
           }
         }
       }
