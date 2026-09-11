@@ -59,8 +59,8 @@ export class TrafficAwareness {
    */
   scan(vehicle, vehicles, track) {
     const current = vehicle.surface ?? (track?.surfaceAt ? track.surfaceAt(vehicle.position.x, vehicle.position.z) : { lateral: 0, s: vehicle.distance || 0 });
-    const forward = vehicle.forward ?? { x: -Math.sin(vehicle.yaw || 0), z: Math.cos(vehicle.yaw || 0) };
-    const right = vehicle.right ?? { x: forward.z, z: -forward.x };
+    const forward = vehicle.forward ?? { x: Math.sin(vehicle.yaw || 0), z: Math.cos(vehicle.yaw || 0) };
+    const right = vehicle.right ?? { x: Math.cos(vehicle.yaw || 0), z: -Math.sin(vehicle.yaw || 0) };
 
     const vel = vehicle.velocity ?? { x: 0, z: 0 };
     const egoForwardSpeed = finite(vel.x * forward.x + vel.z * forward.z, finite(vehicle.speed, 0));
