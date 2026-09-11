@@ -83,6 +83,12 @@ export class NextGenAIController {
     this.debugEnabled = true;
     this.debugState = null;
     this.trajectoryPlan = null;
+    this.previousActiveTrajectory = null;
+    this._lastVehicle = null;
+    this._lastVehicles = [];
+    this._lastTrack = null;
+    this._lastTactical = null;
+    this._lastTacticalMode = 'PACE';
     this.lapLineBias = 0;
 
     // ERS state
@@ -164,6 +170,286 @@ export class NextGenAIController {
     return this.debugState;
   }
 
+  /**
+   * Export comprehensive 3D visual debug data for Benchmark and Gauntlet HUD.
+   * Completely read-only and non-intrusive.
+   * @param {Object} [trackOverride]
+   * @returns {Object|null} Canonical visual debug bundle
+   */
+  getDebugVisuals(trackOverride = null) {
+    const track = trackOverride || this._lastTrack || this.optimalEngine?.track;
+    const vehicle = this._lastVehicle;
+    if (!track || !vehicle || !this.trajectoryPlan) return null;
+
+    const tactical = this._lastTactical || {};
+    const tacticalMode = this._lastTacticalMode || this.debugState?.mode || 'PACE';
+    const racecraftPhase = this.debugState?.racecraftPhase || 'OPTIMAL_LINE';
+    const defending = tactical.role === 'DEFEND' || tactical.role === 'DUAL_COMBAT' || tactical.defenseMode !== 'PACE';
+    const attacking = tactical.role === 'ATTACK' || tactical.role === 'DUAL_COMBAT' || tactical.attackMode !== 'NONE';
+
+    // 1. Color mapping based on tactical mode
+    let modeColor = '#00ff88'; // PACE (emerald green)
+    if (defending) {
+      modeColor = '#00d2ff'; // DEFEND (cyan / electric blue)
+    } else if (attacking) {
+      if (tactical.attackMode === 'DIVEBOMB') modeColor = '#ff2a2a'; // DIVEBOMB (intense red)
+      else if (tactical.attackMode === 'SWITCHBACK') modeColor = '#d020d0'; // SWITCHBACK (magenta)
+      else modeColor = '#ff8800'; // SLINGSHOT (amber orange)
+    } else if (this.debugState?.recovering) {
+      modeColor = '#ffbb00';
+    }
+
+    // 2. Selected Trajectory Ribbon (0.65m wide, elevated +0.06m)
+    const selectedTrajectory = {
+      points: this.trajectoryPlan.points || [],
+      color: modeColor,
+      mode: tacticalMode,
+      phase: racecraftPhase,
+      score: this.trajectoryPlan.score || 0,
+      selectedOffset: this.trajectoryPlan.selectedOffset ?? 0,
+      transitionTimeS: this.trajectoryPlan.transitionTimeS ?? 0,
+      ribbonWidth: 0.65,
+      lift: 0.06
+    };
+
+    // 3. Previous Active Trajectory Ghost (Fading out over ~0.8s)
+    let previousTrajectory = null;
+    if (this.previousActiveTrajectory && Array.isArray(this.previousActiveTrajectory.points)) {
+      const ageS = Math.max(0, (this.totalTime || 0) - (this.previousActiveTrajectory.switchedAt || this.previousActiveTrajectory.generatedAt || 0));
+      if (ageS < 0.85) {
+        const opacity = Math.max(0, 1.0 - (ageS / 0.85));
+        previousTrajectory = {
+          points: this.previousActiveTrajectory.points,
+          selectedOffset: this.previousActiveTrajectory.selectedOffset,
+          divergencePoint: this.previousActiveTrajectory.divergencePoint,
+          ageS,
+          opacity,
+          color: '#d8b4fe' // ghostly lilac
+        };
+      }
+    }
+
+    // 4. Alternate Trajectory Candidates (Bounded 24-32 paths)
+    const rawCandidates = this.trajectoryPlan.candidates || this.trajectoryPlanner.lastCandidates || [];
+    const candidates = rawCandidates.map((cand) => {
+      let color = '#a0a0a0'; // HIGHER_COST (gray)
+      const reason = cand.rejectionReason || 'HIGHER_COST';
+      if (cand.selected || reason === 'SELECTED') {
+        color = '#00ff88'; // green
+      } else if (reason === 'VIABLE_ALTERNATIVE') {
+        color = '#00d2ff'; // cyan
+      } else if (reason === 'COLLISION') {
+        color = '#ff2222'; // red
+      } else if (reason === 'ROAD_LIMIT') {
+        color = '#ff8800'; // orange
+      } else if (reason === 'DYNAMIC_LIMIT') {
+        color = '#ffdd00'; // yellow
+      } else if (reason === 'SWITCH_MARGIN' || reason === 'CONTINUITY_COST') {
+        color = '#c033ff'; // purple
+      }
+
+      return {
+        id: cand.id,
+        points: cand.points || [],
+        terminalLateral: cand.terminalLateral,
+        transitionTime: cand.transitionTime,
+        score: cand.score,
+        selected: Boolean(cand.selected),
+        rejectionReason: reason,
+        collisionFree: Boolean(cand.collisionFree),
+        roadLegal: Boolean(cand.roadLegal),
+        conflictPoint: cand.conflictPoint || null,
+        conflictStation: cand.conflictStation ?? null,
+        conflictTime: cand.conflictTime ?? null,
+        color
+      };
+    });
+
+    // 5. Tactical Corridor [dMin, dMax]
+    const dMin = finite(tactical.dMin, -finite(track.roadHalfWidth, 8.2));
+    const dMax = finite(tactical.dMax, finite(track.roadHalfWidth, 8.2));
+    const corridorLength = 48.0;
+    const corridorSteps = 16;
+    const corridorLeft = [];
+    const corridorRight = [];
+    const vDist = finite(vehicle.distance, 0);
+
+    for (let i = 0; i <= corridorSteps; i++) {
+      const s = vDist + (corridorLength * i) / corridorSteps;
+      const ref = track.atDistance ? track.atDistance(s) : { s, x: 0, y: 0, z: 0 };
+      const ptLeft = track.lateralPoint ? track.lateralPoint(ref, dMax, 0.04) : { x: ref.x, y: (ref.y || 0) + 0.04, z: ref.z };
+      const ptRight = track.lateralPoint ? track.lateralPoint(ref, dMin, 0.04) : { x: ref.x, y: (ref.y || 0) + 0.04, z: ref.z };
+      corridorLeft.push(ptLeft);
+      corridorRight.push(ptRight);
+    }
+
+    const tacticalCorridor = {
+      dMin,
+      dMax,
+      mode: tacticalMode,
+      color: modeColor,
+      leftBoundary: corridorLeft,
+      rightBoundary: corridorRight
+    };
+
+    // 6. Target Vehicle Highlight
+    let targetVehicle = null;
+    const targetId = this.debugState?.targetId;
+    if (targetId != null && Array.isArray(this._lastVehicles)) {
+      const targetObj = this._lastVehicles.find((v) => v?.id === targetId || v?.name === targetId);
+      if (targetObj && targetObj.position) {
+        targetVehicle = {
+          id: targetId,
+          role: defending ? 'DEFEND_FROM' : 'ATTACK_TARGET',
+          position: { x: targetObj.position.x, y: targetObj.position.y, z: targetObj.position.z },
+          egoFront: {
+            x: vehicle.position.x + Math.sin(vehicle.yaw || 0) * 2.3,
+            y: vehicle.position.y + 0.35,
+            z: vehicle.position.z + Math.cos(vehicle.yaw || 0) * 2.3
+          },
+          targetRear: {
+            x: targetObj.position.x - Math.sin(targetObj.yaw || 0) * 2.3,
+            y: targetObj.position.y + 0.35,
+            z: targetObj.position.z - Math.cos(targetObj.yaw || 0) * 2.3
+          }
+        };
+      }
+    }
+
+    // 7. Opponent Future Predictions (0.5s, 1.0s, 2.0s, 3.0s)
+    const opponentPredictions = [];
+    const predictionTimes = [0.5, 1.0, 2.0, 3.0];
+    for (const other of (this._lastVehicles || [])) {
+      if (!other || other === vehicle || other.finished || other.despawned || other.trafficGhost) continue;
+      const oSpeed = Math.max(0, finite(other.speed, 0));
+      const oDist = finite(other.distance, 0);
+      const oLat = finite(other.surface?.lateral, 0);
+      const oYaw = finite(other.yaw, 0);
+
+      const dx = other.position.x - vehicle.position.x;
+      const dz = other.position.z - vehicle.position.z;
+      if (Math.hypot(dx, dz) > 95) continue;
+
+      const trail = [];
+      const boxes = [];
+
+      for (let step = 0; step <= 30; step++) {
+        const t = (step / 30) * 3.0;
+        const sPred = oDist + oSpeed * t;
+        const refPred = track.atDistance ? track.atDistance(sPred) : { s: sPred, x: other.position.x, y: other.position.y, z: other.position.z };
+        const pt = track.lateralPoint ? track.lateralPoint(refPred, oLat, 0.1) : { x: refPred.x, y: (refPred.y || 0) + 0.1, z: refPred.z };
+        trail.push({ x: pt.x, y: pt.y, z: pt.z, time: t });
+      }
+
+      for (const t of predictionTimes) {
+        const sPred = oDist + oSpeed * t;
+        const refPred = track.atDistance ? track.atDistance(sPred) : { s: sPred, x: other.position.x, y: other.position.y, z: other.position.z };
+        const pt = track.lateralPoint ? track.lateralPoint(refPred, oLat, 0.1) : { x: refPred.x, y: (refPred.y || 0) + 0.1, z: refPred.z };
+
+        let boxYaw = oYaw;
+        if (track.tangentAtDistance) {
+          const tan = track.tangentAtDistance(sPred);
+          if (tan) boxYaw = Math.atan2(tan.x, tan.z);
+        }
+
+        boxes.push({
+          time: t,
+          x: pt.x,
+          y: pt.y + 0.55,
+          z: pt.z,
+          yaw: boxYaw,
+          length: 4.65,
+          width: 2.05,
+          height: 1.15
+        });
+      }
+
+      opponentPredictions.push({
+        id: other.id,
+        name: other.name,
+        current: { x: other.position.x, y: other.position.y, z: other.position.z, yaw: oYaw, speed: oSpeed },
+        trail,
+        boxes
+      });
+    }
+
+    // 8. Tracking Point & Lookahead
+    const trackingPoint = this.trajectoryPlan.trackingPoint ?? this.trajectoryPlan.points?.[this.trajectoryPlan.trackingIndex ?? 0] ?? this.trajectoryPlan.points?.[0];
+    const frontAxle = {
+      x: vehicle.position.x + Math.sin(vehicle.yaw || 0) * 1.4,
+      y: vehicle.position.y + 0.35,
+      z: vehicle.position.z + Math.cos(vehicle.yaw || 0) * 1.4
+    };
+
+    // 9. Markers (Braking & Commitment)
+    const isBraking = Boolean(vehicle.controls?.brake > 0.05);
+    let commitmentType = 'NONE';
+    if (tactical.attackMode === 'DIVEBOMB') commitmentType = 'DIVE';
+    else if (tactical.attackMode === 'SWITCHBACK') commitmentType = 'SWITCHBACK';
+    else if (tactical.attackMode === 'ABORT_HOLD' || tactical.attackMode === 'ABORT_BLEND') commitmentType = 'ABORT';
+
+    const markers = {
+      braking: {
+        active: isBraking,
+        x: vehicle.position.x + Math.sin(vehicle.yaw || 0) * 8.0,
+        y: vehicle.position.y + 0.05,
+        z: vehicle.position.z + Math.cos(vehicle.yaw || 0) * 8.0,
+        yaw: vehicle.yaw || 0,
+        width: 4.0
+      },
+      commitment: {
+        type: commitmentType,
+        x: vehicle.position.x + Math.sin(vehicle.yaw || 0) * 3.5,
+        y: vehicle.position.y + 0.15,
+        z: vehicle.position.z + Math.cos(vehicle.yaw || 0) * 3.5,
+        yaw: vehicle.yaw || 0
+      }
+    };
+
+    // 10. Road and Planner Limits ahead of car
+    const roadLimits = {
+      asphaltLeft: [],
+      asphaltRight: [],
+      plannerLeft: [],
+      plannerRight: []
+    };
+    const roadSteps = 20;
+    const roadDistAhead = 60.0;
+    const roadHalfWidth = finite(track.roadHalfWidth, 8.2);
+    const curbWidth = finite(track.curbWidth, 1.25);
+    for (let i = 0; i <= roadSteps; i++) {
+      const s = vDist + (roadDistAhead * i) / roadSteps;
+      const ref = track.atDistance ? track.atDistance(s) : { s, x: 0, y: 0, z: 0 };
+      const asphaltL = track.lateralPoint ? track.lateralPoint(ref, roadHalfWidth, 0.04) : { x: ref.x, y: 0.04, z: ref.z };
+      const asphaltR = track.lateralPoint ? track.lateralPoint(ref, -roadHalfWidth, 0.04) : { x: ref.x, y: 0.04, z: ref.z };
+      const plannerL = track.lateralPoint ? track.lateralPoint(ref, roadHalfWidth + curbWidth, 0.04) : { x: ref.x, y: 0.04, z: ref.z };
+      const plannerR = track.lateralPoint ? track.lateralPoint(ref, -(roadHalfWidth + curbWidth), 0.04) : { x: ref.x, y: 0.04, z: ref.z };
+      roadLimits.asphaltLeft.push(asphaltL);
+      roadLimits.asphaltRight.push(asphaltR);
+      roadLimits.plannerLeft.push(plannerL);
+      roadLimits.plannerRight.push(plannerR);
+    }
+
+    return {
+      selectedTrajectory,
+      previousTrajectory,
+      candidates,
+      tacticalCorridor,
+      targetVehicle,
+      opponentPredictions,
+      trackingPoint: trackingPoint ? {
+        x: trackingPoint.x,
+        y: trackingPoint.y,
+        z: trackingPoint.z,
+        lateral: trackingPoint.lateral,
+        forwardDistance: trackingPoint.forwardDistance
+      } : null,
+      frontAxle,
+      markers,
+      roadLimits
+    };
+  }
+
   computeLookahead(speed = 0, kappa = 0) {
     const v = Math.max(0, finite(speed, 0));
     const k = Math.abs(finite(kappa, 0));
@@ -176,6 +462,12 @@ export class NextGenAIController {
       curbWidth: finite(this.optimalEngine?.curbWidth, 1.25)
     });
     this.trajectoryPlan = null;
+    this.previousActiveTrajectory = null;
+    this._lastVehicle = null;
+    this._lastVehicles = [];
+    this._lastTrack = null;
+    this._lastTactical = null;
+    this._lastTacticalMode = 'PACE';
     this.steerCommand = 0;
     this.lastDistance = null;
     this.stallTime = 0;
@@ -259,6 +551,10 @@ export class NextGenAIController {
    */
   update(vehicle, vehicles, track, race = null, dt = 1 / 120) {
     if (!vehicle || !track) return;
+
+    this._lastVehicle = vehicle;
+    this._lastVehicles = vehicles;
+    this._lastTrack = track;
 
     const racePhase = race?.phase ?? 'racing';
     if (racePhase !== 'racing') {
@@ -398,6 +694,9 @@ export class NextGenAIController {
       tacticalReason = 'PIT_LANE_ENTRY';
     }
 
+    this._lastTactical = tactical;
+    this._lastTacticalMode = tacticalMode;
+
     // 4. Multi-Candidate Frenet Lattice Trajectory Planning
     const dynamicLookahead = this.computeLookahead(vehicle.speed, currentCurv);
     const lookAheadDist = recovering
@@ -441,6 +740,13 @@ export class NextGenAIController {
       const dtSinceLastPlan = Math.max(dt, this.totalTime - (this.lastPlanTime || 0));
       this.lastPlanTime = this.totalTime;
       this.nextPlanTime = this.totalTime + 0.04;
+      const previousPlanSnapshot = this.trajectoryPlan ? {
+        points: this.trajectoryPlan.points,
+        selectedOffset: this.trajectoryPlan.selectedOffset,
+        generatedAt: this.trajectoryPlan.generatedAt ?? this.totalTime,
+        replanIndex: this.trajectoryPlan.replanIndex ?? 0
+      } : null;
+
       this.trajectoryPlan = this.trajectoryPlanner.plan({
         vehicle,
         track,
@@ -473,6 +779,26 @@ export class NextGenAIController {
       if (this.trajectoryPlan) {
         this.trajectoryPlan.generatedAt = this.totalTime || 0;
         this.trajectoryPlan.replanIndex = this.replanCount;
+
+        if (previousPlanSnapshot && previousPlanSnapshot.points?.length > 0) {
+          const offsetDiff = Math.abs((this.trajectoryPlan.selectedOffset ?? 0) - (previousPlanSnapshot.selectedOffset ?? 0));
+          if (offsetDiff > 0.15 || !this.previousActiveTrajectory) {
+            let divergencePoint = null;
+            const currPts = this.trajectoryPlan.points || [];
+            const prevPts = previousPlanSnapshot.points || [];
+            for (let i = 0; i < Math.min(currPts.length, prevPts.length); i++) {
+              if (Math.abs(currPts[i].lateral - prevPts[i].lateral) > 0.15) {
+                divergencePoint = { x: currPts[i].x, y: currPts[i].y, z: currPts[i].z };
+                break;
+              }
+            }
+            this.previousActiveTrajectory = {
+              ...previousPlanSnapshot,
+              divergencePoint: divergencePoint ?? (currPts[0] ? { x: currPts[0].x, y: currPts[0].y, z: currPts[0].z } : null),
+              switchedAt: this.totalTime || 0
+            };
+          }
+        }
       }
     }
 

@@ -271,6 +271,9 @@ export class FrenetLatticePlanner {
     let edgeRisk = 0;
     let collisionRisk = 0;
     let predictedCollisions = 0;
+    let firstConflictPoint = null;
+    let firstConflictStation = null;
+    let firstConflictTime = null;
     let minimumClearance = 99;
     let futureMinimumClearance = 99;
     let maxLateralAcceleration = 0;
@@ -412,6 +415,15 @@ export class FrenetLatticePlanner {
           // Intermediate physical overlap is ALWAYS a collision; terminal pass lane viability NEVER excuses intermediate collision!
           predictedCollisions += 1;
           collisionRisk += 35000 + (-longitudinalClearance + 0.25) * (-lateralClearance + 0.25) * 3500;
+          if (!firstConflictPoint) {
+            firstConflictPoint = {
+              x: finite(world.x),
+              y: finite(world.y),
+              z: finite(world.z)
+            };
+            firstConflictStation = finite(reference.s);
+            firstConflictTime = finite(time);
+          }
         } else if (isIncidentalNumericalContact) {
           // Soft numerical contact cost
           collisionRisk += 75.0 + (-lateralClearance) * 250.0;
@@ -578,18 +590,36 @@ export class FrenetLatticePlanner {
       + rewardWidth
       + costHysteresis;
 
+    const collisionFree = predictedCollisions === 0;
+    const roadLegal = roadViolation < 1e-4;
+    let initialRejectionReason = 'VIABLE_ALTERNATIVE';
+    if (!roadLegal) {
+      initialRejectionReason = 'ROAD_LIMIT';
+    } else if (!collisionFree) {
+      initialRejectionReason = 'COLLISION';
+    } else if (clampedExcess > 0.05) {
+      initialRejectionReason = 'DYNAMIC_LIMIT';
+    }
+
+    const candidateId = `traj_${terminalLateral.toFixed(2)}_${transitionTime.toFixed(2)}_${intentType}`;
+
     return {
+      id: candidateId,
       points,
       score: totalScore,
       terminalLateral,
       transitionTime,
       intentType,
-      collisionFree: predictedCollisions === 0,
-      roadLegal: roadViolation < 1e-4,
+      collisionFree,
+      roadLegal,
       minimumClearanceM: minimumClearance,
       futureMinimumClearanceM: futureMinimumClearance,
       maxCurvaturePerM: maxCurvature,
       maxLateralAccelerationMps2: maxLateralAcceleration,
+      rejectionReason: initialRejectionReason,
+      conflictPoint: firstConflictPoint,
+      conflictStation: firstConflictStation,
+      conflictTime: firstConflictTime,
       costBreakdown: {
         roadViolation: costRoadViolation,
         collisionRisk: costCollision,
@@ -886,6 +916,7 @@ export class FrenetLatticePlanner {
     )[0];
 
     // Switching margin: if switching away from ongoing candidate to a divergent trajectory, require decisive improvement
+    let switchOverriddenCandidate = null;
     if (previousPlan && Number.isFinite(previousPlan.selectedOffset) && safeCandidates.length > 1) {
       const prevTarget = previousPlan.selectedOffset;
       const ongoingCandidate = safeCandidates.find((c) => Math.abs(c.terminalLateral - prevTarget) < 0.35);
@@ -894,6 +925,7 @@ export class FrenetLatticePlanner {
           && Math.abs(selected.terminalLateral - prevTarget) > 0.8;
         const switchMargin = isDirectionReversal ? 40.0 : 20.0;
         if (selected.score > ongoingCandidate.score - switchMargin) {
+          switchOverriddenCandidate = selected;
           selected = ongoingCandidate;
         }
       }
@@ -902,16 +934,84 @@ export class FrenetLatticePlanner {
     this.lastSelectedOffset = selected.terminalLateral;
     this.lastSelectedTrajectory = selected;
 
-    // Filter diagnostic candidates for 3D visualization
-    const visualCandidates = [selected];
+    // Classify rejection reasons
     selected.selected = true;
-    for (const cand of candidateTrajectories) {
-      if (cand === selected) continue;
-      cand.selected = false;
-      if (!visualCandidates.some((v) => Math.abs(v.terminalLateral - cand.terminalLateral) < 0.35)) {
-        visualCandidates.push(cand);
+    selected.rejectionReason = 'SELECTED';
+
+    if (switchOverriddenCandidate) {
+      switchOverriddenCandidate.rejectionReason = 'SWITCH_MARGIN';
+    }
+
+    let viableSafeCount = 0;
+    for (const cand of safeCandidates) {
+      if (cand === selected || cand === switchOverriddenCandidate) continue;
+      if (viableSafeCount < 6) {
+        cand.rejectionReason = 'VIABLE_ALTERNATIVE';
+        viableSafeCount += 1;
+      } else {
+        cand.rejectionReason = 'HIGHER_COST';
       }
     }
+
+    // Build bounded 24-32 diagnostic candidate set for visual inspection
+    const visualCandidates = [selected];
+    const seenIds = new Set([selected.id]);
+
+    const addVisualCandidate = (cand) => {
+      if (!cand || seenIds.has(cand.id)) return;
+      seenIds.add(cand.id);
+      visualCandidates.push(cand);
+    };
+
+    // 1. Ongoing candidate
+    if (previousPlan && Number.isFinite(previousPlan.selectedOffset)) {
+      const prevTarget = previousPlan.selectedOffset;
+      const ongoing = candidateTrajectories.find((c) => Math.abs(c.terminalLateral - prevTarget) < 0.35);
+      if (ongoing) addVisualCandidate(ongoing);
+    }
+
+    // 2. Overridden candidate if any
+    if (switchOverriddenCandidate) {
+      addVisualCandidate(switchOverriddenCandidate);
+    }
+
+    // 3. Top safe alternatives (up to 8)
+    for (const cand of safeCandidates) {
+      if (visualCandidates.length >= 10) break;
+      addVisualCandidate(cand);
+    }
+
+    // 4. Collision candidates (up to 6)
+    const collisionCands = candidateTrajectories.filter((c) => !c.collisionFree);
+    for (const cand of collisionCands) {
+      if (visualCandidates.filter((c) => c.rejectionReason === 'COLLISION').length >= 6) break;
+      addVisualCandidate(cand);
+    }
+
+    // 5. Road limit candidates (up to 4)
+    const roadLimitCands = candidateTrajectories.filter((c) => !c.roadLegal);
+    for (const cand of roadLimitCands) {
+      if (visualCandidates.filter((c) => c.rejectionReason === 'ROAD_LIMIT').length >= 4) break;
+      addVisualCandidate(cand);
+    }
+
+    // 6. Dynamic limit candidates (up to 4)
+    const dynLimitCands = candidateTrajectories.filter((c) => c.rejectionReason === 'DYNAMIC_LIMIT');
+    for (const cand of dynLimitCands) {
+      if (visualCandidates.filter((c) => c.rejectionReason === 'DYNAMIC_LIMIT').length >= 4) break;
+      addVisualCandidate(cand);
+    }
+
+    // 7. Fill remainder up to 28-32 candidates from remaining candidate pool
+    for (const cand of candidateTrajectories) {
+      if (visualCandidates.length >= 30) break;
+      addVisualCandidate(cand);
+    }
+
+    for (const cand of visualCandidates) {
+      if (cand !== selected) cand.selected = false;
+    }
+
     this.lastCandidates = visualCandidates;
 
     // Compute pursuit tracking target point
