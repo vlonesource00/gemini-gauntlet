@@ -184,6 +184,13 @@ export class NextGenAIController {
     this.passTargetId = null;
     this.defenseTargetId = null;
     this.passPhase = 'NONE';
+    this.tacticalTimer = 0;
+    this.tacticalState = null;
+    this.totalTime = 0;
+    this.steeringHistory = [];
+    this.steeringReversalsLastSecond = 0;
+    this.lateralLoadTransferRate = 0;
+    this.lastLocalAccelX = 0;
     if (this.racecraft) {
       this.racecraft.phase = 'NONE';
       this.racecraft.targetId = null;
@@ -332,15 +339,32 @@ export class NextGenAIController {
       return;
     }
 
-    // 3. Layer 2: Game-Theoretic Adversarial Corridor Planning
-    const tactical = this.combatEngine.evaluate({
-      vehicle,
-      track,
-      traffic,
-      optimalProfile: this.optimalEngine,
-      aggression: this._aggression,
-      dt
-    });
+    // 3. Layer 2: Multi-Rate Decoupled Game-Theoretic Corridor Planning (10 Hz)
+    this.tacticalTimer = (this.tacticalTimer || 0) + dt;
+    const hasCloseTarget = (traffic.challenger && traffic.challenger.delta > -15.0)
+      || (traffic.targetAhead && traffic.targetAhead.delta < 20.0 && traffic.targetAhead.delta > 0);
+    const targetEnteredCloseRange = hasCloseTarget && !this.wasInProximity;
+    this.wasInProximity = hasCloseTarget;
+
+    const shouldEvaluateTactics = !this.tacticalState
+      || targetEnteredCloseRange
+      || this.tacticalTimer >= 0.10;
+
+    if (shouldEvaluateTactics) {
+      const tacticalDt = Math.max(dt, this.tacticalTimer || dt);
+      this.tacticalTimer = (this.index % 10) * (0.10 / 10);
+      this.lastTacticalEvalTime = this.totalTime || 0;
+      this.tacticalEvalCount = (this.tacticalEvalCount || 0) + 1;
+      this.tacticalState = this.combatEngine.evaluate({
+        vehicle,
+        track,
+        traffic,
+        optimalProfile: this.optimalEngine,
+        aggression: this._aggression,
+        dt: tacticalDt
+      });
+    }
+    const tactical = this.tacticalState;
 
     const currentPoint = track?.atDistance ? track.atDistance(vehicle.distance) : { curvature: 0, turnSign: 0 };
     const rawCurv = Math.abs(finite(currentPoint?.curvature, 0));
@@ -403,12 +427,11 @@ export class NextGenAIController {
 
     const shouldReplan = !this.trajectoryPlan
       || phaseChanged
-      || defending
-      || attacking
       || isOffTrack
       || this.planTimer >= 0.04;
 
     if (shouldReplan) {
+      const dtSinceLastPlan = this.planTimer;
       this.planTimer = (this.index % 4) * (0.04 / 4); // time-slice phase offset across cars
       this.trajectoryPlan = this.trajectoryPlanner.plan({
         vehicle,
@@ -434,8 +457,15 @@ export class NextGenAIController {
           }
           const optLat = this.optimalEngine?.sampleAtDistance?.(s, vehicle.classKey)?.lateral;
           return Number.isFinite(optLat) ? clamp(optLat, -baseRoadMargin, baseRoadMargin) : 0;
-        }
+        },
+        previousPlan: this.trajectoryPlan,
+        dtSinceLastPlan
       });
+      this.replanCount = (this.replanCount || 0) + 1;
+      if (this.trajectoryPlan) {
+        this.trajectoryPlan.generatedAt = this.totalTime || 0;
+        this.trajectoryPlan.replanIndex = this.replanCount;
+      }
     }
 
     const trackingPoint = this.trajectoryPlan.trackingPoint ?? this.trajectoryPlan.points.at(-1);
@@ -604,6 +634,27 @@ export class NextGenAIController {
     };
     this.steerCommand = finalControls.steer;
 
+    // Track steering reversals & lateral load transfer rate
+    this.totalTime = (this.totalTime || 0) + dt;
+    this.steeringHistory = this.steeringHistory || [];
+    this.steeringHistory.push({ time: this.totalTime, steer: finalControls.steer });
+    while (this.steeringHistory.length > 0 && this.totalTime - this.steeringHistory[0].time > 1.0) {
+      this.steeringHistory.shift();
+    }
+    let reversals = 0;
+    for (let i = 1; i < this.steeringHistory.length; i++) {
+      const s0 = this.steeringHistory[i - 1].steer;
+      const s1 = this.steeringHistory[i].steer;
+      if (Math.sign(s0) !== 0 && Math.sign(s1) !== 0 && Math.sign(s0) !== Math.sign(s1) && Math.abs(s1 - s0) > 0.08) {
+        reversals++;
+      }
+    }
+    this.steeringReversalsLastSecond = reversals;
+
+    const currentAccelX = finite(vehicle.localAcceleration?.x, 0);
+    this.lateralLoadTransferRate = Math.abs(currentAccelX - (this.lastLocalAccelX || 0)) / Math.max(1e-4, dt);
+    this.lastLocalAccelX = currentAccelX;
+
     // Update target handles on vehicle object for external perception
     vehicle.aiTarget = { x: targetPos.x, z: targetPos.z, lateral: plannedTargetOffset };
     vehicle.aiTactical = {
@@ -714,6 +765,14 @@ export class NextGenAIController {
       trajectoryRoadLegal: Boolean(this.trajectoryPlan?.roadLegal ?? true),
       trajectorySelectedOffsetM: finite(this.trajectoryPlan?.selectedOffset, finite(targetOffset, 0)),
       trajectoryScore: finite(this.trajectoryPlan?.score, 0),
+      tacticalPhase: tactical.tacticalPhase || (defending ? tactical.defenseMode : (attacking ? tactical.attackMode : 'PACE')),
+      commitDwellRemaining: finite(tactical.commitDwellRemaining, 0),
+      abortDwellRemaining: finite(tactical.abortDwellRemaining, 0),
+      evaluatedTrajectories: finite(this.trajectoryPlan?.candidateCount ?? this.trajectoryPlan?.candidates?.length, 0),
+      safeTrajectories: finite(this.trajectoryPlan?.safeTrajectoryCount ?? this.trajectoryPlan?.candidateCount, 0),
+      steeringReversalsLastSecond: finite(this.steeringReversalsLastSecond, 0),
+      trajectorySwitchBonus: finite(this.trajectoryPlan?.costBreakdown?.hysteresisBonus, 0),
+      lateralLoadTransferRate: finite(this.lateralLoadTransferRate, 0),
 
       // Multi-Agent Traffic Awareness
       traffic,
@@ -780,7 +839,15 @@ export class NextGenAIController {
         latUtilization: finite(pedals?.friction?.latUtilization ?? 0),
         remainingLongBudget: finite(pedals?.friction?.remainingLongBudget ?? 1),
         liveLatG: finite(latAccel / 9.81),
-        peakLatG: finite(pedals?.friction?.peakG ?? 2.70, 2.70)
+        peakLatG: finite(pedals?.friction?.peakG ?? 2.70, 2.70),
+        tacticalPhase: tactical.tacticalPhase || (defending ? tactical.defenseMode : (attacking ? tactical.attackMode : 'PACE')),
+        commitDwellRemaining: finite(tactical.commitDwellRemaining, 0),
+        abortDwellRemaining: finite(tactical.abortDwellRemaining, 0),
+        evaluatedTrajectories: finite(this.trajectoryPlan?.candidateCount ?? this.trajectoryPlan?.candidates?.length, 0),
+        safeTrajectories: finite(this.trajectoryPlan?.safeTrajectoryCount ?? this.trajectoryPlan?.candidateCount, 0),
+        steeringReversalsLastSecond: finite(this.steeringReversalsLastSecond, 0),
+        trajectorySwitchBonus: finite(this.trajectoryPlan?.costBreakdown?.hysteresisBonus, 0),
+        lateralLoadTransferRate: finite(this.lateralLoadTransferRate, 0)
       }
     };
   }

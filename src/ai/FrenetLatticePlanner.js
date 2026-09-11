@@ -106,7 +106,92 @@ const uniqueOffsets = (values, min, max, tolerance = 0.08) => {
   return result;
 };
 
-const worldHeading = (a, b) => Math.atan2(b.x - a.x, b.z - a.z);
+export const worldHeading = (a, b) => Math.atan2(b.x - a.x, b.z - a.z);
+
+/**
+ * Generalized quintic polynomial with arbitrary boundary conditions (q0, v0, a0) and (q1, v1, a1).
+ * Yields exact C2 continuity at both boundaries.
+ */
+export class QuinticPolynomial {
+  constructor(q0, v0, a0, q1, v1, a1, T) {
+    this.T = Math.max(0.05, finite(T, 1.0));
+    this.q0 = finite(q0, 0);
+    this.q1 = finite(q1, 0);
+    this.v0 = finite(v0, 0);
+    this.v1 = finite(v1, 0);
+    this.a0 = finite(a0, 0);
+    this.a1 = finite(a1, 0);
+
+    this.c0 = this.q0;
+    this.c1 = this.v0;
+    this.c2 = 0.5 * this.a0;
+
+    const T2 = this.T * this.T;
+    const T3 = T2 * this.T;
+    const T4 = T3 * this.T;
+    const T5 = T4 * this.T;
+    const dq = this.q1 - this.q0;
+
+    this.c3 = (20 * dq - (8 * this.v1 + 12 * this.v0) * this.T - (3 * this.a0 - this.a1) * T2) / (2 * T3);
+    this.c4 = (-30 * dq + (14 * this.v1 + 16 * this.v0) * this.T + (3 * this.a0 - 2 * this.a1) * T2) / (2 * T4);
+    this.c5 = (12 * dq - 6 * (this.v1 + this.v0) * this.T - (this.a1 - this.a0) * T2) / (2 * T5);
+  }
+
+  eval(t) {
+    if (t <= 0) return this.c0;
+    if (t >= this.T) return this.q1;
+    const t2 = t * t;
+    const t3 = t2 * t;
+    const t4 = t3 * t;
+    const t5 = t4 * t;
+    return this.c0 + this.c1 * t + this.c2 * t2 + this.c3 * t3 + this.c4 * t4 + this.c5 * t5;
+  }
+
+  deriv(t) {
+    if (t <= 0) return this.c1;
+    if (t >= this.T) return this.v1;
+    const t2 = t * t;
+    const t3 = t2 * t;
+    const t4 = t3 * t;
+    return this.c1 + 2 * this.c2 * t + 3 * this.c3 * t2 + 4 * this.c4 * t3 + 5 * this.c5 * t4;
+  }
+
+  accel(t) {
+    if (t <= 0) return 2 * this.c2;
+    if (t >= this.T) return this.a1;
+    const t2 = t * t;
+    const t3 = t2 * t;
+    return 2 * this.c2 + 6 * this.c3 * t + 12 * this.c4 * t2 + 20 * this.c5 * t3;
+  }
+}
+
+/**
+ * Two-stage piecewise quintic spline with exact C2 boundary matching across transition.
+ */
+export class TwoStageSpline {
+  constructor(stage1, stage2) {
+    this.poly1 = stage1;
+    this.poly2 = stage2;
+    this.T1 = stage1.T;
+    this.T2 = stage2.T;
+    this.T = this.T1 + this.T2;
+  }
+
+  eval(t) {
+    if (t <= this.T1) return this.poly1.eval(t);
+    return this.poly2.eval(t - this.T1);
+  }
+
+  deriv(t) {
+    if (t <= this.T1) return this.poly1.deriv(t);
+    return this.poly2.deriv(t - this.T1);
+  }
+
+  accel(t) {
+    if (t <= this.T1) return this.poly1.accel(t);
+    return this.poly2.accel(t - this.T1);
+  }
+}
 
 /**
  * Extract collision half-extents from vehicle instance or specifications.
@@ -133,6 +218,7 @@ export class FrenetLatticePlanner {
     this.pointCount = Math.max(12, Math.trunc(pointCount));
     this.horizonS = Math.max(2.8, finite(horizonS, 3.4));
     this.lastSelectedOffset = null;
+    this.lastSelectedTrajectory = null;
     this.lastCandidates = [];
   }
 
@@ -141,6 +227,7 @@ export class FrenetLatticePlanner {
    */
   reset() {
     this.lastSelectedOffset = null;
+    this.lastSelectedTrajectory = null;
     this.lastCandidates = [];
   }
 
@@ -166,7 +253,12 @@ export class FrenetLatticePlanner {
     kerbAllowance = 0,
     intentType = 'STANDARD',
     racecraftPhase = 'NONE',
-    weights = {}
+    weights = {},
+    curve = null,
+    startV = 0,
+    startA = 0,
+    previousPlan = null,
+    dtSinceLastPlan = 0.04
   }) {
     const points = [];
     const smoothQ = new Float64Array(this.pointCount);
@@ -213,6 +305,10 @@ export class FrenetLatticePlanner {
     const rejoinL = shift !== 0 ? vRejoin * Math.sqrt((2 * Math.abs(shift)) / REJOIN_A) : 0;
     const rejoinSpan = Math.max(3.0, rejoinL);
 
+    const poly = (!curve && !(isPaceLine && hasReference))
+      ? new QuinticPolynomial(startLateral, startV, startA, terminalLateral, 0, 0, Math.max(0.2, transitionTime))
+      : null;
+
     for (let index = 0; index < this.pointCount; index += 1) {
       const time = (horizon * index) / (this.pointCount - 1);
       const predictedSpeed = clamp(startSpeed + acceleration * time, 0, 95);
@@ -235,11 +331,15 @@ export class FrenetLatticePlanner {
         : effectiveRoadMargin;
       const surfaceLimit = Math.min(effectiveRoadMargin, finite(localLimit, effectiveRoadMargin) + kerbAllowance);
 
-      // Combine minimum-jerk intentional transition with (1-x)^2 parabolic line rejoin
+      // Combine C2 quintic transitions with (1-x)^2 parabolic line rejoin
       let unclampedLateral;
-      if (isPaceLine && hasReference) {
+      if (curve) {
+        unclampedLateral = curve.eval(time);
+      } else if (isPaceLine && hasReference) {
         const rejoinW = shift !== 0 ? parabolicRejoin(shift, forwardDistance, rejoinSpan) : 0;
         unclampedLateral = clamp(refLineVal, -surfaceLimit, surfaceLimit) + rejoinW;
+      } else if (poly) {
+        unclampedLateral = poly.eval(time);
       } else {
         const targetQ = clamp(terminalLateral, -surfaceLimit, surfaceLimit);
         unclampedLateral = startLateral + (targetQ - startLateral) * blend;
@@ -377,23 +477,30 @@ export class FrenetLatticePlanner {
         kp = (sKP - sKM) / 4.0;
       }
 
-      pathGeom(signedK, kp, curr.lateral, d1[index], d2[index], gScratch);
-      curr.curvature = gScratch.kappa;
-      maxCurvature = Math.max(maxCurvature, gScratch.kappa);
-
-      const totalLatAccel = curr.predictedSpeed ** 2 * gScratch.kappa;
-      maxLateralAcceleration = Math.max(maxLateralAcceleration, totalLatAccel);
+      let pointLatAccel;
+      if (curve && typeof curve.accel === 'function') {
+        const curveAccel = finite(curve.accel(curr.time), 0);
+        pointLatAccel = Math.abs(curveAccel + curr.predictedSpeed ** 2 * signedK);
+        curr.curvature = pointLatAccel / Math.max(1.0, curr.predictedSpeed ** 2);
+      } else {
+        pathGeom(signedK, kp, curr.lateral, d1[index], d2[index], gScratch);
+        curr.curvature = gScratch.kappa;
+        pointLatAccel = curr.predictedSpeed ** 2 * gScratch.kappa;
+      }
+      maxCurvature = Math.max(maxCurvature, curr.curvature);
+      maxLateralAcceleration = Math.max(maxLateralAcceleration, pointLatAccel);
     }
 
     // Lateral dynamics budget
     const availableLatG = (7.5 + aggression * 5.0) * (1.0 + kerbAllowance * 0.12);
     const accelerationExcess = Math.max(0, maxLateralAcceleration - availableLatG);
+    const clampedExcess = Math.min(10.0, accelerationExcess);
 
     // Multi-objective cost weighting
     const wProg = weights.prog ?? (0.8 + aggression * 0.4);
     const wColl = weights.coll ?? 1.0;
     const wEdge = weights.edge ?? (42.0 * (1.0 - aggression * 0.45));
-    const wAccel = weights.accel ?? 9.0;
+    const wAccel = weights.accel ?? 3.5;
     const wJerk = weights.jerk ?? (committed ? 0.7 : 1.3);
     const wIntent = weights.intent ?? (committed ? 190.0 : 45.0);
 
@@ -414,9 +521,46 @@ export class FrenetLatticePlanner {
     const costRoadViolation = roadViolation * 1e6;
     const costCollision = collisionRisk * wColl;
     const costEdge = edgeRisk * wEdge;
-    const costAccel = accelerationExcess * accelerationExcess * wAccel;
+    const costAccel = clampedExcess * clampedExcess * wAccel;
     const costJerk = (lateralDelta * 0.20 + (committed ? transitionTime * 1.0 : transitionTime * 0.22)) * wJerk;
     const costIntent = intentError * intentError * wIntent;
+
+    // Full-path trajectory switching cost against previously active plan
+    let costSwitching = 0;
+    if (previousPlan && Array.isArray(previousPlan.points) && previousPlan.points.length > 0) {
+      let pathDiffSum = 0;
+      const dt = horizon / Math.max(1, this.pointCount - 1);
+      const prevPoints = previousPlan.points;
+      const nPrev = prevPoints.length;
+      for (let i = 0; i < points.length; i++) {
+        const tCheck = points[i].time + dtSinceLastPlan;
+        let pLat = prevPoints[nPrev - 1].lateral;
+        if (tCheck <= prevPoints[0].time) {
+          pLat = prevPoints[0].lateral;
+        } else if (tCheck < prevPoints[nPrev - 1].time) {
+          for (let j = 0; j < nPrev - 1; j++) {
+            if (tCheck >= prevPoints[j].time && tCheck <= prevPoints[j + 1].time) {
+              const span = Math.max(1e-4, prevPoints[j + 1].time - prevPoints[j].time);
+              const frac = (tCheck - prevPoints[j].time) / span;
+              pLat = prevPoints[j].lateral + frac * (prevPoints[j + 1].lateral - prevPoints[j].lateral);
+              break;
+            }
+          }
+        }
+        const dLat = points[i].lateral - pLat;
+        pathDiffSum += dLat * dLat * dt;
+      }
+      costSwitching = pathDiffSum * 28.0;
+
+      const prevTargetLat = previousPlan.selectedOffset ?? previousPlan.terminalLateral;
+      if (Number.isFinite(prevTargetLat)) {
+        const prevDir = Math.sign(prevTargetLat - startLateral);
+        const newDir = Math.sign(terminalLateral - startLateral);
+        if (prevDir !== 0 && newDir !== 0 && prevDir !== newDir && Math.abs(terminalLateral - prevTargetLat) > 0.8) {
+          costSwitching += 35.0;
+        }
+      }
+    }
 
     const rewardProgress = -avgSpeed * wProg;
     const costHysteresis = (this.lastSelectedOffset !== null && Math.abs(terminalLateral - this.lastSelectedOffset) < 0.25) ? -22.0 : 0;
@@ -427,6 +571,7 @@ export class FrenetLatticePlanner {
       + costAccel
       + costJerk
       + costIntent
+      + costSwitching
       + rewardProgress
       + rewardWidth
       + costHysteresis;
@@ -450,6 +595,7 @@ export class FrenetLatticePlanner {
         accelerationExcess: costAccel,
         jerk: costJerk,
         intent: costIntent,
+        switching: costSwitching,
         progressReward: rewardProgress,
         trackWidthReward: rewardWidth,
         hysteresisBonus: costHysteresis
@@ -467,7 +613,7 @@ export class FrenetLatticePlanner {
     track,
     desiredOffset = 0,
     fallbackOffsets = [],
-    tacticalCandidates = [], // Array of { offset, intentType, transitionScales }
+    tacticalCandidates = [], // Array of { offset, intentType, transitionScales, curve }
     trafficEntries = [],
     targetSpeed = vehicle?.speed ?? 0,
     aggression = 0.5,
@@ -483,7 +629,9 @@ export class FrenetLatticePlanner {
     lookAhead = 12,
     trackingDistance = null,
     referenceLineAtDistance = null,
-    weights = {}
+    weights = {},
+    previousPlan = null,
+    dtSinceLastPlan = 0.04
   }) {
     const currentLateral = finite(vehicle?.surface?.lateral, 0);
     const nominalHalfWidth = finite(track?.roadHalfWidth, 6.5);
@@ -493,24 +641,73 @@ export class FrenetLatticePlanner {
     const minBound = Number.isFinite(dMin) ? Math.max(-margin, dMin) : -margin;
     const maxBound = Number.isFinite(dMax) ? Math.min(margin, dMax) : margin;
     const intendedOffset = clamp(finite(desiredOffset), minBound, maxBound);
-    const committed = pitActive || ['SLINGSHOT', 'ATTACK', 'ATTACK_LEFT', 'ATTACK_RIGHT', 'ATTACK_INSIDE', 'ATTACK_OUTSIDE', 'DIVEBOMB', 'SWITCHBACK', 'DEFEND_LEFT', 'DEFEND_RIGHT', 'DEFEND_INSIDE', 'BREAK_TOW', 'APEX_SHIELD', 'EXIT_SQUEEZE'].includes(racecraftPhase);
+    const committed = pitActive || ['SLINGSHOT', 'ATTACK', 'ATTACK_LEFT', 'ATTACK_RIGHT', 'ATTACK_INSIDE', 'ATTACK_OUTSIDE', 'DIVEBOMB', 'SWITCHBACK', 'DEFEND_LEFT', 'DEFEND_RIGHT', 'DEFEND_INSIDE', 'BREAK_TOW', 'APEX_SHIELD', 'EXIT_SQUEEZE', 'ABORT_HOLD', 'ABORT_BLEND'].includes(racecraftPhase);
     const urgentManeuver = committed || recovering || urgent;
+
+    let startV = 0;
+    let startA = 0;
+    if (previousPlan && !recovering) {
+      startV = clamp(finite(vehicle?.localVelocity?.x, 0), -3.0, 3.0);
+      startA = clamp(finite(vehicle?.localAcceleration?.x, 0), -6.0, 6.0);
+    }
 
     // Collect lateral target offsets for lattice generation
     const customOffsetEntries = [];
     if (tacticalCandidates && tacticalCandidates.length > 0) {
       for (const tc of tacticalCandidates) {
-        if (Number.isFinite(tc.offset)) {
+        if (Number.isFinite(tc.offset) || tc.curve) {
           customOffsetEntries.push({
-            offset: clamp(tc.offset, minBound, maxBound),
+            offset: Number.isFinite(tc.offset) ? clamp(tc.offset, minBound, maxBound) : intendedOffset,
             intentType: tc.intentType || 'TACTICAL',
-            transitionScales: tc.transitionScales || null
+            transitionScales: tc.transitionScales || null,
+            curve: tc.curve || null
           });
         }
       }
     }
 
-    // Generate balanced left, center, right, and evasive candidates
+    const availableLatAccel = 7.5 + clamp(finite(aggression, 0.5), 0, 1) * 5.0;
+
+    // Multi-stage trajectory families for combat maneuvers
+    if (racecraftPhase === 'SLINGSHOT') {
+      const latSpan = Math.abs(intendedOffset - currentLateral);
+      const T1 = clamp(Math.sqrt(5.8 * latSpan / Math.max(2.0, availableLatAccel)), 0.80, 1.60);
+      const T2 = 1.20;
+      const p1 = new QuinticPolynomial(currentLateral, startV, startA, intendedOffset, 0, 0, T1);
+      const p2 = new QuinticPolynomial(intendedOffset, 0, 0, intendedOffset, 0, 0, T2);
+      customOffsetEntries.push({
+        offset: intendedOffset,
+        intentType: 'SLINGSHOT_TWO_STAGE',
+        transitionScales: [1.0],
+        curve: new TwoStageSpline(p1, p2)
+      });
+    } else if (racecraftPhase === 'SWITCHBACK') {
+      const wideLat = clamp(currentLateral + (Math.sign(currentLateral) || 1) * 0.9, minBound, maxBound);
+      const latSpan = Math.abs(wideLat - currentLateral);
+      const T1 = clamp(Math.sqrt(5.8 * latSpan / Math.max(2.0, availableLatAccel)), 0.80, 1.40);
+      const T2 = clamp(Math.sqrt(5.8 * Math.abs(intendedOffset - wideLat) / Math.max(2.0, availableLatAccel)), 0.90, 1.60);
+      const p1 = new QuinticPolynomial(currentLateral, startV, startA, wideLat, 0, 0, T1);
+      const p2 = new QuinticPolynomial(wideLat, 0, 0, intendedOffset, 0, 0, T2);
+      customOffsetEntries.push({
+        offset: intendedOffset,
+        intentType: 'SWITCHBACK_TWO_STAGE',
+        transitionScales: [1.0],
+        curve: new TwoStageSpline(p1, p2)
+      });
+    } else if (racecraftPhase === 'ABORT_HOLD' || racecraftPhase === 'ABORT_BLEND') {
+      const T1 = 0.50;
+      const T2 = 1.50;
+      const p1 = new QuinticPolynomial(currentLateral, startV, startA, currentLateral, 0, 0, T1);
+      const p2 = new QuinticPolynomial(currentLateral, 0, 0, intendedOffset, 0, 0, T2);
+      customOffsetEntries.push({
+        offset: intendedOffset,
+        intentType: 'SOFT_ABORT',
+        transitionScales: [1.0],
+        curve: new TwoStageSpline(p1, p2)
+      });
+    }
+
+    // Generate balanced left, center, right, and dense tactical candidates
     const oppositeLane = intendedOffset > 0.5 ? -Math.min(margin * 0.75, intendedOffset) : (intendedOffset < -0.5 ? Math.min(margin * 0.75, -intendedOffset) : 0);
     const rawPool = recovering
       ? [intendedOffset, currentLateral, 0]
@@ -523,6 +720,14 @@ export class FrenetLatticePlanner {
           -margin * 0.65,
           margin * 0.65
         ];
+
+    if (!recovering && Math.abs(intendedOffset - currentLateral) > 0.4) {
+      rawPool.push(
+        currentLateral + 0.33 * (intendedOffset - currentLateral),
+        currentLateral + 0.66 * (intendedOffset - currentLateral)
+      );
+    }
+
     const candidatePool = committed
       ? rawPool.map((c) => clamp(c, minBound, maxBound))
       : rawPool;
@@ -541,20 +746,39 @@ export class FrenetLatticePlanner {
 
         // If the opponent occupies or threatens the intended line, synthesize open flanking corridors
         if (Math.abs(intendedOffset - oppLat) < passGap) {
-          const leftFlank = clamp(oppLat - passGap, -margin, margin);
-          const rightFlank = clamp(oppLat + passGap, -margin, margin);
-          const wideLeftFlank = clamp(oppLat - passGap - 0.75, -margin, margin);
-          const wideRightFlank = clamp(oppLat + passGap + 0.75, -margin, margin);
+          const leftFlank = clamp(oppLat - passGap, minBound, maxBound);
+          const rightFlank = clamp(oppLat + passGap, minBound, maxBound);
+          const wideLeftFlank = clamp(oppLat - passGap - 0.75, minBound, maxBound);
+          const wideRightFlank = clamp(oppLat + passGap + 0.75, minBound, maxBound);
 
           candidatePool.push(leftFlank, rightFlank, wideLeftFlank, wideRightFlank);
         }
       }
     }
 
-    const standardOffsets = uniqueOffsets(candidatePool, -margin, margin);
+    // Filter out intermediate candidates that fall inside an active opponent's occupied lateral zone
+    const cleanPool = candidatePool.filter((offset) => {
+      if (Math.abs(offset - intendedOffset) < 0.05) return true;
+      if (Math.abs(offset - currentLateral) < 0.05) return true;
+      if (fallbackOffsets.some((fb) => Math.abs(offset - fb) < 0.05)) return true;
+      for (const entry of trafficEntries || []) {
+        if (!entry?.other || entry.other.finished || entry.other.despawned || entry.other.trafficGhost) continue;
+        const delta = finite(entry.delta, 999);
+        if (delta < -2.0 || delta > Math.max(25.0, lookAhead * 1.8)) continue;
+        const egoExtents = getVehicleBoundingExtents(vehicle);
+        const oppExtents = getVehicleBoundingExtents(entry.other);
+        const passGap = egoExtents.halfWidth + oppExtents.halfWidth + 0.85;
+        const oppLat = finite(entry.otherLateral, finite(entry.other.surface?.lateral, 0));
+        if (Math.abs(offset - oppLat) < passGap - 0.15) {
+          return false;
+        }
+      }
+      return true;
+    });
+
+    const standardOffsets = uniqueOffsets(cleanPool, minBound, maxBound);
 
     const lateralDelta = Math.abs(intendedOffset - currentLateral);
-    const availableLatAccel = 7.5 + clamp(finite(aggression, 0.5), 0, 1) * 5.0;
     const physicalMinTime = Math.sqrt(5.8 * lateralDelta / Math.max(2.0, availableLatAccel));
     const vSpeed = finite(vehicle?.speed, 10);
     const speedTransitionFloor = vSpeed > 40.0 ? 1.25 : (urgentManeuver ? 0.75 : 1.05);
@@ -594,7 +818,12 @@ export class FrenetLatticePlanner {
           kerbAllowance,
           intentType,
           racecraftPhase,
-          weights
+          weights,
+          curve: null,
+          startV,
+          startA,
+          previousPlan,
+          dtSinceLastPlan
         }));
       }
     }
@@ -621,8 +850,24 @@ export class FrenetLatticePlanner {
           kerbAllowance,
           intentType: entry.intentType,
           racecraftPhase,
-          weights
+          weights,
+          curve: entry.curve || null,
+          startV,
+          startA,
+          previousPlan,
+          dtSinceLastPlan
         }));
+      }
+    }
+
+    // Loyalty hysteresis bonus for continuing the ongoing candidate
+    if (previousPlan && Number.isFinite(previousPlan.selectedOffset)) {
+      const prevTarget = previousPlan.selectedOffset;
+      const ongoing = candidateTrajectories.find((c) =>
+        Math.abs(c.terminalLateral - prevTarget) < 0.35
+      );
+      if (ongoing) {
+        ongoing.score -= 35.0;
       }
     }
 
@@ -634,11 +879,26 @@ export class FrenetLatticePlanner {
     const safeCandidates = candidateTrajectories.filter((c) => c.collisionFree && c.roadLegal);
 
     // Pick best candidate, fallback to candidate with maximum future clearance
-    const selected = safeCandidates[0] ?? [...candidateTrajectories].sort((a, b) =>
+    let selected = safeCandidates[0] ?? [...candidateTrajectories].sort((a, b) =>
       b.futureMinimumClearanceM - a.futureMinimumClearanceM || a.score - b.score
     )[0];
 
+    // Switching margin: if switching away from ongoing candidate to a divergent trajectory, require decisive improvement
+    if (previousPlan && Number.isFinite(previousPlan.selectedOffset) && safeCandidates.length > 1) {
+      const prevTarget = previousPlan.selectedOffset;
+      const ongoingCandidate = safeCandidates.find((c) => Math.abs(c.terminalLateral - prevTarget) < 0.35);
+      if (ongoingCandidate && selected !== ongoingCandidate) {
+        const isDirectionReversal = Math.sign(selected.terminalLateral - currentLateral) !== Math.sign(prevTarget - currentLateral)
+          && Math.abs(selected.terminalLateral - prevTarget) > 0.8;
+        const switchMargin = isDirectionReversal ? 40.0 : 20.0;
+        if (selected.score > ongoingCandidate.score - switchMargin) {
+          selected = ongoingCandidate;
+        }
+      }
+    }
+
     this.lastSelectedOffset = selected.terminalLateral;
+    this.lastSelectedTrajectory = selected;
 
     // Filter diagnostic candidates for 3D visualization
     const visualCandidates = [selected];
@@ -674,6 +934,10 @@ export class FrenetLatticePlanner {
       transitionTimeS: selected.transitionTime,
       score: selected.score,
       candidateCount: candidateTrajectories.length,
+      rawCandidateCount: candidatePool.length,
+      uniqueOffsetCount: standardOffsets.length,
+      evaluatedTrajectoryCount: candidateTrajectories.length,
+      safeTrajectoryCount: safeCandidates.length,
       collisionFree: selected.collisionFree,
       roadLegal: selected.roadLegal,
       minimumClearanceM: selected.minimumClearanceM,

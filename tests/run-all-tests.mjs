@@ -53,6 +53,12 @@ const TEST_SUITES = [
     name: 'Multi-Class Flying Lap Pace Benchmark Suite',
     file: 'pace-benchmark-test.mjs',
     description: 'Autonomous flying lap pace verification across Prototype, GT, and Touring on flat and elevation circuits'
+  },
+  {
+    id: 'decision-stability',
+    name: 'Decision Stability & Anti-Indecision Suite',
+    file: 'decision-stability-test.mjs',
+    description: 'Temporal decision stability, 10Hz/25Hz/120Hz multirate decoupling, C2 trajectory switching hysteresis, and anti-twitching verification'
   }
 ];
 

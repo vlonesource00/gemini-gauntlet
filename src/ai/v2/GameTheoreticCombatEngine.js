@@ -56,14 +56,23 @@ export class GameTheoreticCombatEngine {
     this.threatScore = 0;
 
     // Attack Iterative Best Response (IBR) state
-    this.attackMode = 'NONE'; // 'NONE', 'SLINGSHOT', 'DIVEBOMB', 'SWITCHBACK', 'SIDE_BY_SIDE', 'ATTACK_INSIDE', 'ATTACK_OUTSIDE'
+    this.attackMode = 'NONE'; // 'NONE', 'SLINGSHOT', 'DIVEBOMB', 'SWITCHBACK', 'SIDE_BY_SIDE', 'OVERTAKE', 'ABORT_HOLD', 'ABORT_BLEND', 'PACE'
     this.attackTargetId = null;
     this.passedTargetId = null;
     this.targetLockTimer = 0;
     this.attackTimer = 0;
     this.attackIntensity = 0;
+    this.attackSide = 0;
+    this.attackSideLocked = false;
+    this.passClearDwell = 0;
     this.switchbackStage = 'NONE'; // 'NONE', 'ENTRY_WIDE', 'EXIT_UNDERCUT'
     this.divebombCommitted = false;
+
+    // Temporal Commitment & Anti-Indecision Timers
+    this.commitDwellTimer = 0;        // Holds commitment for at least 0.50s
+    this.abortDwellTimer = 0;         // Holds soft abort sequence (0.30s hold, 0.25s blend)
+    this.stabilizeDwellTimer = 0;     // Prevents rapid re-triggering for 0.25s
+    this.insideClosedFilterTimer = 0; // Schmitt trigger filter
 
     // Multi-apex geometry state
     this.compoundTurnDetected = false;
@@ -107,6 +116,11 @@ export class GameTheoreticCombatEngine {
     this.passClearDwell = 0;
     this.switchbackStage = 'NONE';
     this.divebombCommitted = false;
+
+    this.commitDwellTimer = 0;
+    this.abortDwellTimer = 0;
+    this.stabilizeDwellTimer = 0;
+    this.insideClosedFilterTimer = 0;
 
     this.compoundTurnDetected = false;
     return this;
@@ -421,6 +435,9 @@ export class GameTheoreticCombatEngine {
     let atkDesiredSpeed = optimalSample.targetSpeed;
     let atkNotes = 'NONE';
 
+    if (this.commitDwellTimer > 0) this.commitDwellTimer = Math.max(0, this.commitDwellTimer - dt);
+    if (this.stabilizeDwellTimer > 0) this.stabilizeDwellTimer = Math.max(0, this.stabilizeDwellTimer - dt);
+
     if (targetAhead && targetAhead.delta < 55.0) {
       isAttacking = true;
       this.attackTargetId = targetAhead.other?.id ?? null;
@@ -430,10 +447,26 @@ export class GameTheoreticCombatEngine {
       const targetSpeed = finite(targetAhead.other?.speed ?? targetAhead.otherForwardSpeed, vSpeed);
       const opponentLat = finite(targetAhead.otherLateral ?? targetAhead.other?.surface?.lateral, 0);
       const closingSpeed = Math.max(0, vSpeed - targetSpeed);
-
-      // Check if inside line is open (opponent is leaving space on inside curb)
-      const isInsideOpen = Math.abs(opponentLat - insideOffset) > 1.6;
       const isSideBySide = Math.abs(gap) < this.carLength * 1.35;
+
+      // Inside opening width relative to inside curb apex offset
+      const insideOpeningWidth = Math.abs(opponentLat - insideOffset);
+
+      // Schmitt trigger hysteresis:
+      // - To ENTER divebomb: inside corridor must be wide open (> 1.80m)
+      // - To EXIT/ABORT divebomb: inside corridor must pinch below 1.25m AND stay pinched for >= 0.20s
+      let isInsideOpen;
+      if (this.attackMode === 'DIVEBOMB') {
+        if (insideOpeningWidth < 1.25) {
+          this.insideClosedFilterTimer += dt;
+        } else {
+          this.insideClosedFilterTimer = 0;
+        }
+        isInsideOpen = this.insideClosedFilterTimer < 0.20;
+      } else {
+        this.insideClosedFilterTimer = 0;
+        isInsideOpen = insideOpeningWidth > 1.80;
+      }
 
       if (gap < -requiredPassClearance) {
         this.passClearDwell += dt;
@@ -448,6 +481,9 @@ export class GameTheoreticCombatEngine {
           this.attackSideLocked = false;
           this.attackSide = 0;
           this.passClearDwell = 0;
+          this.commitDwellTimer = 0;
+          this.abortDwellTimer = 0;
+          this.stabilizeDwellTimer = 0.25;
           isAttacking = false;
         }
       } else {
@@ -455,9 +491,30 @@ export class GameTheoreticCombatEngine {
       }
 
       if (isAttacking) {
-        if (isSideBySide) {
+        if (this.attackMode === 'ABORT_HOLD') {
+          this.abortDwellTimer -= dt;
+          atkTargetLat = currentLat;
+          atkDesiredSpeed = Math.min(optimalSample.targetSpeed, targetSpeed + 1.0);
+          atkNotes = 'ATTACK_ABORT_HOLD_MOMENTUM';
+          if (this.abortDwellTimer <= 0) {
+            this.attackMode = 'ABORT_BLEND';
+            this.abortDwellTimer = 0.25;
+          }
+        } else if (this.attackMode === 'ABORT_BLEND') {
+          this.abortDwellTimer -= dt;
+          atkTargetLat = optimalLat;
+          atkDesiredSpeed = optimalSample.targetSpeed;
+          atkNotes = 'ATTACK_ABORT_BLEND_LINE';
+          if (this.abortDwellTimer <= 0) {
+            this.attackMode = 'NONE';
+            this.attackSideLocked = false;
+            this.attackSide = 0;
+            this.stabilizeDwellTimer = 0.25;
+          }
+        } else if (isSideBySide) {
           // Resilient Side-by-Side Overlap Combat (Keep assigned locked flank with guaranteed daylight)
           this.attackMode = 'SIDE_BY_SIDE';
+          this.commitDwellTimer = 0.35;
           if (!this.attackSideLocked || this.attackSide === 0) {
             this.attackSide = currentLat >= opponentLat ? 1 : -1;
             this.attackSideLocked = true;
@@ -467,6 +524,48 @@ export class GameTheoreticCombatEngine {
           atkTargetLat = clamp(opponentLat + mySide * (this.carWidth + minDaylight), -maxMargin, maxMargin);
           atkDesiredSpeed = Math.min(optimalSample.targetSpeed * 1.04, Math.max(optimalSample.targetSpeed * 0.95, targetSpeed + 2.5));
           atkNotes = 'ATTACK_SIDE_BY_SIDE_HOLD';
+        } else if (this.attackMode === 'DIVEBOMB') {
+          // In committed divebomb: check if inside closed to trigger soft abort, else hold line
+          if (!isInsideOpen) {
+            this.attackMode = 'ABORT_HOLD';
+            this.abortDwellTimer = 0.30;
+            this.divebombCommitted = false;
+            this.commitDwellTimer = 0;
+            atkTargetLat = currentLat;
+            atkDesiredSpeed = Math.min(optimalSample.targetSpeed, targetSpeed + 1.0);
+            atkNotes = 'ATTACK_ABORT_HOLD_MOMENTUM';
+          } else {
+            this.attackIntensity = 0.96;
+            this.attackSide = primaryInsideSign;
+            this.attackSideLocked = true;
+            atkTargetLat = insideOffset;
+            atkDesiredSpeed = multiApex.isChicane
+              ? Math.max(optimalSample.targetSpeed * 0.99, targetSpeed + 3.5)
+              : Math.max(optimalSample.targetSpeed * 1.02, targetSpeed + 4.0);
+            atkNotes = multiApex.isChicane ? 'ATTACK_CHICANE_IBR_DIVEBOMB' : 'ATTACK_FEARLESS_IBR_DIVEBOMB';
+          }
+        } else if (this.attackMode === 'SWITCHBACK' && this.commitDwellTimer > 0) {
+          // Committed switchback dwell
+          this.attackIntensity = 0.90;
+          this.attackSide = -primaryInsideSign;
+          this.attackSideLocked = true;
+          const isAtApex = multiApex.primaryDist < 12.0;
+          if (!isAtApex) {
+            this.switchbackStage = 'ENTRY_WIDE';
+            atkTargetLat = clamp(-primaryInsideSign * (maxMargin * 0.82), -maxMargin, maxMargin);
+            atkDesiredSpeed = optimalSample.targetSpeed * 0.97;
+            atkNotes = 'ATTACK_SWITCHBACK_WIDE_ENTRY';
+          } else {
+            this.switchbackStage = 'EXIT_UNDERCUT';
+            atkTargetLat = clamp(primaryInsideSign * (maxMargin * 0.50), -maxMargin, maxMargin);
+            atkDesiredSpeed = Math.max(optimalSample.targetSpeed * 1.04, targetSpeed + 3.5);
+            atkNotes = 'ATTACK_SWITCHBACK_EXIT_UNDERCUT';
+          }
+        } else if (this.stabilizeDwellTimer > 0) {
+          // Post-abort or post-pass stabilization dwell: track optimal line smoothly
+          atkTargetLat = optimalLat;
+          atkDesiredSpeed = optimalSample.targetSpeed;
+          atkNotes = 'ATTACK_STABILIZE_LINE';
         } else if (isStraight && gap > 4.5) {
           // High-Speed Slipstream Slingshot
           this.attackMode = 'SLINGSHOT';
@@ -479,7 +578,9 @@ export class GameTheoreticCombatEngine {
           if (shouldPullOut) {
             if (!this.attackSideLocked || this.attackSide === 0) {
               this.attackSide = opponentLat >= 0 ? -1 : 1;
+              this.attackSideLocked = true;
             }
+            this.commitDwellTimer = 0.40;
             const pullSide = this.attackSide;
             atkTargetLat = clamp(opponentLat + pullSide * 3.2, -maxMargin, maxMargin);
             atkNotes = 'ATTACK_SLINGSHOT_PUNCH_OUT';
@@ -489,49 +590,35 @@ export class GameTheoreticCombatEngine {
             atkNotes = 'ATTACK_SLINGSHOT_DRAFTING';
           }
         } else if (isApproachingCorner && isInsideOpen && gap < 28.0 && vSpeed > 22.0 && closingSpeed > 0.5) {
-          // Inside Apex Pass
+          // Initiate Inside Apex Pass with commitment dwell
           this.attackMode = 'DIVEBOMB';
           this.divebombCommitted = true;
+          this.commitDwellTimer = 0.50;
           this.attackIntensity = 0.96;
-          if (!this.attackSideLocked || this.attackSide === 0) {
-            this.attackSide = primaryInsideSign;
-            this.attackSideLocked = true;
-          }
+          this.attackSide = primaryInsideSign;
+          this.attackSideLocked = true;
           atkTargetLat = insideOffset;
-
-          if (multiApex.isChicane) {
-            atkDesiredSpeed = Math.max(optimalSample.targetSpeed * 0.99, targetSpeed + 3.5);
-            atkNotes = 'ATTACK_CHICANE_IBR_DIVEBOMB';
-          } else {
-            atkDesiredSpeed = Math.max(optimalSample.targetSpeed * 1.02, targetSpeed + 4.0);
-            atkNotes = 'ATTACK_FEARLESS_IBR_DIVEBOMB';
-          }
+          atkDesiredSpeed = multiApex.isChicane
+            ? Math.max(optimalSample.targetSpeed * 0.99, targetSpeed + 3.5)
+            : Math.max(optimalSample.targetSpeed * 1.02, targetSpeed + 4.0);
+          atkNotes = multiApex.isChicane ? 'ATTACK_CHICANE_IBR_DIVEBOMB' : 'ATTACK_FEARLESS_IBR_DIVEBOMB';
         } else if (isApproachingCorner && !isInsideOpen && gap < 28.0 && vSpeed > 22.0) {
-          // Diamond Line Switchback Undercut (Late apex counter to inside defender)
+          // Initiate Diamond Line Switchback Undercut with commitment dwell
           this.attackMode = 'SWITCHBACK';
           this.attackIntensity = 0.90;
-          if (!this.attackSideLocked || this.attackSide === 0) {
-            this.attackSide = -primaryInsideSign;
-            this.attackSideLocked = true;
-          }
-          const isAtApex = multiApex.primaryDist < 12.0;
-
-          if (!isAtApex) {
-            this.switchbackStage = 'ENTRY_WIDE';
-            atkTargetLat = clamp(-primaryInsideSign * (maxMargin * 0.82), -maxMargin, maxMargin);
-            atkDesiredSpeed = optimalSample.targetSpeed * 0.97;
-            atkNotes = 'ATTACK_SWITCHBACK_WIDE_ENTRY';
-          } else {
-            this.switchbackStage = 'EXIT_UNDERCUT';
-            atkTargetLat = clamp(primaryInsideSign * (maxMargin * 0.50), -maxMargin, maxMargin);
-            atkDesiredSpeed = Math.max(optimalSample.targetSpeed * 1.04, targetSpeed + 3.5);
-            atkNotes = 'ATTACK_SWITCHBACK_EXIT_UNDERCUT';
-          }
+          this.commitDwellTimer = 0.50;
+          this.attackSide = -primaryInsideSign;
+          this.attackSideLocked = true;
+          this.switchbackStage = 'ENTRY_WIDE';
+          atkTargetLat = clamp(-primaryInsideSign * (maxMargin * 0.82), -maxMargin, maxMargin);
+          atkDesiredSpeed = optimalSample.targetSpeed * 0.97;
+          atkNotes = 'ATTACK_SWITCHBACK_WIDE_ENTRY';
         } else {
           // Dynamic Overtake Corridor Selection (Dual-Flank Bypass)
           const isSlower = targetSpeed < vSpeed - 1.5 || targetSpeed < 20.0 || gap < 22.0;
           if (isSlower) {
             this.attackMode = 'OVERTAKE';
+            this.commitDwellTimer = 0.35;
             const leftSpace = maxMargin + opponentLat;
             const rightSpace = maxMargin - opponentLat;
             const minPassWidth = this.carWidth + 0.65;
@@ -543,6 +630,7 @@ export class GameTheoreticCombatEngine {
               } else {
                 this.attackSide = leftSpace >= rightSpace ? -1 : 1;
               }
+              this.attackSideLocked = true;
             }
             const passSide = this.attackSide;
             const targetPassOffset = opponentLat + passSide * Math.min(3.2, Math.max(minPassWidth, (passSide < 0 ? leftSpace : rightSpace) * 0.55));
@@ -550,6 +638,7 @@ export class GameTheoreticCombatEngine {
             atkDesiredSpeed = Math.min(optimalSample.targetSpeed * 1.04, targetSpeed + 3.0 + aggression * 2.0);
             atkNotes = 'ATTACK_OVERTAKE_BYPASS';
           } else {
+            this.attackMode = 'PACE';
             atkTargetLat = optimalLat;
             atkDesiredSpeed = optimalSample.targetSpeed;
             atkNotes = 'ATTACK_PURSUIT_LINE';
@@ -566,6 +655,8 @@ export class GameTheoreticCombatEngine {
       this.attackSideLocked = false;
       this.attackSide = 0;
       this.passClearDwell = 0;
+      this.commitDwellTimer = 0;
+      this.abortDwellTimer = 0;
     }
 
     // =========================================================================
@@ -585,44 +676,49 @@ export class GameTheoreticCombatEngine {
         // Diving inside target ahead naturally closes the inside on the challenger behind!
         targetLateral = atkTargetLat;
         desiredSpeed = Math.max(atkDesiredSpeed, defDesiredSpeed + 3.0);
-        dMin = targetLateral - 0.50;
-        dMax = targetLateral + 0.65;
+        dMin = targetLateral - 1.2;
+        dMax = targetLateral + 1.2;
         combatNotes = 'COMBAT_DUAL_DIVE_AND_SHIELD';
       } else if (this.attackMode === 'SWITCHBACK') {
         // Carry diamond entry while maintaining high speed so car behind cannot lunge
         targetLateral = atkTargetLat;
         desiredSpeed = Math.max(atkDesiredSpeed, vSpeed + 1.5);
-        dMin = targetLateral - 0.70;
-        dMax = targetLateral + 0.70;
+        dMin = targetLateral - 1.4;
+        dMax = targetLateral + 1.4;
         combatNotes = 'COMBAT_DUAL_SWITCHBACK_AND_DEFEND';
       } else if (this.attackMode === 'SLINGSHOT') {
         // Slingshot forward while breaking tow for the car behind
         targetLateral = atkTargetLat;
         desiredSpeed = Math.max(atkDesiredSpeed, defDesiredSpeed + 4.0);
-        dMin = targetLateral - 1.0;
-        dMax = targetLateral + 1.0;
+        dMin = targetLateral - 1.6;
+        dMax = targetLateral + 1.6;
         combatNotes = 'COMBAT_DUAL_SLINGSHOT_TOW_BREAK';
       } else {
         // Side by side combat: hold assigned flank firmly
         targetLateral = atkTargetLat;
         desiredSpeed = Math.max(atkDesiredSpeed, defDesiredSpeed);
-        dMin = targetLateral - 0.50;
-        dMax = targetLateral + 0.50;
+        dMin = targetLateral - 1.0;
+        dMax = targetLateral + 1.0;
         combatNotes = 'COMBAT_DUAL_TACTICAL_HOLD';
       }
     } else if (isDefending) {
       tacticalRole = 'DEFEND';
       targetLateral = defTargetLat;
       desiredSpeed = defDesiredSpeed;
-      dMin = (this.defenseMode === 'APEX_SHIELD') ? targetLateral - 0.45 : targetLateral - 1.2;
-      dMax = (this.defenseMode === 'APEX_SHIELD') ? targetLateral + 0.45 : targetLateral + 1.2;
+      dMin = (this.defenseMode === 'APEX_SHIELD') ? targetLateral - 0.45 : targetLateral - 1.4;
+      dMax = (this.defenseMode === 'APEX_SHIELD') ? targetLateral + 0.45 : targetLateral + 1.4;
       combatNotes = defNotes;
     } else if (isAttacking) {
       tacticalRole = 'ATTACK';
       targetLateral = atkTargetLat;
       desiredSpeed = atkDesiredSpeed;
-      dMin = (this.attackMode === 'DIVEBOMB') ? targetLateral - 0.55 : targetLateral - 1.2;
-      dMax = (this.attackMode === 'DIVEBOMB') ? targetLateral + 0.75 : targetLateral + 1.2;
+      if (this.attackMode === 'DIVEBOMB') {
+        dMin = targetLateral - 1.5;
+        dMax = targetLateral + 1.5;
+      } else {
+        dMin = targetLateral - 1.8;
+        dMax = targetLateral + 1.8;
+      }
       combatNotes = atkNotes;
     }
 
@@ -652,7 +748,10 @@ export class GameTheoreticCombatEngine {
         secondaryCurv: multiApex.secondaryCurv
       },
       threatScore: this.threatScore,
-      attackIntensity: this.attackIntensity
+      attackIntensity: this.attackIntensity,
+      commitDwellRemaining: Math.max(0, this.commitDwellTimer),
+      abortDwellRemaining: Math.max(0, this.abortDwellTimer),
+      tacticalPhase: (isDefending ? this.defenseMode : (isAttacking ? this.attackMode : 'PACE'))
     };
   }
 }
