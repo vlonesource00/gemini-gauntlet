@@ -240,7 +240,7 @@ export class GameTheoreticCombatEngine {
     const roadHalfW = finite(track?.roadHalfWidth, this.roadHalfWidth);
     const curbW = finite(track?.curbWidth, this.curbWidth);
     // Utilize full physical track width respecting vehicle half-width
-    const maxMargin = Math.max(2.1, Math.min(5.35, roadHalfW - 1.20 + Math.min(0.50, curbW * 0.40)));
+    const maxMargin = Math.max(2.1, roadHalfW - 0.85 + Math.min(0.65, curbW * 0.50));
 
     // Lockout timer for recently passed cars
     this.targetLockTimer = Math.max(0, this.targetLockTimer - dt);

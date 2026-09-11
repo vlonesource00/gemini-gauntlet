@@ -331,7 +331,8 @@ document.querySelector('#hud-autopilot-badge')?.addEventListener('click', () => 
   scenarioDeck.toggleAutopilot();
 });
 
-// Load default initial scenario A1
+// Load default initial scenario A1 and configure active grid
+configureActiveGrid('A1_STRAIGHT_SLIPSTREAM');
 scenarioEngine.loadScenario('A1_STRAIGHT_SLIPSTREAM');
 
 // HUD DOM Elements Cache

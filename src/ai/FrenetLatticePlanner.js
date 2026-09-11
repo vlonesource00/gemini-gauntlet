@@ -491,8 +491,10 @@ export class FrenetLatticePlanner {
       maxLateralAcceleration = Math.max(maxLateralAcceleration, pointLatAccel);
     }
 
-    // Lateral dynamics budget
-    const availableLatG = (7.5 + aggression * 5.0) * (1.0 + kerbAllowance * 0.12);
+    // Lateral dynamics budget calibrated by vehicle class capability and ground-effect aero
+    const vClass = vehicle?.classKey || 'prototype';
+    const baseLatCap = vClass === 'prototype' ? 22.0 : (vClass === 'gt' ? 13.5 : 10.5);
+    const availableLatG = (baseLatCap + aggression * 4.5) * (1.0 + kerbAllowance * 0.12);
     const accelerationExcess = Math.max(0, maxLateralAcceleration - availableLatG);
     const clampedExcess = Math.min(10.0, accelerationExcess);
 

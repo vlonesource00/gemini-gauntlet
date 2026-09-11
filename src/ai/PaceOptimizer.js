@@ -144,18 +144,18 @@ export class PaceOptimizer {
     const vEst = Math.sqrt(G * 1.55 / kappa);
     const downforceFactor = vehicleClass === 'prototype' ? saturate((vEst - 16.0) / 38.0) : 0;
 
-    // Aerodynamic downforce scaling with speed squared
-    const aeroDownforceMultiplier = vehicleClass === 'prototype'
-      ? clamp(1.0 + 0.00018 * vEst * vEst, 1.0, 1.50)
-      : vehicleClass === 'gt'
-        ? clamp(1.0 + 0.00006 * vEst * vEst, 1.0, 1.18)
-        : 1.0;
-
     // Compensate for dirty air front downforce loss
-    const aeroEffective = Math.max(0.72, aeroDownforceMultiplier * (1.0 - clamp(dirtyAirLoss, 0, 0.35)));
+    const aeroEffective = Math.max(0.72, 1.0 - clamp(dirtyAirLoss, 0, 0.35));
 
-    // Calibrated realistic mechanical + aero lateral G
-    const classBaseG = vehicleClass === 'prototype' ? (1.48 + 1.10 * downforceFactor) : vehicleClass === 'gt' ? 1.13 : 0.94;
+    // Calibrated realistic mechanical + aero lateral G matching vehicle physics limits:
+    // Prototype: 1.58g at low speed up to 2.02g at high speed (matches human benchmark 2.04g max)
+    // GT: 1.26g to 1.55g
+    // Touring: 1.05g to 1.28g
+    const classBaseG = vehicleClass === 'prototype'
+      ? (1.58 + 0.44 * downforceFactor)
+      : vehicleClass === 'gt'
+        ? (1.26 + 0.28 * downforceFactor)
+        : (1.05 + 0.22 * downforceFactor);
     const peakG = classBaseG * tireGripFactor * aeroEffective * (0.88 + skill * 0.12);
 
     // Banking bonus: a_lat_eff = g * (peakG * cos(theta) + sin(theta))
@@ -203,6 +203,7 @@ export class PaceOptimizer {
   computeSpeedEnvelope({
     vehicle,
     track,
+    optimalEngine = null,
     tireGripFactor = 1.0,
     skill = 0.85,
     aggression = 0.80,
@@ -217,8 +218,12 @@ export class PaceOptimizer {
     const vClass = vehicle?.classKey || 'prototype';
 
     // 1. Calibrate dynamic sustained braking deceleration capacity a_B (m/s²)
-    const baseDecel = vClass === 'prototype' ? 10.5 : vClass === 'gt' ? 7.5 : 5.4;
-    const brakingDecel = baseDecel * tireGripFactor * (0.85 + aggression * 0.25);
+    // Must reflect realistic full-braking zone average capability (including low-speed transition)
+    // Prototype: average 15.2 - 18.5 m/s² (matches human benchmark average with ramp-up)
+    const baseDecel = vClass === 'prototype'
+      ? (15.2 + clamp(vSpeed * 0.05, 0, 3.2))
+      : (vClass === 'gt' ? (10.8 + clamp(vSpeed * 0.03, 0, 2.0)) : 8.8);
+    const brakingDecel = baseDecel * tireGripFactor * (0.86 + aggression * 0.12);
 
     // 2. Exact multi-distance lookahead scanning distances
     const speedEnvelopeDistances = [
@@ -226,33 +231,44 @@ export class PaceOptimizer {
     ];
 
     let speedLimit = 95.0; // Track velocity ceiling
-    const previewBuffer = Math.max(0, vSpeed * 0.22);
+    const previewBuffer = clamp(vSpeed * 0.08, 2.5, 6.0);
 
     const derate = this._derate({ vehicle, track, targetOffset: insideLineOffset });
     const effectiveSkill = (skill ?? 0.85) * this.paceTrim * derate;
 
     for (const dist of speedEnvelopeDistances) {
       const sampleDist = vDist + dist;
-      const point = track?.atDistance ? track.atDistance(sampleDist) : { curvature: 0, banking: 0 };
+      let cornerSpeed;
 
-      let rawCurvature = Math.abs(finite(point.curvature, 0));
-      const roadWidth = finite(track?.roadHalfWidth, 6.5) + finite(track?.curbWidth, 1.05);
-      const flattenFactor = (vClass === 'prototype')
-        ? clamp(1.0 + 0.35 * roadWidth * Math.min(0.035, rawCurvature), 1.0, 1.25)
-        : 1.0;
-      let curvature = rawCurvature / flattenFactor;
+      if (optimalEngine?.sampleAtDistance) {
+        const optSamp = optimalEngine.sampleAtDistance(sampleDist, vClass);
+        if (optSamp && Number.isFinite(optSamp.targetSpeed)) {
+          cornerSpeed = optSamp.targetSpeed;
+        }
+      }
 
-      const safetyFactor = defending ? 0.95 : (aggression > 0.85 ? 1.03 : 0.96);
-      const physLimit = this.calculateCornerSpeed({
-        curvature,
-        banking: point.bank ?? point.banking ?? 0,
-        vehicleClass: vClass,
-        tireGripFactor,
-        skill: effectiveSkill,
-        dirtyAirLoss
-      }) * safetyFactor;
+      if (!cornerSpeed) {
+        const point = track?.atDistance ? track.atDistance(sampleDist) : { curvature: 0, banking: 0 };
+        let rawCurvature = Math.abs(finite(point.curvature, 0));
+        const roadWidth = finite(track?.roadHalfWidth, 6.5) + finite(track?.curbWidth, 1.05);
+        const flattenFactor = (vClass === 'prototype')
+          ? clamp(1.0 + 0.60 * roadWidth * Math.min(0.035, rawCurvature), 1.0, 1.80)
+          : 1.0;
+        let curvature = rawCurvature / flattenFactor;
 
-      const cornerSpeed = Math.max(5.5, physLimit);
+        const safetyFactor = defending ? 0.95 : (aggression > 0.85 ? 1.03 : 0.96);
+        const physLimit = this.calculateCornerSpeed({
+          curvature,
+          banking: point.bank ?? point.banking ?? 0,
+          vehicleClass: vClass,
+          tireGripFactor,
+          skill: effectiveSkill,
+          dirtyAirLoss
+        }) * safetyFactor;
+        cornerSpeed = Math.max(5.5, physLimit);
+      }
+
+      cornerSpeed = Math.max(5.5, cornerSpeed);
       const effectiveDist = Math.max(0, dist - previewBuffer);
       const reachableSpeed = Math.sqrt(cornerSpeed * cornerSpeed + 2.0 * brakingDecel * effectiveDist);
       speedLimit = Math.min(speedLimit, reachableSpeed);
@@ -516,7 +532,15 @@ export class PaceOptimizer {
       trailBrakingActive = true;
       const latFactor = clamp(this.trailBrakingSkill * friction.latUtilization * 0.90, 0, 0.98);
       const remainingLongitudinal = Math.sqrt(Math.max(0.04, 1.0 - Math.pow(latFactor, 2)));
-      brake = Math.min(brake, remainingLongitudinal);
+      // If vehicle is significantly overspeed (speedError < -2.5 m/s), prioritize slowing down
+      // so the car does not carry runaway speed off the track
+      if (speedError < -2.5) {
+        const urgency = clamp((-speedError - 2.5) / 5.0, 0, 1);
+        const minBrake = 0.75 * urgency;
+        brake = Math.max(minBrake, Math.min(brake, remainingLongitudinal));
+      } else {
+        brake = Math.min(brake, remainingLongitudinal);
+      }
     }
 
     // 4. Rear-Axle Saturation Slip Guard & Slide Stabilization
@@ -529,7 +553,7 @@ export class PaceOptimizer {
       if (throttle > 0) {
         throttle = Math.max(0.20, throttle * clamp(1.0 - over * 3.2, 0.20, 1.0));
       }
-      if (brake > 0 && friction.latUtilization > 0.35) {
+      if (brake > 0 && friction.latUtilization > 0.35 && speedError >= -2.5) {
         brake *= clamp(1.0 - over * 2.5, 0.25, 1.0);
       }
     }

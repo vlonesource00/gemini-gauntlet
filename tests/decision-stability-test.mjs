@@ -1,4 +1,4 @@
-﻿import assert from 'node:assert/strict';
+import assert from 'node:assert/strict';
 import { Circuit } from '../src/simulation/Track.js';
 import { ENDURANCE_PARK } from '../src/scenarios/EndurancePark.js';
 import { Vehicle } from '../src/simulation/Vehicle.js';
@@ -104,7 +104,7 @@ console.log('  -> Scenario 1: Corner approach with closing flank (Anti-Twitch & 
       priorPhase = currentPhase;
     }
 
-    const targetLat = attackerAI.trajectoryPlan?.targetOffset ?? 0;
+    const targetLat = attackerAI.trajectoryPlan?.selectedOffset ?? 0;
     const targetSign = Math.sign(targetLat);
     if (targetSign !== 0 && priorTargetSign !== 0 && targetSign !== priorTargetSign) {
       flankFlips += 1;
@@ -131,61 +131,56 @@ console.log('  -> Scenario 1: Corner approach with closing flank (Anti-Twitch & 
 // ---------------------------------------------------------------------------
 console.log('  -> Scenario 2: Trajectory Lattice Switching Cost & Solution Hysteresis...');
 {
+  const track = new Circuit(ENDURANCE_PARK);
   const planner = new FrenetLatticePlanner();
-  const context = {
-    carWidth: 1.9,
-    carLength: 4.6,
-    speed: 30,
-    racingLineLat: 0.0,
-    dMin: -2.5,
-    dMax: 2.5,
-    attackSide: 'inside',
-    overtakeStage: 'ATTACK',
-    tacticalPhase: 'DIVEBOMB'
-  };
+  const ego = new Vehicle({ id: 'ego', spec: 'prototype' });
+  ego.resetTo(track, 100, 0.0);
+  ego.speed = 30;
 
-  const opponent = {
-    distance: 40,
-    speed: 28,
-    lateralOffset: 1.0,
-    halfWidth: 1.0,
-    length: 4.6
-  };
+  const rival = new Vehicle({ id: 'rival', spec: 'prototype' });
+  rival.resetTo(track, 125, 1.2);
+  rival.speed = 28;
+
+  const trafficEntries = [{
+    other: rival,
+    delta: 25.0,
+    closingSpeed: 2.0,
+    otherLateral: 1.2
+  }];
 
   const plan1 = planner.plan({
-    s0: 0,
-    q0: 0.0,
-    v0: 30,
-    omega0: 0.0,
+    vehicle: ego,
+    track,
+    desiredOffset: -1.5,
+    trafficEntries,
     targetSpeed: 30,
-    opponents: [opponent],
-    desiredOffset: -1.2,
-    tacticalMode: 'ATTACK',
-    tacticalPhase: 'DIVEBOMB',
-    context
+    aggression: 0.95,
+    racecraftPhase: 'DIVEBOMB',
+    targetId: 'rival'
   });
 
   assert.ok(plan1, 'Planner must produce a valid plan');
-  const chosenOffset1 = plan1.targetOffset;
+  assert.ok(Number.isFinite(plan1.selectedOffset), 'Plan must define a finite selectedOffset');
+  const chosenOffset1 = plan1.selectedOffset;
 
-  const noisyOpponent = { ...opponent, lateralOffset: 1.1 };
+  // Small noise in rival lateral position (0.08m) - plan should hold existing trajectory due to hysteresis
+  rival.position.x += 0.08;
   const plan2 = planner.plan({
-    s0: 0.5,
-    q0: chosenOffset1 * 0.1,
-    v0: 30,
-    omega0: 0.0,
+    vehicle: ego,
+    track,
+    desiredOffset: -1.5,
+    trafficEntries,
     targetSpeed: 30,
-    opponents: [noisyOpponent],
-    desiredOffset: -1.2,
-    tacticalMode: 'ATTACK',
-    tacticalPhase: 'DIVEBOMB',
+    aggression: 0.95,
+    racecraftPhase: 'DIVEBOMB',
+    targetId: 'rival',
     previousPlan: plan1,
-    dtSinceLastPlan: 0.04,
-    context
+    dtSinceLastPlan: 0.04
   });
 
   assert.ok(plan2, 'Planner must produce follow-up plan');
-  assert.equal(plan2.targetOffset, chosenOffset1, 'Solution hysteresis must retain consistent offset despite minor noise');
+  assert.ok(Number.isFinite(plan2.selectedOffset), 'Follow-up plan must have selectedOffset');
+  assert.equal(plan2.selectedOffset, chosenOffset1, 'Solution hysteresis must retain consistent offset despite minor noise');
   console.log('    [PASS] Scenario 2: Trajectory lattice hysteresis and switching cost verified.');
 }
 

@@ -285,10 +285,10 @@ export class NextGenAIController {
 
     const nominalHalfWidth = finite(track.roadHalfWidth, 6.5);
     const kerbAllowance = Math.min(0.8, finite(track.curbWidth, 1.05) * 0.65) * this._kerbUsage;
-    const baseRoadMargin = Math.max(2.1, Math.min(5.35, nominalHalfWidth - 1.20 + kerbAllowance));
+    const baseRoadMargin = Math.max(2.1, nominalHalfWidth - 0.85 + kerbAllowance);
     const currentSurfaceMargin = finite(
       track.planningLateralLimit?.(vehicle.distance, current?.lateral),
-      nominalHalfWidth - 1.20
+      nominalHalfWidth - 0.85
     );
     const edgeDeviation = Math.abs(finite(current?.lateral, 0)) > currentSurfaceMargin + 0.55;
 
@@ -339,8 +339,15 @@ export class NextGenAIController {
       return;
     }
 
+    this.totalTime = (this.totalTime || 0) + dt;
+    if (this.nextTacticalTime == null) {
+      this.nextTacticalTime = (this.index % 10) * (0.10 / 10);
+    }
+    if (this.nextPlanTime == null) {
+      this.nextPlanTime = (this.index % 4) * (0.04 / 4);
+    }
+
     // 3. Layer 2: Multi-Rate Decoupled Game-Theoretic Corridor Planning (10 Hz)
-    this.tacticalTimer = (this.tacticalTimer || 0) + dt;
     const hasCloseTarget = (traffic.challenger && traffic.challenger.delta > -15.0)
       || (traffic.targetAhead && traffic.targetAhead.delta < 20.0 && traffic.targetAhead.delta > 0);
     const targetEnteredCloseRange = hasCloseTarget && !this.wasInProximity;
@@ -348,12 +355,12 @@ export class NextGenAIController {
 
     const shouldEvaluateTactics = !this.tacticalState
       || targetEnteredCloseRange
-      || this.tacticalTimer >= 0.10;
+      || this.totalTime >= this.nextTacticalTime;
 
     if (shouldEvaluateTactics) {
-      const tacticalDt = Math.max(dt, this.tacticalTimer || dt);
-      this.tacticalTimer = (this.index % 10) * (0.10 / 10);
-      this.lastTacticalEvalTime = this.totalTime || 0;
+      const tacticalDt = Math.max(dt, this.totalTime - (this.lastTacticalEvalTime || 0));
+      this.lastTacticalEvalTime = this.totalTime;
+      this.nextTacticalTime = this.totalTime + 0.10;
       this.tacticalEvalCount = (this.tacticalEvalCount || 0) + 1;
       this.tacticalState = this.combatEngine.evaluate({
         vehicle,
@@ -397,7 +404,7 @@ export class NextGenAIController {
       ? clamp(10.0 + vehicle.speed * 0.42, 10.0, 20.0)
       : clamp(Math.max(dynamicLookahead, 11.0 + vehicle.speed * 0.58), 12.0, 30.0);
 
-    const trackingDistance = clamp(lookAheadDist * 0.72 / (1.0 + currentCurv * 20.0), 5.5, 24.0);
+    const trackingDistance = clamp(lookAheadDist * 0.72 / (1.0 + currentCurv * 12.0), 8.5, 24.0);
 
     const maxTireWear = Math.max(0, ...(vehicle.wheels ?? []).map((w) => finite(w.wear, 0)));
     const tireGripFactor = clamp(1.0 - maxTireWear * 0.45, 0.80, 1.0);
@@ -406,6 +413,7 @@ export class NextGenAIController {
     const physicalTargetSpeed = this.paceOptimizer.computeSpeedEnvelope({
       vehicle,
       track,
+      optimalEngine: this.optimalEngine,
       tireGripFactor,
       skill: this.skill,
       aggression: this._aggression,
@@ -420,7 +428,6 @@ export class NextGenAIController {
     );
 
     // 4. Multi-Rate Decoupled Trajectory Lattice Evaluation (25Hz / Phase-Triggered)
-    this.planTimer = (this.planTimer || 0) + dt;
     const racecraftPhase = defending ? tactical.defenseMode : (attacking ? tactical.attackMode : 'NONE');
     const phaseChanged = (this.lastRacecraftPhase !== racecraftPhase);
     this.lastRacecraftPhase = racecraftPhase;
@@ -428,11 +435,12 @@ export class NextGenAIController {
     const shouldReplan = !this.trajectoryPlan
       || phaseChanged
       || isOffTrack
-      || this.planTimer >= 0.04;
+      || this.totalTime >= this.nextPlanTime;
 
     if (shouldReplan) {
-      const dtSinceLastPlan = this.planTimer;
-      this.planTimer = (this.index % 4) * (0.04 / 4); // time-slice phase offset across cars
+      const dtSinceLastPlan = Math.max(dt, this.totalTime - (this.lastPlanTime || 0));
+      this.lastPlanTime = this.totalTime;
+      this.nextPlanTime = this.totalTime + 0.04;
       this.trajectoryPlan = this.trajectoryPlanner.plan({
         vehicle,
         track,
@@ -501,6 +509,8 @@ export class NextGenAIController {
 
     if (recovering && isFacingBackwards) {
       headingError = Math.sign(yawAlignment) * -1.2;
+    } else {
+      headingError = clamp(headingError, -0.75, 0.75);
     }
 
     const lateralError = finite(current?.lateral, 0) - plannedTargetOffset;
@@ -635,7 +645,6 @@ export class NextGenAIController {
     this.steerCommand = finalControls.steer;
 
     // Track steering reversals & lateral load transfer rate
-    this.totalTime = (this.totalTime || 0) + dt;
     this.steeringHistory = this.steeringHistory || [];
     this.steeringHistory.push({ time: this.totalTime, steer: finalControls.steer });
     while (this.steeringHistory.length > 0 && this.totalTime - this.steeringHistory[0].time > 1.0) {

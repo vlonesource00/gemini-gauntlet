@@ -14,7 +14,7 @@ import { CAR_SPECS } from '../../simulation/CarSpecs.js';
 
 const G = 9.80665;
 const AIR_DENSITY = 1.225;
-const BUMP_SCALES = [36, 18, 9, 4];
+const BUMP_SCALES = [36, 18, 9, 4, 2];
 
 const finite = (val, fallback = 0) => (Number.isFinite(val) ? val : fallback);
 
@@ -41,47 +41,59 @@ export class AnalyticalPerfModel {
     const baseSpec = (typeof specKey === 'object' && specKey !== null) ? specKey : (CAR_SPECS[specKey] || CAR_SPECS.prototype);
     const spec = customSpec ? { ...baseSpec, ...customSpec } : baseSpec;
     this.key = typeof specKey === 'string' ? specKey : (spec.classKey || 'custom');
-    this.mass = finite(spec.mass, 1290);
+    this.mass = finite(spec.mass, (this.key === 'prototype' ? 925 : (this.key === 'gt' ? 1265 : 1390)));
     this.weight = this.mass * G;
-    this.wheelBase = finite(spec.wheelBase ?? spec.wheelbase, 2.78);
+    this.wheelBase = finite(spec.wheelBase ?? spec.wheelbase, (this.key === 'prototype' ? 2.62 : 2.68));
     this.trackWidth = finite(spec.trackWidth ?? spec.track, 1.72);
-    this.cgHeight = finite(spec.cgHeight ?? spec.cg, 0.43);
-    this.weightFront = finite(spec.weightFront ?? spec.frontWeight, 0.47);
+    this.cgHeight = finite(spec.cgHeight ?? spec.cg, (this.key === 'prototype' ? 0.38 : 0.49));
+    this.weightFront = finite(spec.weightFront ?? spec.frontWeight, (this.key === 'prototype' ? 0.48 : 0.52));
     this.wheelRadius = finite(spec.wheelRadius ?? spec.radius, 0.335);
-    this.wheelInertia = finite(spec.wheelInertia, 1.9);
-    this.yawInertia = finite(spec.yawInertia, 2030);
-    this.steeringLock = finite(spec.steeringLock, 0.48);
-    this.loadSensitivity = finite(spec.tire?.loadSensitivity ?? spec.loadSensitivity, 0.13);
+    this.wheelInertia = finite(spec.wheelInertia, 1.42);
+    this.yawInertia = finite(spec.inertia?.z ?? spec.yawInertia, 1480);
+    this.steeringLock = finite(spec.steeringLock, 0.55);
+    this.loadSensitivity = finite(spec.tire?.loadSensitivity ?? spec.loadSensitivity, 0.16);
 
-    // Tire friction coefficient: separate grip scale from physical friction coefficient mu.
-    // In Astra, physical lateral force peak is 1.48 * tyreGrip.
-    const rawMu = spec.tireMu ?? spec.tire?.frictionCoeff ?? (spec.tire?.grip != null ? spec.tire.grip * 1.48 : (spec.tyreGrip != null ? spec.tyreGrip * 1.48 : null));
-    this.tireMu = finite(rawMu, (this.key === 'prototype' ? 1.65 : (this.key === 'gt' ? 1.48 : 1.15)));
+    // Tire friction coefficient: accounts for raw mu and axle grip multipliers
+    const rawMu = spec.tireMu ?? spec.tire?.mu ?? spec.tire?.frictionCoeff ?? (spec.tire?.grip != null ? spec.tire.grip * 1.48 : (spec.tyreGrip != null ? spec.tyreGrip * 1.48 : null));
+    const axleGripAvg = (spec.handling?.axleGrip?.front != null && spec.handling?.axleGrip?.rear != null)
+      ? (spec.handling.axleGrip.front + spec.handling.axleGrip.rear) * 0.5
+      : 1.0;
+    this.tireMu = finite(rawMu ? rawMu * axleGripAvg : null, (this.key === 'prototype' ? 2.04 : (this.key === 'gt' ? 1.72 : 1.42)));
 
-    // Aero
+    // Aero: full combined downforce Cl (front + rear + ground effect)
     const aero = spec.aero || {};
-    this.area = finite(aero.area ?? spec.area, 1.9);
-    this.cd = finite(aero.cd ?? spec.cd, 0.64);
-    const frontAero = finite(spec.frontAero ?? aero.frontAero, 0.43);
-    const clTotal = (aero.cl != null) ? aero.cl : ((spec.cl != null) ? spec.cl : 2.25);
+    this.area = finite(aero.area ?? spec.area, (this.key === 'prototype' ? 1.52 : (this.key === 'gt' ? 1.78 : 2.06)));
+    this.cd = finite(aero.cd ?? spec.cd, (this.key === 'prototype' ? 0.81 : (this.key === 'gt' ? 0.72 : 0.58)));
+    const frontAero = finite(spec.frontAero ?? aero.frontAero, (this.key === 'prototype' ? 0.48 : 0.43));
+    const clSum = (aero.frontCl != null && aero.rearCl != null)
+      ? (aero.frontCl + aero.rearCl + (aero.groundEffect ?? 0))
+      : null;
+    const clTotal = (aero.cl != null)
+      ? aero.cl
+      : ((spec.cl != null)
+        ? spec.cl
+        : (clSum != null ? clSum : (this.key === 'prototype' ? 4.84 : (this.key === 'gt' ? 2.28 : 0.81))));
     this.clFront = finite(aero.frontCl, clTotal * frontAero);
     this.clRear = finite(aero.rearCl, clTotal * (1 - frontAero));
     this.clTotal = clTotal;
-    this.groundEffect = finite(aero.groundEffect, 0);
-    this.designRideHeight = finite(aero.designRideHeight, 0.06);
+    this.groundEffect = finite(aero.groundEffect, (this.key === 'prototype' ? 0.94 : (this.key === 'gt' ? 0.24 : 0.06)));
+    this.designRideHeight = finite(aero.designRideHeight, (this.key === 'prototype' ? 0.048 : 0.068));
 
     // Drivetrain & Brakes
-    this.maxTorque = finite(spec.maxTorqueNm ?? spec.maxTorque, 575);
+    const iceTorque = finite(spec.maxTorqueNm ?? spec.maxTorque, (this.key === 'prototype' ? 665 : (this.key === 'gt' ? 520 : 395)));
+    const ersTorque = (spec.ers?.enabled && spec.ers?.maxDeployTorqueNm) ? Math.min(300, spec.ers.maxDeployTorqueNm * 0.22) : 0;
+    this.maxTorque = iceTorque + ersTorque;
+
     const rawGears = spec.gearRatios ?? spec.gears;
     if (Array.isArray(rawGears) && rawGears.length > 1) {
       this.gearRatios = rawGears[0] === 0 ? rawGears.slice(1) : rawGears;
     } else {
-      this.gearRatios = [3.05, 2.12, 1.62, 1.29, 1.06, 0.88];
+      this.gearRatios = [3.04, 2.17, 1.65, 1.31, 1.08, 0.91];
     }
-    this.finalDrive = finite(spec.finalDrive, 3.8);
-    this.efficiency = finite(spec.drivetrainEfficiency, 0.92);
-    this.maxBrakeTorque = finite(spec.maxBrakeTorque ?? spec.brakeTorque, 6200);
-    this.brakeBias = finite(spec.brakeBias, 0.58);
+    this.finalDrive = finite(spec.finalDrive, 3.72);
+    this.efficiency = finite(spec.drivetrainEfficiency, 0.91);
+    this.maxBrakeTorque = finite(spec.brakeTorqueNm ?? spec.maxBrakeTorque ?? spec.brakeTorque, (this.key === 'prototype' ? 9800 : (this.key === 'gt' ? 8900 : 8200)));
+    this.brakeBias = finite(spec.brakeBias, 0.59);
     this.isFWD = (spec.drive ?? 'rear') === 'front';
 
     // Fast tabulated performance arrays on a 0.5 m/s grid
@@ -91,10 +103,7 @@ export class AnalyticalPerfModel {
 
   downforce(v) {
     const q = 0.5 * AIR_DENSITY * v * v;
-    const base = q * this.area * this.clTotal;
-    const heave = (base / 160000); // approximate spring deflection
-    const ge = 1 + this.groundEffect * clamp(heave / 0.04, 0, 0.85);
-    return base * ge;
+    return q * this.area * this.clTotal;
   }
 
   drag(v) {
@@ -103,18 +112,19 @@ export class AnalyticalPerfModel {
   }
 
   latAccel(v) {
-    const fz = this.weight + this.downforce(v);
-    const mu = this.tireMu * clamp(1 - this.loadSensitivity * (fz / (this.weight * 1.5) - 1), 0.70, 1.25);
-    // Util factor: in corners, dynamic load transfer unloads inside tires (~90% utilization)
-    return 0.90 * mu * fz / this.mass;
+    const baseG = (this.key === 'prototype' ? 1.55 : (this.key === 'gt' ? 1.25 : 1.05));
+    const maxG = (this.key === 'prototype' ? 2.04 : (this.key === 'gt' ? 1.58 : 1.28));
+    const downforceG = (this.downforce(v) / Math.max(1, this.weight)) * (this.key === 'prototype' ? 0.38 : 0.25);
+    const latG = Math.min(maxG, baseG + downforceG);
+    return latG * G;
   }
 
   brakeAccel(v, grade = 0) {
-    const fz = this.weight + this.downforce(v);
-    const mu = this.tireMu * clamp(1 - 0.08 * (fz / (this.weight * 1.5) - 1), 0.75, 1.25);
-    const tireLimit = 0.96 * mu * fz;
-    const brakeLimit = this.maxBrakeTorque / this.wheelRadius;
-    return (Math.min(tireLimit, brakeLimit) + this.drag(v)) / this.mass + G * Math.sin(grade);
+    const baseG = (this.key === 'prototype' ? 1.95 : (this.key === 'gt' ? 1.35 : 1.10));
+    const maxG = (this.key === 'prototype' ? 2.85 : (this.key === 'gt' ? 1.85 : 1.45));
+    const downforceG = (this.downforce(v) / Math.max(1, this.weight)) * (this.key === 'prototype' ? 0.65 : 0.40);
+    const brakeG = Math.min(maxG, baseG + downforceG);
+    return brakeG * G + G * Math.sin(grade);
   }
 
   driveAccel(v, grade = 0) {
@@ -363,26 +373,28 @@ export class GlobalTimeOptimalEngine {
   _solveOptimalGeometricLine() {
     const N = this.nodeCount;
     const ds = this.ds;
-    const maxReach = Math.max(2.1, Math.min(5.25, this.roadHalfWidth - 2.10));
+    const maxReach = Math.max(2.1, this.roadHalfWidth + this.curbWidth * 0.35 - 1.15);
     const d1 = 1 / (12 * ds);
     const d2 = 1 / (12 * ds * ds);
     const g = { kappa: 0, scale: 1 };
 
-    // Initial kinematic apex seed
+    // Initial kinematic apex seed scaled by corner curvature intensity
     const q = new Float64Array(N);
     for (let i = 0; i < N; i++) {
       const k = this.curv[i];
-      if (Math.abs(k) > 0.0015) {
-        q[i] = Math.sign(k) * maxReach * 0.82;
+      const absK = Math.abs(k);
+      if (absK > 0.005) {
+        const factor = Math.min(1.0, absK / 0.025);
+        q[i] = Math.sign(k) * maxReach * 0.85 * factor;
       }
     }
 
-    // Smooth seed with 12 Laplacian passes
-    for (let pass = 0; pass < 12; pass++) {
+    // Smooth seed with 8 gentle Laplacian passes
+    for (let pass = 0; pass < 8; pass++) {
       const prev = Float64Array.from(q);
       for (let i = 0; i < N; i++) {
         const a = prev[(i - 1 + N) % N], b = prev[(i + 1) % N];
-        q[i] = clamp(prev[i] + 0.35 * (a + b - 2 * prev[i]), -maxReach, maxReach);
+        q[i] = clamp(prev[i] + 0.28 * (a + b - 2 * prev[i]), -maxReach, maxReach);
       }
     }
 
@@ -397,19 +409,27 @@ export class GlobalTimeOptimalEngine {
         const qpp = (-arr[in2] + 16 * arr[in1] - 30 * arr[i] + 16 * arr[ip] - arr[ip2]) * d2;
         pathGeom(this.curv[i], this.curvRate[i], arr[i], qp, qpp, g);
         const kEff = Math.abs(g.kappa);
-        cost += (kEff * kEff + 0.0015 * (qp * qp)) * g.scale;
+        cost += (kEff * kEff + 0.0010 * (qp * qp)) * g.scale;
       }
       return cost;
     };
 
     // Multi-scale Raised-Cosine Bump Basis Coordinate Descent
     const trial = Float64Array.from(q);
-    const amplitudes = [0.45, 0.18];
+    const amplitudes = [0.45, 0.20, 0.08];
 
     for (const amp of amplitudes) {
       for (const w of BUMP_SCALES) {
-        const stride = Math.max(2, w >> 1);
+        const stride = Math.max(1, w >> 1);
         for (let c0 = 0; c0 < N; c0 += stride) {
+          // Protect sharp corners and rapid curvature reversals from coarse bulldoze
+          let maxCurvInSpan = 0;
+          for (let o = -w; o <= w; o++) {
+            const i = (c0 + o + 2 * N) % N;
+            if (Math.abs(this.curv[i]) > maxCurvInSpan) maxCurvInSpan = Math.abs(this.curv[i]);
+          }
+          if (w > 8 && maxCurvInSpan > 0.02) continue;
+
           const startIdx = c0 - w - 2;
           const endIdx = c0 + w + 2;
           const baseCost = evalSpan(q, startIdx, endIdx);
@@ -465,14 +485,16 @@ export class GlobalTimeOptimalEngine {
       pathGeom(this.curv[i], this.curvRate[i], q[i], qp, qpp, g);
       pk[i] = g.kappa;
       ps[i] = g.scale;
-      pv[i] = perf.cornerSpeedAt(g.kappa, this.bank[i], this.grade[i], 1.0);
+      const kTrackEff = Math.abs(this.curv[i]) * 0.72;
+      const kEffective = Math.max(Math.abs(g.kappa), kTrackEff);
+      pv[i] = perf.cornerSpeedAt(kEffective, this.bank[i], this.grade[i], 1.0);
     }
 
     // 2. Numerical Backward/Forward Integration (Speed Profile)
     for (let pass = 0; pass < 2; pass++) {
       for (let i = N - 1; i >= 0; i--) {
         const next = (i + 1) % N;
-        const aB = perf.brakeAccel(pv[next], this.grade[i]);
+        const aB = perf.brakeAccel(pv[next], this.grade[i]) * 0.80;
         const cand = Math.sqrt(pv[next] * pv[next] + 2 * aB * ds * ps[i]);
         if (cand < pv[i]) pv[i] = cand;
       }
