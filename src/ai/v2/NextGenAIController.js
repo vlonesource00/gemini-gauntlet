@@ -41,9 +41,13 @@ export class NextGenAIController {
 
     this.skill = clamp(finite(options.skill, 0.98), 0.5, 1.0);
 
+    this.options = options;
+    const defaultClass = options.defaultClass ?? 'prototype';
+    const customSpecs = options.customSpecs ?? (options.spec ? { [options.classKey || defaultClass]: options.spec } : null);
+
     // Perception & Hybrid Engine Layers
     this.awareness = new TrafficAwareness();
-    this.optimalEngine = options.track ? new GlobalTimeOptimalEngine({ track: options.track }) : null;
+    this.optimalEngine = options.track ? new GlobalTimeOptimalEngine({ track: options.track, defaultClass, customSpecs }) : null;
     this.combatEngine = new GameTheoreticCombatEngine();
     this.coupledMPCC = new CoupledMPCCController({ horizonSeconds: 2.5, nodeCount: 18 });
     this.trajectoryPlanner = new FrenetLatticePlanner({ pointCount: 24, horizonS: 3.2 });
@@ -262,7 +266,9 @@ export class NextGenAIController {
 
     // 1. Initialize Layer 1 Optimal Profile Engine for this circuit if needed
     if (!this.optimalEngine || this.optimalEngine.track !== track) {
-      this.optimalEngine = new GlobalTimeOptimalEngine({ track });
+      const defaultClass = this.options?.defaultClass ?? vehicle.classKey ?? 'prototype';
+      const customSpecs = this.options?.customSpecs ?? (vehicle.spec ? { [vehicle.classKey || 'gt']: vehicle.spec } : null);
+      this.optimalEngine = new GlobalTimeOptimalEngine({ track, defaultClass, customSpecs });
     }
 
     // 2. Scan multi-agent traffic awareness & surface state

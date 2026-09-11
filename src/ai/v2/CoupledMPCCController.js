@@ -266,9 +266,10 @@ export class CoupledMPCCController {
     const yaw = finite(vehicle?.yaw, 0);
     const yawRate = finite(vehicle?.yawRate, 0);
     const vClass = vehicle?.classKey || 'prototype';
-    const wheelBase = finite(vehicle?.wheelBase, (vClass === 'prototype' ? 2.65 : 2.70));
-    const maxSteerAngle = finite(vehicle?.spec?.steering?.maxAngle, 0.55);
+    const wheelBase = finite(vehicle?.spec?.wheelBase ?? vehicle?.wheelBase, (vClass === 'prototype' ? 2.65 : 2.70));
+    const maxSteerAngle = finite(vehicle?.spec?.steering?.maxAngle ?? vehicle?.spec?.steeringLock, 0.55);
     const alphaPeak = finite(vehicle?.spec?.tire?.alphaPeak, (vClass === 'prototype' ? 0.115 : 0.140));
+    const effectiveGripFactor = finite(vehicle?.spec?.tire?.grip ?? vehicle?.spec?.grip, tireGripFactor);
     const safeDt = clamp(finite(dt, 0.016), 0.001, 0.05);
 
     const dMin = Number.isFinite(tacticalTarget?.dMin) ? tacticalTarget.dMin : -8.5;
@@ -280,7 +281,7 @@ export class CoupledMPCCController {
     const frictionLimits = this.calculateFrictionLimits({
       vehicleClass: vClass,
       speed: vSpeed,
-      tireGripFactor
+      tireGripFactor: effectiveGripFactor
     });
 
     // 2. Pure-Pursuit Target & Stanley Reference Geometry

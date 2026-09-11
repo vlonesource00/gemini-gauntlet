@@ -321,8 +321,8 @@ export class PaceOptimizer {
     const vSpeed = Math.max(3.0, finite(speed || vehicle?.speed, 0));
     const safeDt = clamp(finite(dt, 0.016), 0.001, 0.05);
     const vClass = vehicle?.classKey || 'prototype';
-    const wheelBase = finite(vehicle?.wheelBase, (vClass === 'prototype' ? 2.65 : 2.70));
-    const maxSteerAngle = finite(vehicle?.spec?.steering?.maxAngle, 0.55);
+    const wheelBase = finite(vehicle?.spec?.wheelBase ?? vehicle?.wheelBase, (vClass === 'prototype' ? 2.65 : 2.70));
+    const maxSteerAngle = finite(vehicle?.spec?.steering?.maxAngle ?? vehicle?.spec?.steeringLock, 0.55);
     const alphaPeak = finite(vehicle?.spec?.tire?.alphaPeak, (vClass === 'prototype' ? 0.115 : 0.140));
 
     // Canonical signed curvature (positive right, negative left)

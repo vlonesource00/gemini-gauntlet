@@ -23,49 +23,52 @@ const finite = (val, fallback = 0) => (Number.isFinite(val) ? val : fallback);
  */
 const GLOBAL_SOLVE_CACHE = new Map();
 
-function getTrackCacheKey(track, roadHalfWidth, curbWidth) {
+function getTrackCacheKey(track, roadHalfWidth, curbWidth, specFingerprint = '') {
   if (!track) return 'null_track';
   const id = track.id || track.name || track.key || '';
   const length = finite(track.totalLength ?? track.length, 0).toFixed(2);
   const rw = finite(track.roadHalfWidth ?? roadHalfWidth, 8.2).toFixed(2);
   const cw = finite(track.curbWidth ?? curbWidth, 1.25).toFixed(2);
   const sampleCount = track.samples?.length ?? 0;
-  return `v3_${id}_${length}_${rw}_${cw}_${sampleCount}`;
+  return `v4_${id}_${length}_${rw}_${cw}_${sampleCount}_${specFingerprint}`;
 }
 
 /**
  * Analytical Quasi-Steady Vehicle Performance Model
  */
 export class AnalyticalPerfModel {
-  constructor(specKey = 'prototype') {
-    const spec = CAR_SPECS[specKey] || CAR_SPECS.prototype;
-    this.key = specKey;
-    this.mass = spec.mass;
-    this.weight = spec.mass * G;
-    this.wheelBase = spec.wheelBase;
-    this.cgHeight = spec.cgHeight;
-    this.weightFront = spec.weightFront;
-    this.tireMu = specKey === 'prototype' ? 1.65 : (specKey === 'gt' ? 1.25 : 1.05);
-    this.wheelRadius = spec.wheelRadius;
-    this.loadSensitivity = spec.tire.loadSensitivity || 0.15;
+  constructor(specKey = 'prototype', customSpec = null) {
+    const baseSpec = (typeof specKey === 'object' && specKey !== null) ? specKey : (CAR_SPECS[specKey] || CAR_SPECS.prototype);
+    const spec = customSpec ? { ...baseSpec, ...customSpec } : baseSpec;
+    this.key = typeof specKey === 'string' ? specKey : (spec.classKey || 'custom');
+    this.mass = finite(spec.mass, 1290);
+    this.weight = this.mass * G;
+    this.wheelBase = finite(spec.wheelBase, 2.70);
+    this.cgHeight = finite(spec.cgHeight, 0.35);
+    this.weightFront = finite(spec.weightFront, 0.50);
+    this.tireMu = finite(spec.tireMu ?? spec.tire?.grip, (this.key === 'prototype' ? 1.65 : (this.key === 'gt' ? 1.25 : 1.05)));
+    this.wheelRadius = finite(spec.wheelRadius, 0.33);
+    this.loadSensitivity = finite(spec.tire?.loadSensitivity || spec.loadSensitivity, 0.15);
 
     // Aero
-    const aero = spec.aero;
-    this.area = aero.area;
-    this.cd = aero.cd;
-    this.clFront = aero.frontCl;
-    this.clRear = aero.rearCl;
-    this.clTotal = this.clFront + this.clRear;
-    this.groundEffect = aero.groundEffect || 0;
-    this.designRideHeight = aero.designRideHeight || 0.06;
+    const aero = spec.aero || {};
+    this.area = finite(aero.area, 1.9);
+    this.cd = finite(aero.cd, 0.64);
+    this.clFront = finite(aero.frontCl, (aero.cl ? aero.cl * 0.45 : 0.88));
+    this.clRear = finite(aero.rearCl, (aero.cl ? aero.cl * 0.55 : 1.16));
+    this.clTotal = (aero.cl != null) ? aero.cl : (this.clFront + this.clRear);
+    this.groundEffect = finite(aero.groundEffect, 0);
+    this.designRideHeight = finite(aero.designRideHeight, 0.06);
 
     // Drivetrain & Brakes
-    this.maxTorque = spec.maxTorqueNm;
-    this.gearRatios = spec.gearRatios.slice(1); // drop reverse
-    this.finalDrive = spec.finalDrive;
-    this.efficiency = spec.drivetrainEfficiency;
-    this.maxBrakeTorque = specKey === 'prototype' ? 7500 : (specKey === 'gt' ? 6200 : 5800);
-    this.brakeBias = spec.brakeBias;
+    this.maxTorque = finite(spec.maxTorqueNm, 650);
+    this.gearRatios = (Array.isArray(spec.gearRatios) && spec.gearRatios.length > 1)
+      ? spec.gearRatios.slice(1)
+      : (spec.gearRatios || [3.0, 2.1, 1.6, 1.3, 1.1, 0.9]);
+    this.finalDrive = finite(spec.finalDrive, 3.4);
+    this.efficiency = finite(spec.drivetrainEfficiency, 0.92);
+    this.maxBrakeTorque = finite(spec.maxBrakeTorque, (this.key === 'prototype' ? 7500 : (this.key === 'gt' ? 6200 : 5800)));
+    this.brakeBias = finite(spec.brakeBias, 0.58);
     this.isFWD = spec.drive === 'front';
 
     // Fast tabulated performance arrays on a 0.5 m/s grid
@@ -197,19 +200,21 @@ export class GlobalTimeOptimalEngine {
    * @param {Object} options
    * @param {Object} options.track - Circuit instance
    * @param {string} [options.defaultClass='prototype'] - Default vehicle class
+   * @param {Object} [options.customSpecs=null] - Optional override vehicle specifications per class
    */
-  constructor({ track, defaultClass = 'prototype' } = {}) {
+  constructor({ track, defaultClass = 'prototype', customSpecs = null } = {}) {
     this.track = track;
     this.trackLength = finite(track?.totalLength ?? track?.length, 2704.6);
     this.roadHalfWidth = finite(track?.roadHalfWidth, 8.2);
     this.curbWidth = finite(track?.curbWidth, 1.25);
     this.defaultClass = defaultClass;
+    this.customSpecs = customSpecs;
 
     // Per-class analytical models
     this.perfModels = {
-      prototype: new AnalyticalPerfModel('prototype'),
-      gt: new AnalyticalPerfModel('gt'),
-      touring: new AnalyticalPerfModel('touring')
+      prototype: new AnalyticalPerfModel('prototype', customSpecs?.prototype),
+      gt: new AnalyticalPerfModel('gt', customSpecs?.gt),
+      touring: new AnalyticalPerfModel('touring', customSpecs?.touring)
     };
 
     this.profile = [];
@@ -221,8 +226,16 @@ export class GlobalTimeOptimalEngine {
     }
   }
 
-  setTrack(track) {
+  setTrack(track, customSpecs = null) {
     this.track = track;
+    if (customSpecs) {
+      this.customSpecs = customSpecs;
+      this.perfModels = {
+        prototype: new AnalyticalPerfModel('prototype', customSpecs.prototype),
+        gt: new AnalyticalPerfModel('gt', customSpecs.gt),
+        touring: new AnalyticalPerfModel('touring', customSpecs.touring)
+      };
+    }
     this.trackLength = finite(track?.totalLength ?? track?.length, 2704.6);
     this.roadHalfWidth = finite(track?.roadHalfWidth, 8.2);
     this.curbWidth = finite(track?.curbWidth, 1.25);
@@ -235,7 +248,10 @@ export class GlobalTimeOptimalEngine {
   solve() {
     if (!this.track) return;
 
-    const cacheKey = getTrackCacheKey(this.track, this.roadHalfWidth, this.curbWidth);
+    const specFingerprint = Object.entries(this.perfModels)
+      .map(([k, m]) => `${k}:${m.mass}_${m.wheelBase.toFixed(2)}_${m.cd.toFixed(2)}_${m.clTotal.toFixed(2)}_${m.tireMu.toFixed(2)}`)
+      .join('|');
+    const cacheKey = getTrackCacheKey(this.track, this.roadHalfWidth, this.curbWidth, specFingerprint);
     if (GLOBAL_SOLVE_CACHE.has(cacheKey)) {
       const cached = GLOBAL_SOLVE_CACHE.get(cacheKey);
       this.nodeCount = cached.nodeCount;
