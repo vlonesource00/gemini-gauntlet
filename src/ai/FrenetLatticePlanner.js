@@ -292,6 +292,7 @@ export class FrenetLatticePlanner {
     horizon,
     targetId,
     referenceLineAtDistance,
+    optimalSpeedAtDistance = null,
     kerbAllowance = 0,
     intentType = 'STANDARD',
     racecraftPhase = 'NONE',
@@ -361,13 +362,16 @@ export class FrenetLatticePlanner {
 
     for (let index = 0; index < this.pointCount; index += 1) {
       const time = (horizon * index) / (this.pointCount - 1);
-      const predictedSpeed = clamp(startSpeed + acceleration * time, 0, 95);
+      const forwardDistance = Math.max(0, startSpeed * time + 0.5 * acceleration * time * time);
+      const currentDistance = startDistance + forwardDistance;
+      const speedCeiling = typeof optimalSpeedAtDistance === 'function'
+        ? Math.max(12.0, optimalSpeedAtDistance(currentDistance) + 3.5)
+        : 95.0;
+      const predictedSpeed = Math.min(speedCeiling, clamp(startSpeed + acceleration * time, 0, 95));
       speedSum += predictedSpeed;
 
-      const forwardDistance = Math.max(0, startSpeed * time + 0.5 * acceleration * time * time);
       const blend = minimumJerk(time / Math.max(0.2, transitionTime));
 
-      const currentDistance = startDistance + forwardDistance;
       const reference = track?.atDistance
         ? track.atDistance(currentDistance)
         : { s: currentDistance, x: 0, y: 0, z: 0, curvature: 0 };
@@ -753,6 +757,7 @@ export class FrenetLatticePlanner {
     lookAhead = 12,
     trackingDistance = null,
     referenceLineAtDistance = null,
+    optimalSpeedAtDistance = null,
     weights = {},
     previousPlan = null,
     dtSinceLastPlan = 0.04,
@@ -845,8 +850,6 @@ export class FrenetLatticePlanner {
       aggression
     });
     const availableLatAccel = envelope.availableLatAccel;
-
-    // Multi-stage trajectory families for combat maneuvers
     if (racecraftPhase === 'SLINGSHOT') {
       const latSpan = Math.abs(intendedOffset - currentLateral);
       const T1 = clamp(Math.sqrt(5.8 * latSpan / Math.max(2.0, availableLatAccel)), 0.80, 1.60);
@@ -928,6 +931,7 @@ export class FrenetLatticePlanner {
     }
 
     // Filter out intermediate candidates that fall inside an active opponent's occupied lateral zone
+    const egoExtents = getVehicleBoundingExtents(vehicle);
     const cleanPool = candidatePool.filter((offset) => {
       if (Math.abs(offset - intendedOffset) < 0.05) return true;
       if (Math.abs(offset - currentLateral) < 0.05) return true;
@@ -986,6 +990,7 @@ export class FrenetLatticePlanner {
           horizon,
           targetId,
           referenceLineAtDistance,
+          optimalSpeedAtDistance,
           kerbAllowance,
           intentType,
           racecraftPhase,
@@ -1019,6 +1024,7 @@ export class FrenetLatticePlanner {
           horizon,
           targetId,
           referenceLineAtDistance,
+          optimalSpeedAtDistance,
           kerbAllowance,
           intentType: entry.intentType,
           racecraftPhase,
@@ -1062,7 +1068,8 @@ export class FrenetLatticePlanner {
       if (a.constraints.roadLegal !== b.constraints.roadLegal) {
         return a.constraints.roadLegal ? -1 : 1;
       }
-      return a.score - b.score;
+      return Math.abs(a.terminalLateral - intendedOffset) - Math.abs(b.terminalLateral - intendedOffset)
+        || a.score - b.score;
     })[0];
 
     // Switching margin: if switching away from ongoing candidate to a divergent trajectory, require decisive improvement

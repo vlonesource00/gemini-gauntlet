@@ -772,6 +772,10 @@ export class NextGenAIController {
           const optLat = this.optimalEngine?.sampleAtDistance?.(s, vehicle.classKey)?.lateral;
           return Number.isFinite(optLat) ? clamp(optLat, -baseRoadMargin, baseRoadMargin) : 0;
         },
+        optimalSpeedAtDistance: (s) => {
+          const opt = this.optimalEngine?.sampleAtDistance?.(s, vehicle.classKey);
+          return opt && Number.isFinite(opt.targetSpeed) ? opt.targetSpeed : 95.0;
+        },
         previousPlan: this.trajectoryPlan,
         dtSinceLastPlan
       });
