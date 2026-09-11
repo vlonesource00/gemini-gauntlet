@@ -306,7 +306,15 @@ export class FrenetLatticePlanner {
     const points = [];
     const smoothQ = new Float64Array(this.pointCount);
     const startSpeed = Math.max(0, finite(vehicle?.speed, 0));
-    const acceleration = clamp((finite(targetSpeed, startSpeed) - startSpeed) * 0.42, -7.0, 5.0);
+    const startEnvelope = getPhysicalEnvelope({
+      vehicle,
+      speed: startSpeed,
+      aggression: clamp(finite(aggression, 0.5), 0, 1)
+    });
+    const maxBrakeDecel = Math.max(7.0, startEnvelope.availableBrakeAccel * 0.95);
+    const maxDriveAccel = Math.max(4.0, startEnvelope.availableDriveAccel);
+    const targetAccel = (finite(targetSpeed, startSpeed) - startSpeed) * 0.65;
+    const acceleration = clamp(targetAccel, -maxBrakeDecel, maxDriveAccel);
 
     const egoExtents = getVehicleBoundingExtents(vehicle);
 

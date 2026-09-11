@@ -485,16 +485,16 @@ export class GlobalTimeOptimalEngine {
       pathGeom(this.curv[i], this.curvRate[i], q[i], qp, qpp, g);
       pk[i] = g.kappa;
       ps[i] = g.scale;
-      const kTrackEff = Math.abs(this.curv[i]) * 0.72;
-      const kEffective = Math.max(Math.abs(g.kappa), kTrackEff);
+      const kEffective = Math.abs(g.kappa);
       pv[i] = perf.cornerSpeedAt(kEffective, this.bank[i], this.grade[i], 1.0);
     }
 
     // 2. Numerical Backward/Forward Integration (Speed Profile)
+    const brakeMargin = perf.key === 'prototype' ? 0.80 : 0.95;
     for (let pass = 0; pass < 2; pass++) {
       for (let i = N - 1; i >= 0; i--) {
         const next = (i + 1) % N;
-        const aB = perf.brakeAccel(pv[next], this.grade[i]) * 0.80;
+        const aB = perf.brakeAccel(pv[next], this.grade[i]) * brakeMargin;
         const cand = Math.sqrt(pv[next] * pv[next] + 2 * aB * ds * ps[i]);
         if (cand < pv[i]) pv[i] = cand;
       }

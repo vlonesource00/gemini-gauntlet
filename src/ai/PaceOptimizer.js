@@ -223,8 +223,8 @@ export class PaceOptimizer {
     // GT: average 8.0 - 9.2 m/s² (calibrated to Astra GT plant friction circle)
     const baseDecel = vClass === 'prototype'
       ? (15.2 + clamp(vSpeed * 0.05, 0, 3.2))
-      : (vClass === 'gt' ? (8.0 + clamp(vSpeed * 0.02, 0, 1.2)) : 6.5);
-    const brakingDecel = baseDecel * tireGripFactor * (0.86 + aggression * 0.12);
+      : (vClass === 'gt' ? (10.8 + clamp(vSpeed * 0.025, 0, 1.5)) : 8.5);
+    const brakingDecel = baseDecel * tireGripFactor * (0.88 + aggression * 0.12);
 
     // 2. Exact multi-distance lookahead scanning distances
     const speedEnvelopeDistances = [
@@ -234,7 +234,7 @@ export class PaceOptimizer {
     let speedLimit = 95.0; // Track velocity ceiling
     const previewBuffer = vClass === 'prototype'
       ? clamp(vSpeed * 0.08, 2.5, 6.0)
-      : Math.max(2.5, vSpeed * 0.18);
+      : clamp(vSpeed * 0.04, 1.5, 3.5);
 
     const derate = this._derate({ vehicle, track, targetOffset: insideLineOffset });
     const effectiveSkill = (skill ?? 0.85) * this.paceTrim * derate;
