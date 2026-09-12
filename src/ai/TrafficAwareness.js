@@ -241,7 +241,7 @@ export class TrafficAwareness {
 
     // Multi-Car Relevance Scoring & Opponent Predictions (Phase 3 & 4)
     for (const entry of entries) {
-      entry.attackOpportunity = this.scoreAttackOpportunity(vehicle, entry, track);
+      entry.attackOpportunity = this.scoreAttackOpportunity(vehicle, entry, track, entries);
       entry.defenseThreat = this.scoreDefenseThreat(vehicle, entry, track);
       entry.compositeRelevance = (entry.delta > 0) ? entry.attackOpportunity : entry.defenseThreat;
     }
@@ -548,7 +548,7 @@ export class TrafficAwareness {
    * @param {Object} track - Circuit
    * @returns {number} Opportunity score in [0, 1]
    */
-  scoreAttackOpportunity(egoVehicle, entry, track) {
+  scoreAttackOpportunity(egoVehicle, entry, track, allEntries = []) {
     if (!entry || entry.delta <= 0.2 || entry.delta > 65.0) return 0;
     const gap = entry.delta;
     const closingSpeed = finite(entry.relativeLongitudinalVelocity, 0); // ego - other
@@ -560,13 +560,49 @@ export class TrafficAwareness {
     const fDraft = entry.wakeContribution > 0.1 ? 1.0 + entry.wakeContribution * 0.75 : 1.0;
 
     const otherLat = finite(entry.otherLateral, 0);
-    const roadMargin = 5.5;
-    const leftRoom = roadMargin + otherLat;
-    const rightRoom = roadMargin - otherLat;
-    const bestRoom = Math.max(leftRoom, rightRoom);
-    const fRoom = clamp(bestRoom / 3.0, 0.2, 1.2);
+    const roadHalfWidth = finite(track?.roadHalfWidth, 8.2);
+    const legalMargin = Math.max(3.5, roadHalfWidth - 1.2);
+    const leftRoom = Math.max(0, legalMargin + otherLat);
+    const rightRoom = Math.max(0, legalMargin - otherLat);
 
-    return clamp((fGap * 0.35 + fClose * 0.35 + fTtc * 0.20) * fDraft * fRoom, 0, 1);
+    // Corridor clearance required for ego body
+    const requiredRoom = this.bodyWidth + 0.9;
+    const leftFeasible = leftRoom >= requiredRoom;
+    const rightFeasible = rightRoom >= requiredRoom;
+    if (!leftFeasible && !rightFeasible) {
+      return 0.02; // Corridor pinched, virtually zero tactical passing opportunity
+    }
+
+    // Corner geometry bonus: inside line is tactically privileged
+    const egoDist = finite(egoVehicle?.distance, 0);
+    const trackPt = track?.atDistance ? track.atDistance(egoDist + gap) : null;
+    const turnSign = finite(trackPt?.turnSign, 0);
+    let fApex = 1.0;
+    if (turnSign > 0) { // Right turn: inside is positive lateral (right)
+      if (rightRoom >= requiredRoom) fApex = 1.25;
+    } else if (turnSign < 0) { // Left turn: inside is negative lateral (left)
+      if (leftRoom >= requiredRoom) fApex = 1.25;
+    }
+
+    // Check downstream corridor obstruction by third-party vehicles
+    let fBlocker = 1.0;
+    if (Array.isArray(allEntries) && allEntries.length > 1) {
+      for (const other of allEntries) {
+        if (!other || other === entry) continue;
+        // Check if third party is downstream of this rival (gap < other.delta < gap + 28)
+        if (other.delta > gap && other.delta < gap + 28.0) {
+          const lateralOverlap = Math.abs(finite(other.otherLateral, 0) - otherLat) < 2.2;
+          if (lateralOverlap) {
+            fBlocker = Math.min(fBlocker, 0.45); // Heavy penalty for attacking into a packed blocker
+          }
+        }
+      }
+    }
+
+    const bestRoom = Math.max(leftRoom, rightRoom);
+    const fRoom = clamp(bestRoom / 3.2, 0.2, 1.2);
+
+    return clamp((fGap * 0.35 + fClose * 0.35 + fTtc * 0.20) * fDraft * fRoom * fApex * fBlocker, 0, 1);
   }
 
   /**
@@ -610,16 +646,35 @@ export class TrafficAwareness {
     const trackLength = finite(track?.length, 1000);
 
     const trackPoint = track?.atDistance ? track.atDistance(otherDist) : null;
+    const lookaheadPoint = track?.atDistance ? track.atDistance(otherDist + 30) : null;
     const turnSign = finite(trackPoint?.turnSign, 0);
-    const insideSign = turnSign !== 0 ? turnSign : 0;
+    const lookaheadTurnSign = finite(lookaheadPoint?.turnSign, 0);
+    const insideSign = turnSign !== 0 ? turnSign : (lookaheadTurnSign !== 0 ? lookaheadTurnSign : 0);
+
+    const isApproachingCorner = Math.abs(finite(lookaheadPoint?.curvature, 0)) > 0.003
+      || Math.abs(finite(trackPoint?.curvature, 0)) > 0.003;
+    const isOtherBraking = Boolean(entry.other?.controls?.brake > 0.08 || entry.other?.brake > 0.08);
 
     const horizons = [0.4, 0.8, 1.4, 2.2];
 
-    const makeEnvelopes = (latProfileFn, speedProfileFn) => {
+    // Helper for piecewise kinematic longitudinal integration: deltaS = int_0^t v(tau) dtau
+    const integrateDecel = (v0, accel, t, vMin = 8.0) => {
+      if (t <= 0) return 0;
+      if (accel >= 0) return v0 * t + 0.5 * accel * t * t;
+      const tStop = Math.max(0, (v0 - vMin) / Math.abs(accel));
+      if (t <= tStop) {
+        return v0 * t + 0.5 * accel * t * t;
+      }
+      const distDecel = v0 * tStop + 0.5 * accel * tStop * tStop;
+      return distDecel + vMin * (t - tStop);
+    };
+
+    const makeEnvelopes = (latProfileFn, speedProfileFn, distDeltaFn) => {
       return horizons.map((t) => {
         const predLat = latProfileFn(t);
         const predSpeed = speedProfileFn(t);
-        const predDist = wrap(otherDist + predSpeed * t, trackLength);
+        const deltaS = distDeltaFn ? distDeltaFn(t) : predSpeed * t;
+        const predDist = wrap(otherDist + deltaS, trackLength);
 
         const latUncertainty = 0.25 + 0.35 * t;
         const longUncertainty = 0.50 + 0.90 * t;
@@ -637,28 +692,76 @@ export class TrafficAwareness {
       });
     };
 
-    return [
+    // Calculate dynamic context weights for hypothesis probabilities
+    let wHold = 0.35;
+    let wReturn = 0.25;
+    let wInside = 0.20;
+    let wOutside = 0.08;
+    let wBrakeEarly = 0.05;
+    let wBrakeNormal = 0.05;
+    let wOvershoot = 0.02;
+
+    const movingInside = insideSign !== 0 && (
+      (insideSign > 0 && otherLatVel > 0.15) ||
+      (insideSign < 0 && otherLatVel < -0.15)
+    );
+    const movingOutside = insideSign !== 0 && (
+      (insideSign > 0 && otherLatVel < -0.15) ||
+      (insideSign < 0 && otherLatVel > 0.15)
+    );
+    const stableLane = Math.abs(otherLatVel) < 0.12;
+
+    if (movingInside) {
+      wInside *= 3.2;
+      wReturn *= 0.4;
+      wOutside *= 0.3;
+    } else if (movingOutside) {
+      wOutside *= 2.8;
+      wReturn *= 0.5;
+      wInside *= 0.4;
+    }
+
+    if (isOtherBraking) {
+      wBrakeNormal *= 3.0;
+      wBrakeEarly *= 2.5;
+      wOvershoot *= 0.25;
+      wHold *= 0.6;
+    } else if (isApproachingCorner && otherSpeed > 28) {
+      wOvershoot *= 2.5;
+      wBrakeNormal *= 2.2;
+      wHold *= 0.7;
+    } else if (stableLane) {
+      wHold *= 1.8;
+    }
+
+    if (Math.abs(otherLat) > 2.5 && !movingInside) {
+      wReturn *= 1.8;
+    }
+
+    const hypotheses = [
       {
         id: 'HOLD_LINE',
-        probability: 0.35,
+        probability: wHold,
         description: 'Maintains current lateral position and steady speed',
         envelopes: makeEnvelopes(
           (t) => otherLat + otherLatVel * t * Math.exp(-t / 1.2),
-          (t) => otherSpeed
+          (t) => otherSpeed,
+          (t) => otherSpeed * t
         )
       },
       {
         id: 'RETURN_TO_RACING_LINE',
-        probability: 0.25,
+        probability: wReturn,
         description: 'Drifts smoothly toward nominal racing line',
         envelopes: makeEnvelopes(
           (t) => otherLat * Math.exp(-t / 1.0),
-          (t) => otherSpeed
+          (t) => otherSpeed,
+          (t) => otherSpeed * t
         )
       },
       {
         id: 'DEFEND_INSIDE',
-        probability: 0.20,
+        probability: wInside,
         description: 'Squeezes toward inside apex curb to defend corner',
         envelopes: makeEnvelopes(
           (t) => {
@@ -666,12 +769,13 @@ export class TrafficAwareness {
             const blend = 1.0 - Math.exp(-t / 0.8);
             return otherLat + (targetInside - otherLat) * blend;
           },
-          (t) => Math.max(10, otherSpeed - 2.0 * t)
+          (t) => Math.max(10, otherSpeed - 2.0 * t),
+          (t) => integrateDecel(otherSpeed, -2.0, t, 10.0)
         )
       },
       {
         id: 'DEFEND_OUTSIDE',
-        probability: 0.08,
+        probability: wOutside,
         description: 'Carries momentum on the outside perimeter',
         envelopes: makeEnvelopes(
           (t) => {
@@ -679,36 +783,51 @@ export class TrafficAwareness {
             const blend = 1.0 - Math.exp(-t / 1.1);
             return otherLat + (targetOutside - otherLat) * blend;
           },
-          (t) => otherSpeed + 1.0 * t
+          (t) => otherSpeed + 1.0 * t,
+          (t) => otherSpeed * t + 0.5 * 1.0 * t * t
         )
       },
       {
         id: 'BRAKE_EARLY',
-        probability: 0.05,
+        probability: wBrakeEarly,
         description: 'Conservative early braking before corner entry',
         envelopes: makeEnvelopes(
           (t) => otherLat,
-          (t) => Math.max(8, otherSpeed - 6.5 * t)
+          (t) => Math.max(8, otherSpeed - 6.5 * t),
+          (t) => integrateDecel(otherSpeed, -6.5, t, 8.0)
         )
       },
       {
         id: 'BRAKE_NORMAL',
-        probability: 0.05,
+        probability: wBrakeNormal,
         description: 'Standard threshold braking at baseline marker',
         envelopes: makeEnvelopes(
           (t) => otherLat,
-          (t) => (t < 0.6 ? otherSpeed : Math.max(12, otherSpeed - 8.0 * (t - 0.6)))
+          (t) => (t < 0.6 ? otherSpeed : Math.max(12, otherSpeed - 8.0 * (t - 0.6))),
+          (t) => {
+            if (t <= 0.6) return otherSpeed * t;
+            return otherSpeed * 0.6 + integrateDecel(otherSpeed, -8.0, t - 0.6, 12.0);
+          }
         )
       },
       {
         id: 'LATE_BRAKE_OVERSHOOT',
-        probability: 0.02,
+        probability: wOvershoot,
         description: 'Aggressive deep entry with apex overshoot risk',
         envelopes: makeEnvelopes(
           (t) => otherLat + (insideSign > 0 ? -1.5 : 1.5) * clamp(t - 0.8, 0, 1.5),
-          (t) => Math.max(14, otherSpeed - 4.0 * t)
+          (t) => Math.max(14, otherSpeed - 4.0 * t),
+          (t) => integrateDecel(otherSpeed, -4.0, t, 14.0)
         )
       }
     ];
+
+    // Normalize probabilities to sum to 1.0
+    const totalProb = hypotheses.reduce((sum, h) => sum + h.probability, 0);
+    for (const h of hypotheses) {
+      h.probability = totalProb > 0 ? (h.probability / totalProb) : (1.0 / hypotheses.length);
+    }
+
+    return hypotheses;
   }
 }

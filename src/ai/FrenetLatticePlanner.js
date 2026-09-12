@@ -713,10 +713,14 @@ export class FrenetLatticePlanner {
     let costNearHorizon = 0;
     let meanNearHorizonDivergence = 0;
     let maxNearHorizonDivergence = 0;
+    let rmsNearHorizonDivergence = 0;
+    let maxNearHorizonHeadingDiscontinuity = 0;
+    let maxNearHorizonCurvatureDiscontinuity = 0;
 
     if (previousPlan && Array.isArray(previousPlan.points) && previousPlan.points.length > 0) {
       let pathDiffSum = 0;
       let nearHorizonDivSum = 0;
+      let nearHorizonSqSum = 0;
       let nearHorizonCount = 0;
       let nearHorizonWeightedCost = 0;
       const dt = horizon / Math.max(1, this.pointCount - 1);
@@ -731,7 +735,30 @@ export class FrenetLatticePlanner {
         let pCurv = prevPoints[nPrev - 1].curvature || 0;
         let pDot = 0;
         let pDDot = 0;
+        let pSpeed = Math.max(1.0, finite(prevPoints[nPrev - 1].predictedSpeed ?? prevPoints[nPrev - 1].speed, startSpeed));
 
+        // 1. Temporally aligned previous curvature and speed from points
+        if (tCheck <= prevPoints[0].time) {
+          pCurv = prevPoints[0].curvature || 0;
+          pSpeed = Math.max(1.0, finite(prevPoints[0].predictedSpeed ?? prevPoints[0].speed, startSpeed));
+        } else if (tCheck >= prevPoints[nPrev - 1].time) {
+          pCurv = prevPoints[nPrev - 1].curvature || 0;
+          pSpeed = Math.max(1.0, finite(prevPoints[nPrev - 1].predictedSpeed ?? prevPoints[nPrev - 1].speed, startSpeed));
+        } else {
+          for (let j = 0; j < nPrev - 1; j++) {
+            if (tCheck >= prevPoints[j].time && tCheck <= prevPoints[j + 1].time) {
+              const span = Math.max(1e-4, prevPoints[j + 1].time - prevPoints[j].time);
+              const frac = (tCheck - prevPoints[j].time) / span;
+              pCurv = (prevPoints[j].curvature || 0) + frac * ((prevPoints[j + 1].curvature || 0) - (prevPoints[j].curvature || 0));
+              const s0 = finite(prevPoints[j].predictedSpeed ?? prevPoints[j].speed, startSpeed);
+              const s1 = finite(prevPoints[j + 1].predictedSpeed ?? prevPoints[j + 1].speed, startSpeed);
+              pSpeed = Math.max(1.0, s0 + frac * (s1 - s0));
+              break;
+            }
+          }
+        }
+
+        // 2. Temporally aligned position and derivatives
         if (previousPlan.curve && typeof previousPlan.curve.eval === 'function') {
           pLat = previousPlan.curve.eval(tCheck);
           pDot = typeof previousPlan.curve.deriv === 'function' ? previousPlan.curve.deriv(tCheck) : 0;
@@ -742,14 +769,13 @@ export class FrenetLatticePlanner {
           pDDot = typeof previousPlan.poly.accel === 'function' ? previousPlan.poly.accel(tCheck) : 0;
         } else if (tCheck <= prevPoints[0].time) {
           pLat = prevPoints[0].lateral;
-          pCurv = prevPoints[0].curvature || 0;
+          pDot = 0;
         } else if (tCheck < prevPoints[nPrev - 1].time) {
           for (let j = 0; j < nPrev - 1; j++) {
             if (tCheck >= prevPoints[j].time && tCheck <= prevPoints[j + 1].time) {
               const span = Math.max(1e-4, prevPoints[j + 1].time - prevPoints[j].time);
               const frac = (tCheck - prevPoints[j].time) / span;
               pLat = prevPoints[j].lateral + frac * (prevPoints[j + 1].lateral - prevPoints[j].lateral);
-              pCurv = (prevPoints[j].curvature || 0) + frac * ((prevPoints[j + 1].curvature || 0) - (prevPoints[j].curvature || 0));
               pDot = (prevPoints[j + 1].lateral - prevPoints[j].lateral) / span;
               break;
             }
@@ -774,15 +800,28 @@ export class FrenetLatticePlanner {
             cDot = (pt.lateral - points[i - 1].lateral) / Math.max(1e-4, pt.time - points[i - 1].time);
           }
 
+          const cSpeed = Math.max(1.0, finite(pt.predictedSpeed ?? pt.speed, startSpeed));
+          const cHeading = Math.atan2(cDot, cSpeed);
+          const pHeading = Math.atan2(pDot, pSpeed);
+
           const dDot = Math.abs(cDot - pDot);
           const dDDot = Math.abs(cDDot - pDDot);
           const dCurv = Math.abs((pt.curvature || 0) - pCurv);
+          const dHeading = Math.abs(wrapAngle(cHeading - pHeading));
 
           const wT = clamp(1.0 - t / 0.8, 0, 1.0);
-          nearHorizonWeightedCost += wT * (absDLat * absDLat * 60.0 + dDot * dDot * 15.0 + dDDot * dDDot * 2.0 + dCurv * dCurv * 40.0) * dt;
+          nearHorizonWeightedCost += wT * (
+            absDLat * absDLat * 60.0 +
+            dDot * dDot * 15.0 +
+            dDDot * dDDot * 2.0 +
+            dCurv * dCurv * 40.0
+          ) * dt;
 
           nearHorizonDivSum += absDLat;
+          nearHorizonSqSum += absDLat * absDLat;
           maxNearHorizonDivergence = Math.max(maxNearHorizonDivergence, absDLat);
+          maxNearHorizonHeadingDiscontinuity = Math.max(maxNearHorizonHeadingDiscontinuity, dHeading);
+          maxNearHorizonCurvatureDiscontinuity = Math.max(maxNearHorizonCurvatureDiscontinuity, dCurv);
           nearHorizonCount += 1;
         }
       }
@@ -790,6 +829,7 @@ export class FrenetLatticePlanner {
       costNearHorizon = nearHorizonWeightedCost;
       costSwitching = pathDiffSum * 24.0 + costNearHorizon;
       meanNearHorizonDivergence = nearHorizonCount > 0 ? (nearHorizonDivSum / nearHorizonCount) : 0;
+      rmsNearHorizonDivergence = nearHorizonCount > 0 ? Math.sqrt(nearHorizonSqSum / nearHorizonCount) : 0;
 
       const prevTargetLat = previousPlan.selectedOffset ?? previousPlan.terminalLateral;
       if (Number.isFinite(prevTargetLat)) {
@@ -866,6 +906,9 @@ export class FrenetLatticePlanner {
       maneuver,
       meanNearHorizonDivergence,
       maxNearHorizonDivergence,
+      rmsNearHorizonDivergence,
+      maxNearHorizonHeadingDiscontinuity,
+      maxNearHorizonCurvatureDiscontinuity,
       collisionFree: constraints.collisionFree,
       roadLegal: constraints.roadLegal,
       dynamicallyFeasible,
@@ -1257,7 +1300,6 @@ export class FrenetLatticePlanner {
     // Net Switch Benefit Gate:
     // Only switch away from ongoing candidate if new candidate decisively improves score after continuity/switch margins
     let switchOverriddenCandidate = null;
-    let isMaterialSwitch = false;
 
     if (previousPlan) {
       const prevFamily = previousPlan.maneuver?.family;
@@ -1285,7 +1327,6 @@ export class FrenetLatticePlanner {
 
         if (!ongoingSafe) {
           // Immediate emergency safety override: safety always trumps hysteresis
-          isMaterialSwitch = true;
         } else {
           const sameFamily = selected.maneuver?.family && selected.maneuver.family === ongoingCandidate.maneuver?.family;
           const isDirectionReversal = Math.sign(selected.terminalLateral - currentLateral) !== Math.sign(ongoingCandidate.terminalLateral - currentLateral)
@@ -1295,8 +1336,6 @@ export class FrenetLatticePlanner {
           if (selected.score > ongoingCandidate.score - switchMargin) {
             switchOverriddenCandidate = selected;
             selected = ongoingCandidate;
-          } else {
-            isMaterialSwitch = !sameFamily;
           }
         }
       }
@@ -1473,6 +1512,45 @@ export class FrenetLatticePlanner {
     }
     const trackingPoint = selected.points[trackingIndex];
 
+    let isMaterialSwitch = false;
+    let isGeometrySwitch = false;
+    let isSemanticSwitch = false;
+    let isFlankReversal = false;
+    let headingDiscontinuity = 0;
+    let curvatureDiscontinuity = 0;
+    let rmsNearHorizonDivergence = 0;
+    let maxNearHorizonDivergence = 0;
+    let trackingPointDisplacement = 0;
+
+    if (previousPlan) {
+      rmsNearHorizonDivergence = selected.rmsNearHorizonDivergence ?? 0;
+      maxNearHorizonDivergence = selected.maxNearHorizonDivergence ?? 0;
+      headingDiscontinuity = selected.maxNearHorizonHeadingDiscontinuity ?? 0;
+      curvatureDiscontinuity = selected.maxNearHorizonCurvatureDiscontinuity ?? 0;
+
+      if (previousPlan.trackingPoint) {
+        trackingPointDisplacement = Math.abs(trackingPoint.lateral - previousPlan.trackingPoint.lateral);
+      }
+
+      const prevFamily = previousPlan.maneuver?.family;
+      isSemanticSwitch = Boolean(prevFamily && selected.maneuver?.family && prevFamily !== selected.maneuver.family);
+
+      const prevTarget = previousPlan.selectedOffset ?? previousPlan.terminalLateral;
+      if (Number.isFinite(prevTarget)) {
+        const prevDir = Math.sign(prevTarget - currentLateral);
+        const newDir = Math.sign(selected.terminalLateral - currentLateral);
+        isFlankReversal = prevDir !== 0 && newDir !== 0 && prevDir !== newDir && Math.abs(selected.terminalLateral - prevTarget) > 0.8;
+      }
+
+      isGeometrySwitch = maxNearHorizonDivergence > 0.35
+        || rmsNearHorizonDivergence > 0.22
+        || headingDiscontinuity > 0.08
+        || curvatureDiscontinuity > 0.012
+        || trackingPointDisplacement > 0.45;
+
+      isMaterialSwitch = isGeometrySwitch || isSemanticSwitch || isFlankReversal;
+    }
+
     return {
       points: selected.points,
       trackingPoint,
@@ -1500,8 +1578,15 @@ export class FrenetLatticePlanner {
       intentType: selected.intentType,
       maneuver: selected.maneuver,
       isMaterialSwitch,
+      isGeometrySwitch,
+      isSemanticSwitch,
+      isFlankReversal,
+      headingDiscontinuity,
+      curvatureDiscontinuity,
+      rmsNearHorizonDivergence,
+      maxNearHorizonDivergence,
       meanNearHorizonDivergence: selected.meanNearHorizonDivergence ?? 0,
-      maxNearHorizonDivergence: selected.maxNearHorizonDivergence ?? 0,
+      trackingPointDisplacement,
       candidates: visualCandidates,
       committed,
       recovering: Boolean(recovering),

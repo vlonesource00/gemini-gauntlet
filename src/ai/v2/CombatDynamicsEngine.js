@@ -13,51 +13,63 @@ const saturate = (val) => clamp(val, 0, 1);
 
 export class CombatDynamicsEngine {
   constructor() {
-    this.carWidth = 2.05;
-    this.carLength = 4.65;
+    this.carLength = 4.4;
+    this.carWidth = 1.9;
     this.rubbingActive = false;
     this.powerSlideActive = false;
     this.attributableContacts = 0;
     this.attributableDamage = 0.0;
+    this.contactAssociatedDamage = 0.0;
+    this.contactEpisodes = [];
+    this.activeContactEpisode = null;
+    this.lastContactTime = -999;
+    this.totalTime = 0;
   }
 
   /**
-   * Reset internal combat dynamics metrics.
+   * Reset internal episode state between runs.
    */
   reset() {
     this.rubbingActive = false;
     this.powerSlideActive = false;
     this.attributableContacts = 0;
     this.attributableDamage = 0.0;
+    this.contactAssociatedDamage = 0.0;
+    this.contactEpisodes = [];
+    this.activeContactEpisode = null;
+    this.lastContactTime = -999;
+    this.totalTime = 0;
   }
 
   /**
    * Apply combat dynamics and slip-slope adjustments to raw MPCC controls.
    * @param {Object} params
-   * @returns {Object} Adjusted { steer, throttle, brake, rubbing, powerSlide, attributableDamage, attributableContacts }
+   * @returns {Object} Adjusted controls and contact episode telemetry
    */
   process({
     vehicle,
     traffic,
-    controls, // { steer, throttle, brake }
+    controls,
     dt = 0.016
   } = {}) {
     let { steer, throttle, brake } = controls;
+    this.totalTime = (this.totalTime || 0) + dt;
     const vSpeed = finite(vehicle?.speed, 0);
     const yawRate = finite(vehicle?.yawRate, 0);
 
-    // Live body slip angle
-    const slipAngle = Math.atan2(
+    // Lateral slip angle beta ~ atan2(v_lat, v_long)
+    const sideslip = Math.atan2(
       finite(vehicle?.localVelocity?.x, 0),
-      Math.max(2.0, Math.abs(finite(vehicle?.localVelocity?.z, vSpeed)))
+      Math.max(1.0, Math.abs(finite(vehicle?.localVelocity?.z, 0)))
     );
-    const absSlip = Math.abs(slipAngle);
+    const absSlip = Math.abs(sideslip);
 
     // =========================================================================
-    // 1. CONTACT-TOLERANT LATERAL RUBBING EQUILIBRIUM & ATTRIBUTION
+    // 1. ELASTIC CONTACT RUBBING EQUILIBRIUM & ATTRIBUTION
     // =========================================================================
     this.rubbingActive = false;
     const entries = traffic?.entries ?? [];
+    let activeContactEntry = null;
 
     for (const entry of entries) {
       if (!entry?.other || entry.other.finished || entry.other.despawned || entry.other.trafficGhost) continue;
@@ -67,20 +79,103 @@ export class CombatDynamicsEngine {
       // Genuine side-by-side rubbing contact (< 1.85m separation)
       if (Math.abs(longGap) < this.carLength * 0.85 && Math.abs(latGap) < this.carWidth * 0.90) {
         this.rubbingActive = true;
+        activeContactEntry = entry;
         // Maintain drive momentum during side-by-side rubbing contact unless already breaking away
         if (throttle > 0.1 && brake < 0.05 && absSlip < 0.20) {
           throttle = Math.max(throttle, 0.45);
         }
-
-        // Contact Attribution (Phase 8 & 12):
-        // Hard lateral pinch vs benign elastic door rub
-        const normalImpactSpeed = Math.abs(finite(entry.relativeLateralVelocity, 0));
-        const isDeepPenetration = Math.abs(latGap) < this.carWidth * 0.52;
-        if (normalImpactSpeed > 1.1 || isDeepPenetration) {
-          this.attributableContacts += 1;
-          this.attributableDamage += clamp(normalImpactSpeed * 0.012 * dt, 0.0001, 0.005);
-        }
         break;
+      }
+    }
+
+    // Debounced Contact Episode Tracking & Attribution (Phase 8 & 12)
+    if (activeContactEntry) {
+      const otherId = activeContactEntry.other?.id ?? 'rival';
+      const normalImpactSpeed = Math.abs(finite(activeContactEntry.relativeLateralVelocity, 0));
+      const closingSpeed = Math.hypot(
+        normalImpactSpeed,
+        Math.abs(finite(activeContactEntry.relativeLongitudinalVelocity, 0))
+      );
+      const latGap = Math.abs(finite(activeContactEntry.lateralDelta, 99));
+      const isDeepPenetration = latGap < this.carWidth * 0.52;
+      const latPenetration = Math.max(0, this.carWidth - latGap);
+      const longPenetration = Math.max(0, this.carLength - Math.abs(finite(activeContactEntry.delta, 99)));
+      const peakPenetration = Math.max(latPenetration, longPenetration);
+
+      // Ego vs opponent lateral movement (lateral velocities towards each other)
+      const egoSideVel = finite(vehicle?.localVelocity?.x, 0);
+      const otherLatVel = finite(activeContactEntry.otherLateralSpeed, 0);
+      const isEgoMovingTowardsOther = (activeContactEntry.side > 0 && egoSideVel > 0.25) || (activeContactEntry.side < 0 && egoSideVel < -0.25);
+      const isOtherMovingTowardsEgo = (activeContactEntry.side > 0 && otherLatVel < -0.25) || (activeContactEntry.side < 0 && otherLatVel > 0.25);
+
+      let classification = 'BENIGN_DOOR_RUB';
+      let isEgoFault = false;
+
+      if (Math.abs(activeContactEntry.delta) > this.carLength * 0.65) {
+        classification = 'FRONT_REAR_IMPACT';
+        if (activeContactEntry.delta > 0 && activeContactEntry.relativeLongitudinalVelocity > 1.2) {
+          isEgoFault = true;
+        }
+      } else if (isDeepPenetration) {
+        classification = 'SEVERE_OVERLAP';
+        isEgoFault = isEgoMovingTowardsOther;
+      } else if (isEgoMovingTowardsOther && !isOtherMovingTowardsEgo) {
+        classification = 'EGO_INITIATED_PINCH';
+        isEgoFault = true;
+      } else if (isOtherMovingTowardsEgo && !isEgoMovingTowardsOther) {
+        classification = 'OPPONENT_INITIATED_PINCH';
+        isEgoFault = false;
+      } else {
+        classification = 'BENIGN_DOOR_RUB';
+        isEgoFault = false;
+      }
+
+      // Check if continuing an existing contact episode or starting a new one
+      const timeSinceLast = this.totalTime - (this.lastContactTime || 0);
+      if (!this.activeContactEpisode || (this.activeContactEpisode.rivalId !== otherId && timeSinceLast > 0.35)) {
+        this.activeContactEpisode = {
+          id: `contact_${otherId}_${Math.round(this.totalTime * 1000)}`,
+          rivalId: otherId,
+          startTime: this.totalTime,
+          duration: 0,
+          peakPenetration,
+          peakClosingSpeed: closingSpeed,
+          classification,
+          egoInitiated: isEgoFault,
+          associatedDamage: 0,
+          attributableDamage: 0,
+          closed: false
+        };
+        this.contactEpisodes.push(this.activeContactEpisode);
+        if (isEgoFault && classification !== 'BENIGN_DOOR_RUB') {
+          this.attributableContacts += 1;
+        }
+      } else {
+        this.activeContactEpisode.duration += dt;
+        this.activeContactEpisode.peakPenetration = Math.max(this.activeContactEpisode.peakPenetration, peakPenetration);
+        this.activeContactEpisode.peakClosingSpeed = Math.max(this.activeContactEpisode.peakClosingSpeed, closingSpeed);
+        if (isEgoFault) this.activeContactEpisode.egoInitiated = true;
+        if (classification === 'SEVERE_OVERLAP' || classification === 'EGO_INITIATED_PINCH' || classification === 'FRONT_REAR_IMPACT') {
+          this.activeContactEpisode.classification = classification;
+        }
+      }
+
+      this.lastContactTime = this.totalTime;
+
+      // Rate-limited damage accumulation
+      const stepDamage = clamp(closingSpeed * 0.012 * dt, 0.0001, 0.005);
+      this.contactAssociatedDamage += stepDamage;
+      this.activeContactEpisode.associatedDamage += stepDamage;
+
+      if (this.activeContactEpisode.egoInitiated && this.activeContactEpisode.classification !== 'BENIGN_DOOR_RUB') {
+        this.attributableDamage += stepDamage;
+        this.activeContactEpisode.attributableDamage += stepDamage;
+      }
+    } else {
+      // No active contact this frame
+      if (this.activeContactEpisode && (this.totalTime - this.lastContactTime > 0.25)) {
+        this.activeContactEpisode.closed = true;
+        this.activeContactEpisode = null;
       }
     }
 
@@ -113,6 +208,9 @@ export class CombatDynamicsEngine {
       brake,
       rubbing: this.rubbingActive,
       powerSlide: this.powerSlideActive,
+      contactEpisodes: this.contactEpisodes,
+      activeContactEpisode: this.activeContactEpisode,
+      contactAssociatedDamage: this.contactAssociatedDamage,
       attributableDamage: this.attributableDamage,
       attributableContacts: this.attributableContacts
     };

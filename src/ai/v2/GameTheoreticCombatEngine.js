@@ -96,6 +96,16 @@ export class GameTheoreticCombatEngine {
     this.retainedTimer = 0;
     this.retainedDistance = 0;
     this.passStartDistance = 0;
+    this.passStartTime = 0;
+    this.passEpisode = {
+      id: null,
+      targetId: null,
+      state: 'NONE',
+      startTime: 0,
+      duration: 0,
+      distance: 0,
+      reason: 'NONE'
+    };
 
     // Defensive Episode Memory (FIA single-move rule enforcement)
     this.defensiveEpisode = {
@@ -153,6 +163,16 @@ export class GameTheoreticCombatEngine {
     this.retainedTimer = 0;
     this.retainedDistance = 0;
     this.passStartDistance = 0;
+    this.passStartTime = 0;
+    this.passEpisode = {
+      id: null,
+      targetId: null,
+      state: 'NONE',
+      startTime: 0,
+      duration: 0,
+      distance: 0,
+      reason: 'NONE'
+    };
 
     this.defensiveEpisode = {
       active: false,
@@ -258,6 +278,234 @@ export class GameTheoreticCombatEngine {
       secondarySign: secondaryTurn?.sign ?? primaryTurn.sign,
       secondaryDist: secondaryTurn?.dist ?? 999
     };
+  }
+
+  /**
+   * Causal expected-utility tactical action evaluator.
+   * Computes U(action) = sum_i P(response_i) * U(action, response_i)
+   * @private
+   */
+  _evaluateActionExpectedUtilities({
+    passTarget,
+    vDist,
+    vSpeed,
+    currentLat,
+    targetSpeed,
+    opponentLat,
+    gap,
+    closingSpeed,
+    isApproachingCorner,
+    isStraight,
+    insideOffset,
+    maxMargin,
+    primaryInsideSign,
+    multiApex,
+    aggression,
+    optimalLat,
+    optimalTargetSpeed
+  }) {
+    const predictions = passTarget.predictions || [];
+    const carW = this.carWidth;
+    const minPassWidth = carW + 0.85;
+
+    const leftSpace = Math.max(minPassWidth, maxMargin + opponentLat);
+    const rightSpace = Math.max(minPassWidth, maxMargin - opponentLat);
+    const targetLeft = clamp(opponentLat - Math.max(minPassWidth, Math.min(4.5, leftSpace * 0.50)), -maxMargin, maxMargin);
+    const targetRight = clamp(opponentLat + Math.max(minPassWidth, Math.min(4.5, rightSpace * 0.50)), -maxMargin, maxMargin);
+
+    // Candidate actions
+    const candidateActions = [
+      {
+        id: 'DRAFT_HOLD',
+        targetLat: clamp(opponentLat, -maxMargin * 0.85, maxMargin * 0.85),
+        targetSpeed: Math.max(optimalTargetSpeed, targetSpeed + 10.0 + aggression * 3.5),
+        mode: 'SLINGSHOT',
+        notes: 'ATTACK_SLINGSHOT_DRAFTING',
+        dwell: 0.30
+      },
+      {
+        id: 'ATTACK_LEFT',
+        targetLat: targetLeft,
+        targetSpeed: Math.min(optimalTargetSpeed * 1.04, targetSpeed + 3.0 + aggression * 2.0),
+        mode: 'OVERTAKE',
+        side: -1,
+        notes: 'ATTACK_OVERTAKE_LEFT',
+        dwell: 0.35
+      },
+      {
+        id: 'ATTACK_RIGHT',
+        targetLat: targetRight,
+        targetSpeed: Math.min(optimalTargetSpeed * 1.04, targetSpeed + 3.0 + aggression * 2.0),
+        mode: 'OVERTAKE',
+        side: 1,
+        notes: 'ATTACK_OVERTAKE_RIGHT',
+        dwell: 0.35
+      },
+      {
+        id: 'INSIDE_DIVE',
+        targetLat: insideOffset,
+        targetSpeed: multiApex.isChicane
+          ? Math.max(optimalTargetSpeed * 0.99, targetSpeed + 3.5)
+          : Math.max(optimalTargetSpeed * 1.02, targetSpeed + 4.0),
+        mode: 'DIVEBOMB',
+        side: primaryInsideSign,
+        notes: multiApex.isChicane ? 'ATTACK_CHICANE_IBR_DIVEBOMB' : 'ATTACK_FEARLESS_IBR_DIVEBOMB',
+        dwell: 0.50
+      },
+      {
+        id: 'OUTSIDE_MOMENTUM',
+        targetLat: clamp(-primaryInsideSign * (maxMargin * 0.82), -maxMargin, maxMargin),
+        targetSpeed: Math.min(optimalTargetSpeed * 1.04, targetSpeed + 4.0),
+        mode: 'OVERTAKE',
+        side: -primaryInsideSign,
+        notes: 'ATTACK_OUTSIDE_MOMENTUM',
+        dwell: 0.40
+      },
+      {
+        id: 'SWITCHBACK',
+        targetLat: clamp(-primaryInsideSign * (maxMargin * 0.82), -maxMargin, maxMargin),
+        targetSpeed: optimalTargetSpeed * 0.97,
+        mode: 'SWITCHBACK',
+        side: -primaryInsideSign,
+        stage: 'ENTRY_WIDE',
+        notes: 'ATTACK_SWITCHBACK_WIDE_ENTRY',
+        dwell: 0.50
+      },
+      {
+        id: 'HOLD_POSITION',
+        targetLat: optimalLat,
+        targetSpeed: optimalTargetSpeed,
+        mode: 'PACE',
+        notes: 'ATTACK_PURSUIT_LINE',
+        dwell: 0.20
+      }
+    ];
+
+    // Evaluate utility for each action against each opponent response hypothesis
+    const actionScores = candidateActions.map((act) => {
+      let expectedUtility = 0.0;
+
+      // Base physical feasibility checks
+      const isRoadLegal = Math.abs(act.targetLat) <= maxMargin - 0.20;
+      if (!isRoadLegal) expectedUtility -= 50.0;
+
+      // Hysteresis bonus for current mode
+      if (this.attackMode === act.mode) expectedUtility += 4.0;
+      if (act.side && this.attackSideLocked && this.attackSide !== 0 && act.side === this.attackSide) {
+        expectedUtility += 35.0; // Strong loyalty to locked overtake flank
+      } else if (act.side && this.attackSideLocked && this.attackSide !== 0 && act.side !== this.attackSide) {
+        expectedUtility -= 35.0; // Strongly disfavor swapping flanks mid-maneuver
+      }
+
+      if (predictions.length === 0) {
+        // Fallback heuristic scoring if no predictions supplied
+        if (isStraight && act.id === 'DRAFT_HOLD') expectedUtility += 15.0;
+        if (isApproachingCorner && act.id === 'INSIDE_DIVE') expectedUtility += 12.0;
+        return { action: act, expectedUtility };
+      }
+
+      for (const pred of predictions) {
+        const prob = finite(pred.probability, 1.0 / predictions.length);
+        let u = 0.0;
+
+        // 1. Spatio-temporal envelope overlap penalty
+        const envelopes = pred.envelopes || [];
+        for (const env of envelopes) {
+          const t = env.timeS;
+          const egoPredS = vDist + act.targetSpeed * t;
+          const sOverlap = egoPredS >= (env.sMin - 1.2) && egoPredS <= (env.sMax + 1.2);
+          if (sOverlap) {
+            const latOverlap = Math.abs(act.targetLat - env.centerQ);
+            if (latOverlap < (carW + 0.55)) {
+              const penetration = (carW + 0.55) - latOverlap;
+              u -= penetration * 40.0;
+            }
+          }
+        }
+
+        // 2. Tactical hypothesis synergies & penalties
+        let coveredSide = 0;
+        let openSide = 0;
+        if (pred.id === 'DEFEND_INSIDE') {
+          coveredSide = primaryInsideSign;
+          openSide = -primaryInsideSign;
+        } else if (pred.id === 'DEFEND_OUTSIDE') {
+          coveredSide = -primaryInsideSign;
+          openSide = primaryInsideSign;
+        } else if (isApproachingCorner) {
+          coveredSide = (opponentLat * primaryInsideSign > 0) ? primaryInsideSign : -primaryInsideSign;
+          openSide = -coveredSide;
+        } else {
+          coveredSide = Math.abs(opponentLat) > 1.0 ? Math.sign(opponentLat) : 0;
+          openSide = -coveredSide;
+        }
+
+        if (pred.id === 'DEFEND_INSIDE') {
+          if (act.id === 'INSIDE_DIVE') u -= 32.0; // Squeezed door!
+          if (act.id === 'SWITCHBACK') u += 28.0;  // Defender overcommitted inside!
+          if (act.id === 'OUTSIDE_MOMENTUM') u += 20.0;
+          if (act.side === openSide) u += 24.0;   // Open corridor commitment!
+          if (act.side === coveredSide) u -= 28.0; // Avoid attacking into covered side!
+        } else if (pred.id === 'DEFEND_OUTSIDE') {
+          if (act.id === 'INSIDE_DIVE') u += 32.0; // Inside apex left wide open!
+          if (act.side === openSide) u += 24.0;    // Open inside flank commitment!
+          if (act.side === coveredSide) u -= 28.0; // Blocked outside!
+          if (act.id === 'OUTSIDE_MOMENTUM') u -= 26.0;
+          if (act.id === 'SWITCHBACK') u -= 20.0;
+        } else if (pred.id === 'LATE_BRAKE_OVERSHOOT') {
+          if (act.id === 'SWITCHBACK') u += 28.0; // Classic undercut of overshooter!
+          if (act.id === 'INSIDE_DIVE') u -= 18.0; // High risk of T-bone / apex sweep
+          if (act.id === 'OUTSIDE_MOMENTUM') u += 16.0;
+        } else if (pred.id === 'BRAKE_EARLY') {
+          if (act.id === 'INSIDE_DIVE') u += 22.0; // Free inside lane on early braker
+          if (act.id === 'ATTACK_LEFT' || act.id === 'ATTACK_RIGHT') u += 18.0;
+        } else if (pred.id === 'HOLD_LINE') {
+          const insideOpening = Math.abs(opponentLat - insideOffset);
+          if (act.id === 'INSIDE_DIVE') {
+            u += insideOpening > 1.8 ? 16.0 : -14.0;
+          }
+          if (act.side === openSide) u += 10.0;
+          if (act.id === 'DRAFT_HOLD' && isStraight && Math.abs(currentLat - opponentLat) < 1.6) u += 14.0;
+        } else if (pred.id === 'RETURN_TO_RACING_LINE') {
+          if (act.id === 'SWITCHBACK') u += 12.0;
+          if (act.id === 'INSIDE_DIVE' && Math.sign(insideOffset) !== Math.sign(opponentLat)) u += 14.0;
+          if (act.side === openSide) u += 12.0;
+          if (act.side === coveredSide) u -= 12.0;
+        }
+
+        // Straight line vs corner preferences
+        if (isStraight) {
+          const isAlignedForDraft = Math.abs(currentLat - opponentLat) < 1.6;
+          if (act.id === 'DRAFT_HOLD') {
+            if (gap > 5.0 && isAlignedForDraft && closingSpeed < 4.0) {
+              u += 16.0;
+            } else {
+              u -= 15.0; // Don't tuck into draft pocket when already separated or much faster!
+            }
+          }
+          if (act.id === 'ATTACK_LEFT' || act.id === 'ATTACK_RIGHT') {
+            const isMyFlank = (act.id === 'ATTACK_RIGHT' && currentLat > opponentLat) ||
+                              (act.id === 'ATTACK_LEFT' && currentLat < opponentLat);
+            u += (gap <= 28.0 ? 16.0 : 6.0);
+            if (isMyFlank) u += 14.0; // Maintain natural open flank momentum!
+            if (closingSpeed > 1.5) u += 8.0;
+            if (act.side === openSide) u += 16.0;
+            if (act.side === coveredSide) u -= 20.0;
+          }
+          if (act.id === 'INSIDE_DIVE') u -= 15.0;
+          if (act.id === 'SWITCHBACK') u -= 15.0;
+        } else if (isApproachingCorner) {
+          if (act.id === 'DRAFT_HOLD') u -= 20.0; // Never draft-hold into a braking zone!
+        }
+
+        expectedUtility += prob * u;
+      }
+
+      return { action: act, expectedUtility };
+    });
+
+    actionScores.sort((a, b) => b.expectedUtility - a.expectedUtility);
+    return actionScores;
   }
 
   /**
@@ -547,31 +795,50 @@ export class GameTheoreticCombatEngine {
         this.retainedTimer = 0;
         this.retainedDistance = 0;
         this.passStartDistance = vDist;
+        this.passStartTime = vDist;
+        this.passEpisode = {
+          id: `pass_${this.attackTargetId}_${Math.round(vDist)}`,
+          targetId: this.attackTargetId,
+          state: 'APPROACH',
+          startTime: vDist,
+          duration: 0,
+          distance: 0,
+          reason: 'INITIATED'
+        };
       }
 
       this.passStateTimer += dt;
+      if (this.passEpisode) {
+        this.passEpisode.duration = this.passStateTimer;
+        this.passEpisode.state = this.passState;
+      }
 
       if (this.passState === 'APPROACH' && (this.commitDwellTimer > 0 || ['DIVEBOMB', 'SWITCHBACK', 'SLINGSHOT', 'OVERTAKE', 'SIDE_BY_SIDE'].includes(this.attackMode))) {
         this.passState = 'COMMITTED';
+        if (this.passEpisode) this.passEpisode.state = 'COMMITTED';
       }
 
       if ((this.passState === 'COMMITTED' || this.passState === 'APPROACH') && Math.abs(gap) < this.carLength * 1.15) {
         this.passState = 'OVERLAP';
+        if (this.passEpisode) this.passEpisode.state = 'OVERLAP';
       }
 
       if (this.passState === 'OVERLAP' && gap < -0.30) {
         this.passState = 'NOSE_AHEAD';
+        if (this.passEpisode) this.passEpisode.state = 'NOSE_AHEAD';
       }
 
       if ((this.passState === 'NOSE_AHEAD' || this.passState === 'OVERLAP') && gap < -requiredPassClearance) {
         this.passState = 'FULL_CLEAR';
         this.passedTargetId = this.attackTargetId;
+        if (this.passEpisode) this.passEpisode.state = 'FULL_CLEAR';
       }
 
       if (this.passState === 'FULL_CLEAR') {
         this.passState = 'RETAINING';
         this.retainedTimer = 0;
         this.retainedDistance = 0;
+        if (this.passEpisode) this.passEpisode.state = 'RETAINING';
       }
 
       // Inside opening width relative to inside curb apex offset
@@ -609,8 +876,18 @@ export class GameTheoreticCombatEngine {
         if (gap > -this.carLength * 0.75) {
           this.passState = 'REPASSED';
           this.retainedTimer = 0;
+          if (this.passEpisode) {
+            this.passEpisode.state = 'REPASSED';
+            this.passEpisode.reason = 'REPASSED_BY_OPPONENT';
+          }
         } else if (this.retainedTimer >= 1.8 || this.retainedDistance >= 45.0) {
           this.passState = 'RETAINED';
+          if (this.passEpisode) {
+            this.passEpisode.state = 'RETAINED';
+            this.passEpisode.duration = this.passStateTimer;
+            this.passEpisode.distance = this.retainedDistance;
+            this.passEpisode.reason = 'SAFE_MERGE_COMPLETED';
+          }
           this.targetLockTimer = 16.0;
           this.attackMode = 'NONE';
           this.attackTargetId = null;
@@ -632,6 +909,7 @@ export class GameTheoreticCombatEngine {
           this.passState = 'RETAINING';
           this.retainedTimer = 0;
           this.retainedDistance = 0;
+          if (this.passEpisode) this.passEpisode.state = 'RETAINING';
         }
       } else {
         this.passClearDwell = 0;
@@ -713,83 +991,55 @@ export class GameTheoreticCombatEngine {
           atkTargetLat = optimalLat;
           atkDesiredSpeed = optimalSample.targetSpeed;
           atkNotes = 'ATTACK_STABILIZE_LINE';
-        } else if (isStraight && gap > 4.5) {
-          // High-Speed Slipstream Slingshot
-          this.attackMode = 'SLINGSHOT';
-          const straightClosingFloor = 10.0 + aggression * 3.5;
-          atkDesiredSpeed = Math.max(optimalSample.targetSpeed, targetSpeed + straightClosingFloor);
-
-          const dynamicPulloutDist = clamp(closingSpeed * 1.2 + 4.5, 6.0, 24.0);
-          const shouldPullOut = gap <= dynamicPulloutDist || gap < 15.0;
-
-          if (shouldPullOut) {
-            if (!this.attackSideLocked || this.attackSide === 0) {
-              this.attackSide = opponentLat >= 0 ? -1 : 1;
-              this.attackSideLocked = true;
-            }
-            this.commitDwellTimer = 0.40;
-            const pullSide = this.attackSide;
-            atkTargetLat = clamp(opponentLat + pullSide * 3.2, -maxMargin, maxMargin);
-            atkNotes = 'ATTACK_SLINGSHOT_PUNCH_OUT';
-          } else {
-            // Ride the slipstream tow pocket directly behind
-            atkTargetLat = clamp(opponentLat, -maxMargin * 0.88, maxMargin * 0.88);
-            atkNotes = 'ATTACK_SLINGSHOT_DRAFTING';
-          }
-        } else if (isApproachingCorner && isInsideOpen && gap < 28.0 && vSpeed > 22.0 && closingSpeed > 0.5) {
-          // Initiate Inside Apex Pass with commitment dwell
-          this.attackMode = 'DIVEBOMB';
-          this.divebombCommitted = true;
-          this.commitDwellTimer = 0.50;
-          this.attackIntensity = 0.96;
-          this.attackSide = primaryInsideSign;
-          this.attackSideLocked = true;
-          atkTargetLat = insideOffset;
-          atkDesiredSpeed = multiApex.isChicane
-            ? Math.max(optimalSample.targetSpeed * 0.99, targetSpeed + 3.5)
-            : Math.max(optimalSample.targetSpeed * 1.02, targetSpeed + 4.0);
-          atkNotes = multiApex.isChicane ? 'ATTACK_CHICANE_IBR_DIVEBOMB' : 'ATTACK_FEARLESS_IBR_DIVEBOMB';
-        } else if (isApproachingCorner && !isInsideOpen && gap < 28.0 && vSpeed > 22.0) {
-          // Initiate Diamond Line Switchback Undercut with commitment dwell
-          this.attackMode = 'SWITCHBACK';
-          this.attackIntensity = 0.90;
-          this.commitDwellTimer = 0.50;
-          this.attackSide = -primaryInsideSign;
-          this.attackSideLocked = true;
-          this.switchbackStage = 'ENTRY_WIDE';
-          atkTargetLat = clamp(-primaryInsideSign * (maxMargin * 0.82), -maxMargin, maxMargin);
-          atkDesiredSpeed = optimalSample.targetSpeed * 0.97;
-          atkNotes = 'ATTACK_SWITCHBACK_WIDE_ENTRY';
         } else {
-          // Dynamic Overtake Corridor Selection (Dual-Flank Bypass)
-          const isSlower = targetSpeed < vSpeed - 1.5 || targetSpeed < 20.0 || gap < 22.0;
-          if (isSlower) {
-            this.attackMode = 'OVERTAKE';
-            this.commitDwellTimer = 0.35;
-            const leftSpace = maxMargin + opponentLat;
-            const rightSpace = maxMargin - opponentLat;
-            const minPassWidth = this.carWidth + 0.65;
-            if (!this.attackSideLocked || this.attackSide === 0) {
-              if (currentLat > opponentLat + 0.35 && rightSpace >= minPassWidth) {
-                this.attackSide = 1;
-              } else if (currentLat < opponentLat - 0.35 && leftSpace >= minPassWidth) {
-                this.attackSide = -1;
-              } else {
-                this.attackSide = leftSpace >= rightSpace ? -1 : 1;
-              }
-              this.attackSideLocked = true;
-            }
-            const passSide = this.attackSide;
-            const targetPassOffset = opponentLat + passSide * Math.min(3.2, Math.max(minPassWidth, (passSide < 0 ? leftSpace : rightSpace) * 0.55));
-            atkTargetLat = clamp(targetPassOffset, -maxMargin, maxMargin);
-            atkDesiredSpeed = Math.min(optimalSample.targetSpeed * 1.04, targetSpeed + 3.0 + aggression * 2.0);
-            atkNotes = 'ATTACK_OVERTAKE_BYPASS';
-          } else {
-            this.attackMode = 'PACE';
-            atkTargetLat = optimalLat;
-            atkDesiredSpeed = optimalSample.targetSpeed;
-            atkNotes = 'ATTACK_PURSUIT_LINE';
+          // Causal Expected Utility Tactical Action Selection
+          const scoredActions = this._evaluateActionExpectedUtilities({
+            passTarget,
+            vDist,
+            vSpeed,
+            currentLat,
+            targetSpeed,
+            opponentLat,
+            gap,
+            closingSpeed,
+            isApproachingCorner,
+            isStraight,
+            insideOffset,
+            maxMargin,
+            primaryInsideSign,
+            multiApex,
+            aggression,
+            optimalLat,
+            optimalTargetSpeed: optimalSample.targetSpeed
+          });
+
+          const best = scoredActions[0]?.action || {
+            id: 'HOLD_POSITION',
+            targetLat: optimalLat,
+            targetSpeed: optimalSample.targetSpeed,
+            mode: 'PACE',
+            notes: 'ATTACK_PURSUIT_LINE'
+          };
+
+          this.attackMode = best.mode;
+          if (best.side !== undefined) {
+            this.attackSide = best.side;
+            this.attackSideLocked = true;
           }
+          if (best.dwell) {
+            this.commitDwellTimer = best.dwell;
+          }
+          if (best.id === 'DIVEBOMB' || best.id === 'INSIDE_DIVE') {
+            this.divebombCommitted = true;
+            this.attackIntensity = 0.96;
+          } else if (best.id === 'SWITCHBACK') {
+            this.attackIntensity = 0.90;
+            this.switchbackStage = multiApex.primaryDist < 12.0 ? 'EXIT_UNDERCUT' : 'ENTRY_WIDE';
+          }
+
+          atkTargetLat = best.targetLat;
+          atkDesiredSpeed = best.targetSpeed;
+          atkNotes = best.notes;
         }
       }
     } else {
@@ -816,18 +1066,37 @@ export class GameTheoreticCombatEngine {
     let dMax = maxMargin;
     let combatNotes = 'OPTIMAL_RACING_LINE';
 
-    // Three-Wide Pack Reasoning (Phase 10 & 11)
-    const leftFlankCar = entries.find((e) => Math.abs(e.delta) < this.carLength * 1.25 && e.side < -1.1 && e.side > -4.5);
-    const rightFlankCar = entries.find((e) => Math.abs(e.delta) < this.carLength * 1.25 && e.side > 1.1 && e.side < 4.5);
+    // Asymmetric Three-Wide Pack Reasoning (Phase 8 & 11)
+    const leftFlankCar = entries.find((e) => Math.abs(e.delta) < this.carLength * 1.35 && e.side < -0.9 && e.side > -5.5);
+    const rightFlankCar = entries.find((e) => Math.abs(e.delta) < this.carLength * 1.35 && e.side > 0.9 && e.side < 5.5);
     this.threeWideActive = Boolean(leftFlankCar && rightFlankCar);
 
     if (this.threeWideActive) {
       tacticalRole = 'THREE_WIDE_HOLD';
-      targetLateral = 0.0;
-      dMin = -0.55;
-      dMax = 0.55;
-      desiredSpeed = isApproachingCorner ? Math.min(desiredSpeed, vSpeed * 0.94) : desiredSpeed;
-      combatNotes = 'COMBAT_THREE_WIDE_CENTER_HOLD';
+      const leftLat = finite(leftFlankCar.otherLateral ?? leftFlankCar.other?.surface?.lateral, currentLat - 2.5);
+      const rightLat = finite(rightFlankCar.otherLateral ?? rightFlankCar.other?.surface?.lateral, currentLat + 2.5);
+
+      const leftInner = leftLat + this.carWidth * 0.5;
+      const rightInner = rightLat - this.carWidth * 0.5;
+      const freeSpaceGap = rightInner - leftInner;
+      const qMid = 0.5 * (leftInner + rightInner);
+
+      dMin = clamp(leftInner + this.carWidth * 0.5 + 0.25, -maxMargin, maxMargin);
+      dMax = clamp(rightInner - this.carWidth * 0.5 - 0.25, -maxMargin, maxMargin);
+      if (dMin > dMax) {
+        // Severe pinch: keep center
+        dMin = qMid - 0.45;
+        dMax = qMid + 0.45;
+      }
+      targetLateral = clamp(qMid, dMin, dMax);
+
+      if (freeSpaceGap < this.carWidth + 0.50) {
+        desiredSpeed = Math.min(optimalSample.targetSpeed, vSpeed * 0.92);
+        combatNotes = 'COMBAT_THREE_WIDE_PINCH_YIELD';
+      } else {
+        desiredSpeed = isApproachingCorner ? Math.min(optimalSample.targetSpeed, vSpeed * 0.96) : optimalSample.targetSpeed;
+        combatNotes = 'COMBAT_THREE_WIDE_CENTER_HOLD';
+      }
     } else if (isDefending && isAttacking) {
       tacticalRole = 'DUAL_COMBAT';
 
@@ -909,6 +1178,7 @@ export class GameTheoreticCombatEngine {
       tacticalPhase: (this.threeWideActive ? 'THREE_WIDE' : (isDefending ? this.defenseMode : (isAttacking ? this.attackMode : 'PACE'))),
       passState: this.passState,
       passStateTargetId: this.passStateTargetId,
+      passEpisode: this.passEpisode ? { ...this.passEpisode } : null,
       retainedTimer: this.retainedTimer,
       retainedDistance: this.retainedDistance,
       defensiveEpisode: {

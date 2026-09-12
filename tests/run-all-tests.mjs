@@ -65,6 +65,18 @@ const TEST_SUITES = [
     name: 'Supreme Racecraft V3 Suite (23 Scenarios)',
     file: 'supreme-racecraft-suite.mjs',
     description: 'Persistent Maneuvers, Predictive Attack, Intelligent Defense, 8-State Pass Machine, and Multi-Car Combat'
+  },
+  {
+    id: 'causal-prediction',
+    name: 'Causal Prediction Expected Utility Suite',
+    file: 'causal-prediction-test.mjs',
+    description: 'Causal Expected-Utility best response tactical action selection under varying opponent hypothesis probability distributions'
+  },
+  {
+    id: 'anti-twitch',
+    name: 'Anti-Twitch & Trajectory Continuity Suite',
+    file: 'anti-twitch-test.mjs',
+    description: 'Harbor Ring GT cornering at 25Hz replanning verifying bounded geometry switching, C2 continuity, and zero twitching'
   }
 ];
 

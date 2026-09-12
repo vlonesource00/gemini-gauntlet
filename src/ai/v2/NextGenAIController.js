@@ -90,6 +90,14 @@ export class NextGenAIController {
     this._lastTactical = null;
     this._lastTacticalMode = 'PACE';
     this.lapLineBias = 0;
+    this.replanCount = 0;
+    this.materialSwitchCount = 0;
+    this.geometrySwitchCount = 0;
+    this.semanticSwitchCount = 0;
+    this.flankReversalCount = 0;
+    this.headingDiscontinuity = 0;
+    this.curvatureDiscontinuity = 0;
+    this.rmsNearHorizonDivergence = 0;
 
     // ERS state
     this.ersPlan = {
@@ -785,6 +793,18 @@ export class NextGenAIController {
       if (this.trajectoryPlan?.isMaterialSwitch) {
         this.materialSwitchCount = (this.materialSwitchCount || 0) + 1;
       }
+      if (this.trajectoryPlan?.isGeometrySwitch) {
+        this.geometrySwitchCount = (this.geometrySwitchCount || 0) + 1;
+      }
+      if (this.trajectoryPlan?.isSemanticSwitch) {
+        this.semanticSwitchCount = (this.semanticSwitchCount || 0) + 1;
+      }
+      if (this.trajectoryPlan?.isFlankReversal) {
+        this.flankReversalCount = (this.flankReversalCount || 0) + 1;
+      }
+      this.headingDiscontinuity = this.trajectoryPlan?.headingDiscontinuity ?? 0;
+      this.curvatureDiscontinuity = this.trajectoryPlan?.curvatureDiscontinuity ?? 0;
+      this.rmsNearHorizonDivergence = this.trajectoryPlan?.rmsNearHorizonDivergence ?? 0;
       if (this.trajectoryPlan) {
         this.trajectoryPlan.generatedAt = this.totalTime || 0;
         this.trajectoryPlan.replanIndex = this.replanCount;
@@ -1194,16 +1214,33 @@ export class NextGenAIController {
         lateralLoadTransferRate: finite(this.lateralLoadTransferRate, 0),
         replanCount: finite(this.replanCount, 0),
         materialSwitchCount: finite(this.materialSwitchCount, 0),
+        geometrySwitchCount: finite(this.geometrySwitchCount, 0),
+        semanticSwitchCount: finite(this.semanticSwitchCount, 0),
+        flankReversalCount: finite(this.flankReversalCount, 0),
+        headingDiscontinuity: finite(this.headingDiscontinuity, 0),
+        curvatureDiscontinuity: finite(this.curvatureDiscontinuity, 0),
         meanNearHorizonDivergence: finite(this.trajectoryPlan?.meanNearHorizonDivergence, 0),
         maxNearHorizonDivergence: finite(this.trajectoryPlan?.maxNearHorizonDivergence, 0),
+        rmsNearHorizonDivergence: finite(this.rmsNearHorizonDivergence, 0),
         maneuverFamily: this.trajectoryPlan?.maneuver?.family || 'PACE_CENTER_FLOW',
         passState: tactical.passState || 'NONE',
+        passEpisode: tactical.passEpisode || null,
         defensiveEpisode: tactical.defensiveEpisode || null,
         threeWideActive: Boolean(tactical.threeWideActive),
+        contactEpisodes: finalControls?.contactEpisodes || [],
+        contactAssociatedDamage: finite(finalControls?.contactAssociatedDamage, 0),
         attributableDamage: finite(finalControls?.attributableDamage, 0),
         attributableContacts: finite(finalControls?.attributableContacts, 0)
       }
     };
+  }
+
+  /**
+   * Return latest telemetry dictionary.
+   * @returns {Object} Telemetry data
+   */
+  getTelemetry() {
+    return this.debugState?.telemetry || {};
   }
 
   /**
