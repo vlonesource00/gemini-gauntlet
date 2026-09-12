@@ -38,9 +38,15 @@ function getTrackCacheKey(track, roadHalfWidth, curbWidth, specFingerprint = '')
  */
 export class AnalyticalPerfModel {
   constructor(specKey = 'prototype', customSpec = null) {
-    const baseSpec = (typeof specKey === 'object' && specKey !== null) ? specKey : (CAR_SPECS[specKey] || CAR_SPECS.prototype);
-    const spec = customSpec ? { ...baseSpec, ...customSpec } : baseSpec;
-    this.key = typeof specKey === 'string' ? specKey : (spec.classKey || 'custom');
+    let actualSpecKey = specKey;
+    let actualCustomSpec = customSpec;
+    if (typeof specKey === 'object' && specKey !== null && typeof customSpec === 'string') {
+      actualSpecKey = customSpec;
+      actualCustomSpec = specKey;
+    }
+    const baseSpec = (typeof actualSpecKey === 'object' && actualSpecKey !== null) ? actualSpecKey : (CAR_SPECS[actualSpecKey] || CAR_SPECS.prototype);
+    const spec = actualCustomSpec ? { ...baseSpec, ...actualCustomSpec } : baseSpec;
+    this.key = typeof actualSpecKey === 'string' ? actualSpecKey : (spec.classKey || 'custom');
     this.mass = finite(spec.mass, (this.key === 'prototype' ? 925 : (this.key === 'gt' ? 1265 : 1390)));
     this.weight = this.mass * G;
     this.wheelBase = finite(spec.wheelBase ?? spec.wheelbase, (this.key === 'prototype' ? 2.62 : 2.68));
@@ -62,17 +68,19 @@ export class AnalyticalPerfModel {
 
     // Aero: full combined downforce Cl (front + rear + ground effect)
     const aero = spec.aero || {};
-    this.area = finite(aero.area ?? spec.area, (this.key === 'prototype' ? 1.52 : (this.key === 'gt' ? 1.78 : 2.06)));
-    this.cd = finite(aero.cd ?? spec.cd, (this.key === 'prototype' ? 0.81 : (this.key === 'gt' ? 0.72 : 0.58)));
-    const frontAero = finite(spec.frontAero ?? aero.frontAero, (this.key === 'prototype' ? 0.48 : 0.43));
+    this.area = finite(actualCustomSpec?.area ?? aero.area ?? spec.area, (this.key === 'prototype' ? 1.52 : (this.key === 'gt' ? 1.78 : 2.06)));
+    this.cd = finite(actualCustomSpec?.cd ?? aero.cd ?? spec.cd, (this.key === 'prototype' ? 0.81 : (this.key === 'gt' ? 0.72 : 0.58)));
+    const frontAero = finite(actualCustomSpec?.frontAero ?? spec.frontAero ?? aero.frontAero, (this.key === 'prototype' ? 0.48 : 0.43));
     const clSum = (aero.frontCl != null && aero.rearCl != null)
       ? (aero.frontCl + aero.rearCl + (aero.groundEffect ?? 0))
       : null;
-    const clTotal = (aero.cl != null)
-      ? aero.cl
-      : ((spec.cl != null)
-        ? spec.cl
-        : (clSum != null ? clSum : (this.key === 'prototype' ? 4.84 : (this.key === 'gt' ? 2.28 : 0.81))));
+    const clTotal = (actualCustomSpec?.cl != null)
+      ? actualCustomSpec.cl
+      : ((aero.cl != null)
+        ? aero.cl
+        : ((spec.cl != null)
+          ? spec.cl
+          : (clSum != null ? clSum : (this.key === 'prototype' ? 4.84 : (this.key === 'gt' ? 2.28 : 0.81)))));
     this.clFront = finite(aero.frontCl, clTotal * frontAero);
     this.clRear = finite(aero.rearCl, clTotal * (1 - frontAero));
     this.clTotal = clTotal;
@@ -80,20 +88,21 @@ export class AnalyticalPerfModel {
     this.designRideHeight = finite(aero.designRideHeight, (this.key === 'prototype' ? 0.048 : 0.068));
 
     // Drivetrain & Brakes
-    const iceTorque = finite(spec.maxTorqueNm ?? spec.maxTorque, (this.key === 'prototype' ? 665 : (this.key === 'gt' ? 520 : 395)));
+    const iceTorque = finite(actualCustomSpec?.maxTorque ?? spec.maxTorqueNm ?? spec.maxTorque, (this.key === 'prototype' ? 665 : (this.key === 'gt' ? 520 : 395)));
     const ersTorque = (spec.ers?.enabled && spec.ers?.maxDeployTorqueNm) ? Math.min(300, spec.ers.maxDeployTorqueNm * 0.22) : 0;
     this.maxTorque = iceTorque + ersTorque;
 
-    const rawGears = spec.gearRatios ?? spec.gears;
+    const rawGears = actualCustomSpec?.gears ?? actualCustomSpec?.gearRatios ?? spec.gearRatios ?? spec.gears;
     if (Array.isArray(rawGears) && rawGears.length > 1) {
       this.gearRatios = rawGears[0] === 0 ? rawGears.slice(1) : rawGears;
     } else {
       this.gearRatios = [3.04, 2.17, 1.65, 1.31, 1.08, 0.91];
     }
-    this.finalDrive = finite(spec.finalDrive, 3.72);
-    this.efficiency = finite(spec.drivetrainEfficiency, 0.91);
-    this.maxBrakeTorque = finite(spec.brakeTorqueNm ?? spec.maxBrakeTorque ?? spec.brakeTorque, (this.key === 'prototype' ? 9800 : (this.key === 'gt' ? 8900 : 8200)));
-    this.brakeBias = finite(spec.brakeBias, 0.59);
+    this.finalDrive = finite(actualCustomSpec?.finalDrive ?? spec.finalDrive, 3.72);
+    this.efficiency = finite(actualCustomSpec?.efficiency ?? spec.drivetrainEfficiency, 0.91);
+    const brakeTorque = actualCustomSpec?.brakeTorque ?? actualCustomSpec?.maxBrakeTorque ?? spec.brakeTorqueNm ?? spec.maxBrakeTorque ?? spec.brakeTorque;
+    this.maxBrakeTorque = finite(brakeTorque, (this.key === 'prototype' ? 9800 : (this.key === 'gt' ? 8900 : 8200)));
+    this.brakeBias = finite(actualCustomSpec?.brakeBias ?? spec.brakeBias, 0.59);
     this.isFWD = (spec.drive ?? 'rear') === 'front';
 
     // Fast tabulated performance arrays on a 0.5 m/s grid
@@ -111,20 +120,23 @@ export class AnalyticalPerfModel {
     return q * this.area * this.cd;
   }
 
+  _calcTireMu(wheelLoad) {
+    const refLoad = 3300;
+    return this.tireMu * clamp(1.0 - this.loadSensitivity * Math.log(Math.max(0.1, wheelLoad / refLoad)), 0.68, 1.18);
+  }
+
   latAccel(v) {
-    const baseG = (this.key === 'prototype' ? 1.55 : (this.key === 'gt' ? 1.14 : 0.98));
-    const maxG = (this.key === 'prototype' ? 2.04 : (this.key === 'gt' ? 1.25 : 1.10));
-    const downforceG = (this.downforce(v) / Math.max(1, this.weight)) * (this.key === 'prototype' ? 0.38 : 0.10);
-    const latG = Math.min(maxG, baseG + downforceG);
-    return latG * G;
+    const fz = this.weight + this.downforce(v);
+    const mu = this._calcTireMu(fz / 4);
+    return 0.90 * mu * fz / this.mass;
   }
 
   brakeAccel(v, grade = 0) {
-    const baseG = (this.key === 'prototype' ? 1.95 : (this.key === 'gt' ? 0.90 : 0.75));
-    const maxG = (this.key === 'prototype' ? 2.85 : (this.key === 'gt' ? 1.15 : 0.95));
-    const downforceG = (this.downforce(v) / Math.max(1, this.weight)) * (this.key === 'prototype' ? 0.65 : 0.15);
-    const brakeG = Math.min(maxG, baseG + downforceG);
-    return brakeG * G + G * Math.sin(grade);
+    const fz = this.weight + this.downforce(v);
+    const mu = this._calcTireMu(fz / 4);
+    const tireLimit = 0.96 * mu * fz;
+    const brakeLimit = this.maxBrakeTorque / this.wheelRadius;
+    return (Math.min(tireLimit, brakeLimit) + this.drag(v)) / this.mass + G * Math.sin(grade);
   }
 
   driveAccel(v, grade = 0) {
@@ -140,7 +152,7 @@ export class AnalyticalPerfModel {
       const ratio = this.gearRatios[g] * this.finalDrive;
       const rpm = (wWheel * ratio * 60) / (2 * Math.PI);
       if (rpm > 8200) continue;
-      const torque = this.maxTorque * clamp(1.0 - Math.pow((rpm - 5500) / 4500, 2), 0.65, 1.0);
+      const torque = this.maxTorque * Math.max(0.45, 1 - Math.pow((rpm - 5500) / 6700, 2));
       const thrust = (torque * ratio * this.efficiency) / this.wheelRadius;
       if (thrust > bestThrust) bestThrust = thrust;
     }
@@ -487,11 +499,12 @@ export class GlobalTimeOptimalEngine {
       ps[i] = g.scale;
       const kTrackEff = Math.abs(this.curv[i]) * 0.72;
       const kEffective = Math.max(Math.abs(g.kappa), kTrackEff);
-      pv[i] = perf.cornerSpeedAt(kEffective, this.bank[i], this.grade[i], 1.0);
+      const gripScale = perf.key === 'prototype' ? 0.64 : (perf.key === 'touring' ? 0.70 : 0.68);
+      pv[i] = perf.cornerSpeedAt(kEffective, this.bank[i], this.grade[i], gripScale);
     }
 
     // 2. Numerical Backward/Forward Integration (Speed Profile)
-    const brakeMargin = 0.80;
+    const brakeMargin = perf.key === 'prototype' ? 0.44 : (perf.key === 'touring' ? 0.48 : 0.44);
     for (let pass = 0; pass < 2; pass++) {
       for (let i = N - 1; i >= 0; i--) {
         const next = (i + 1) % N;
