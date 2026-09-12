@@ -2,28 +2,20 @@
  * causal-prediction-test.mjs
  * Dedicated test suite verifying Causal Expected Utility Tactical Action Selection.
  *
- * Proves that varying opponent prediction probabilities P(r_i) causally alters
- * the Stackelberg best-response tactical action (e.g., SWITCHBACK vs DIVEBOMB)
- * with identical physical vehicle states.
+ * Section 3 & 4:
+ * Proves that varying opponent prediction probabilities are inferred PURELY from
+ * observed history without ANY monkeypatching, and that expected-utility margins
+ * causally select superior tactical actions with clear positive margins.
  */
 
 import assert from 'node:assert/strict';
 import { Circuit } from '../src/simulation/Track.js';
 import { ENDURANCE_PARK } from '../src/scenarios/EndurancePark.js';
 import { Vehicle } from '../src/simulation/Vehicle.js';
+import { TrafficAwareness } from '../src/ai/TrafficAwareness.js';
 import { NextGenAIController } from '../src/ai/v2/NextGenAIController.js';
 
 const DT = 1 / 120;
-
-const setForwardSpeed = (vehicle, speedMs, track) => {
-  const p = track.atDistance(vehicle.distance);
-  vehicle.speed = speedMs;
-  vehicle.velocity = { x: p.tangent.x * speedMs, y: 0, z: p.tangent.z * speedMs };
-  vehicle.localVelocity = { x: 0, z: speedMs };
-  for (const wheel of vehicle.wheels || []) {
-    wheel.omega = speedMs / (vehicle.wheelRadius || 0.335);
-  }
-};
 
 console.log('================================================================================');
 console.log('       GEMINI SUPREME — CAUSAL PREDICTION EXPECTED UTILITY TEST SUITE           ');
@@ -31,131 +23,223 @@ console.log('===================================================================
 
 const track = new Circuit(ENDURANCE_PARK);
 
+// ===========================================================================
+// SECTION 3: Causal Behavioral Prediction from Real Observed History
+// ===========================================================================
+console.log('--- SECTION 3: PURE CAUSAL PREDICTION INFERENCE (NO MONKEYPATCHING) ---\n');
+
 // ---------------------------------------------------------------------------
-// Test 1: High P(DEFEND_INSIDE) causally triggers SWITCHBACK undercut
+// Case A: Rival holds stable line, normal braking -> predicted yield/concede is high
 // ---------------------------------------------------------------------------
-console.log('[1/3] Testing: High P(DEFEND_INSIDE) -> SWITCHBACK Undercut Selection...');
+console.log('[1/4] Testing Case A: Stable Line Observation -> Concede / Hold Line Prediction...');
 {
+  const awareness = new TrafficAwareness();
   const ego = new Vehicle({ id: 'ego', spec: 'prototype' });
   const rival = new Vehicle({ id: 'rival', spec: 'gt' });
 
-  // Approaching Turn 1 (inside is positive lateral on Endurance Park Turn 1)
-  rival.resetTo(track, 765, 2.5);
-  ego.resetTo(track, 745, 0.0);
-  setForwardSpeed(rival, 24, track);
-  setForwardSpeed(ego, 31, track);
+  // Feed 120 frames of steady line
+  for (let i = 0; i < 120; i++) {
+    ego.resetTo(track, 720 + i * 0.20, 0.0);
+    rival.resetTo(track, 745 + i * 0.18, 1.0);
+    awareness.scan(ego, [ego, rival], track, DT);
+  }
 
-  const egoAI = new NextGenAIController('ego-ai', { aggression: 0.90 });
-  const vehicles = [ego, rival];
-  const race = { phase: 'racing', raceTime: 5.0, elapsed: 5.0, statusFor: () => ({ position: 1 }) };
+  const traffic = awareness.scan(ego, [ego, rival], track, DT);
+  const rivalEntry = traffic.entries.find((e) => e.other.id === 'rival');
+  const preds = awareness.predictOpponentResponses(rivalEntry, track, {
+    speed: 30,
+    distance: ego.distance,
+    lateral: 0
+  });
 
-  // Intercept awareness to inject high P(DEFEND_INSIDE)
-  const origScan = egoAI.awareness.scan.bind(egoAI.awareness);
-  egoAI.awareness.scan = (veh, allVehs, trk) => {
-    const traffic = origScan(veh, allVehs, trk);
-    if (traffic.primaryAttackTarget) {
-      traffic.primaryAttackTarget.predictions = [
-        { id: 'DEFEND_INSIDE', probability: 0.80, envelopes: [] },
-        { id: 'HOLD_LINE', probability: 0.15, envelopes: [] },
-        { id: 'DEFEND_OUTSIDE', probability: 0.05, envelopes: [] }
-      ];
-    }
-    return traffic;
-  };
+  const totalProb = preds.reduce((sum, p) => sum + p.probability, 0);
+  assert.ok(Math.abs(totalProb - 1.0) < 1e-4, 'Probabilities must normalize to 1.0');
 
-  egoAI.update(ego, vehicles, track, race, DT);
-
-  console.log(`    Selected Mode: ${egoAI.combatEngine.attackMode} | Attack Side: ${egoAI.combatEngine.attackSide}`);
-  assert.equal(
-    egoAI.combatEngine.attackMode,
-    'SWITCHBACK',
-    `High P(DEFEND_INSIDE) must causally induce SWITCHBACK action (got ${egoAI.combatEngine.attackMode})`
-  );
-  console.log('    [PASS] Causal response to DEFEND_INSIDE verified.\n');
+  const holdLine = preds.find((p) => p.id === 'HOLD_LINE');
+  console.log(`    Case A HOLD_LINE probability: ${holdLine.probability.toFixed(3)}`);
+  assert.ok(holdLine.probability > 0.60, `Stable line must yield high HOLD_LINE prediction (got ${holdLine.probability})`);
+  console.log('    [PASS] Case A inferred purely from observed history.\n');
 }
 
 // ---------------------------------------------------------------------------
-// Test 2: High P(DEFEND_OUTSIDE) causally triggers DIVEBOMB inside apex dive
+// Case B: Rival moves inside early, holds inside -> predicted cover/defend inside is high
 // ---------------------------------------------------------------------------
-console.log('[2/3] Testing: High P(DEFEND_OUTSIDE) -> DIVEBOMB Inside Attack Selection...');
+console.log('[2/4] Testing Case B: Early Inside Motion -> Defend Inside Prediction...');
 {
+  const awareness = new TrafficAwareness();
   const ego = new Vehicle({ id: 'ego', spec: 'prototype' });
   const rival = new Vehicle({ id: 'rival', spec: 'gt' });
 
-  // Same identical physical placement as Test 1
-  rival.resetTo(track, 765, 2.5);
-  ego.resetTo(track, 745, 0.0);
-  setForwardSpeed(rival, 24, track);
-  setForwardSpeed(ego, 31, track);
+  // On Endurance Park Turn 1 (s~770), turnSign > 0 (inside is positive lateral)
+  for (let i = 0; i < 40; i++) {
+    ego.resetTo(track, 720 + i * 0.20, 0.0);
+    rival.resetTo(track, 745 + i * 0.18, 0.5 + i * 0.05); // drifts inside to +2.5
+    awareness.scan(ego, [ego, rival], track, DT);
+  }
 
-  const egoAI = new NextGenAIController('ego-ai', { aggression: 0.90 });
-  const vehicles = [ego, rival];
-  const race = { phase: 'racing', raceTime: 5.0, elapsed: 5.0, statusFor: () => ({ position: 1 }) };
+  const traffic = awareness.scan(ego, [ego, rival], track, DT);
+  const rivalEntry = traffic.entries.find((e) => e.other.id === 'rival');
+  const preds = awareness.predictOpponentResponses(rivalEntry, track, {
+    speed: 30,
+    distance: ego.distance,
+    lateral: 0
+  });
 
-  // Intercept awareness with identical physical state but inverted prediction distribution
-  const origScan = egoAI.awareness.scan.bind(egoAI.awareness);
-  egoAI.awareness.scan = (veh, allVehs, trk) => {
-    const traffic = origScan(veh, allVehs, trk);
-    if (traffic.primaryAttackTarget) {
-      traffic.primaryAttackTarget.predictions = [
-        { id: 'DEFEND_OUTSIDE', probability: 0.80, envelopes: [] },
-        { id: 'HOLD_LINE', probability: 0.15, envelopes: [] },
-        { id: 'DEFEND_INSIDE', probability: 0.05, envelopes: [] }
-      ];
-    }
-    return traffic;
-  };
+  const totalProb = preds.reduce((sum, p) => sum + p.probability, 0);
+  assert.ok(Math.abs(totalProb - 1.0) < 1e-4, 'Probabilities must normalize to 1.0');
 
-  egoAI.update(ego, vehicles, track, race, DT);
-
-  console.log(`    Selected Mode: ${egoAI.combatEngine.attackMode} | Attack Side: ${egoAI.combatEngine.attackSide}`);
-  assert.equal(
-    egoAI.combatEngine.attackMode,
-    'DIVEBOMB',
-    `High P(DEFEND_OUTSIDE) must causally induce DIVEBOMB action (got ${egoAI.combatEngine.attackMode})`
-  );
-  console.log('    [PASS] Causal response to DEFEND_OUTSIDE verified.\n');
+  const defendInside = preds.find((p) => p.id === 'DEFEND_INSIDE');
+  console.log(`    Case B DEFEND_INSIDE probability: ${defendInside.probability.toFixed(3)}`);
+  assert.ok(defendInside.probability > 0.60, `Inside motion must infer high DEFEND_INSIDE prediction (got ${defendInside.probability})`);
+  console.log('    [PASS] Case B inferred purely from observed history.\n');
 }
 
 // ---------------------------------------------------------------------------
-// Test 3: High P(LATE_BRAKE_OVERSHOOT) causally triggers SWITCHBACK undercut
+// Case C: Rival brakes late / divebombs inside -> predicted dive/lunge is high
 // ---------------------------------------------------------------------------
-console.log('[3/3] Testing: High P(LATE_BRAKE_OVERSHOOT) -> SWITCHBACK Undercut Selection...');
+console.log('[3/4] Testing Case C: Hard / Late Braking -> High Braking / Overshoot Prediction...');
 {
+  const awareness = new TrafficAwareness();
   const ego = new Vehicle({ id: 'ego', spec: 'prototype' });
   const rival = new Vehicle({ id: 'rival', spec: 'gt' });
 
-  rival.resetTo(track, 765, 2.5);
-  ego.resetTo(track, 745, 0.0);
-  setForwardSpeed(rival, 24, track);
-  setForwardSpeed(ego, 31, track);
+  rival.speed = 34;
+  for (let i = 0; i < 30; i++) {
+    ego.resetTo(track, 720 + i * 0.20, 0.0);
+    rival.resetTo(track, 745 + i * 0.18, 0.0);
+    rival.speed = Math.max(14, rival.speed - 0.45);
+    rival.controls = { brake: 0.90, throttle: 0, steer: 0 };
+    awareness.scan(ego, [ego, rival], track, DT);
+  }
 
+  const traffic = awareness.scan(ego, [ego, rival], track, DT);
+  const rivalEntry = traffic.entries.find((e) => e.other.id === 'rival');
+  const preds = awareness.predictOpponentResponses(rivalEntry, track, {
+    speed: 30,
+    distance: ego.distance,
+    lateral: 0
+  });
+
+  const totalProb = preds.reduce((sum, p) => sum + p.probability, 0);
+  assert.ok(Math.abs(totalProb - 1.0) < 1e-4, 'Probabilities must normalize to 1.0');
+
+  const brakeEarly = preds.find((p) => p.id === 'BRAKE_EARLY').probability;
+  const brakeNormal = preds.find((p) => p.id === 'BRAKE_NORMAL').probability;
+  const overshoot = preds.find((p) => p.id === 'LATE_BRAKE_OVERSHOOT').probability;
+  const totalBrakingThreat = brakeEarly + brakeNormal + overshoot;
+
+  console.log(`    Case C Total Braking/Overshoot probability: ${totalBrakingThreat.toFixed(3)}`);
+  assert.ok(totalBrakingThreat > 0.45, `Late/threshold braking must infer high braking/overshoot probability (got ${totalBrakingThreat})`);
+  console.log('    [PASS] Case C inferred purely from observed history.\n');
+}
+
+// ---------------------------------------------------------------------------
+// Case D: Rival moves outside to set up switchback -> predicted outside is high
+// ---------------------------------------------------------------------------
+console.log('[4/4] Testing Case D: Outside Motion -> Defend Outside Prediction...');
+{
+  const awareness = new TrafficAwareness();
+  const ego = new Vehicle({ id: 'ego', spec: 'prototype' });
+  const rival = new Vehicle({ id: 'rival', spec: 'gt' });
+
+  for (let i = 0; i < 40; i++) {
+    ego.resetTo(track, 720 + i * 0.20, 0.0);
+    rival.resetTo(track, 745 + i * 0.18, 1.5 - i * 0.05); // drifts outside toward -0.5
+    awareness.scan(ego, [ego, rival], track, DT);
+  }
+
+  const traffic = awareness.scan(ego, [ego, rival], track, DT);
+  const rivalEntry = traffic.entries.find((e) => e.other.id === 'rival');
+  const preds = awareness.predictOpponentResponses(rivalEntry, track, {
+    speed: 30,
+    distance: ego.distance,
+    lateral: 0
+  });
+
+  const totalProb = preds.reduce((sum, p) => sum + p.probability, 0);
+  assert.ok(Math.abs(totalProb - 1.0) < 1e-4, 'Probabilities must normalize to 1.0');
+
+  const defendOutside = preds.find((p) => p.id === 'DEFEND_OUTSIDE');
+  console.log(`    Case D DEFEND_OUTSIDE probability: ${defendOutside.probability.toFixed(3)}`);
+  assert.ok(defendOutside.probability > 0.40, `Outside motion must infer high DEFEND_OUTSIDE prediction (got ${defendOutside.probability})`);
+  console.log('    [PASS] Case D inferred purely from observed history.\n');
+}
+
+// ===========================================================================
+// SECTION 4: Expected-Utility Margins & Decision Rationality
+// ===========================================================================
+console.log('--- SECTION 4: EXPECTED-UTILITY MARGINS & DECISION SELECTION ---\n');
+
+// ---------------------------------------------------------------------------
+// Case A Tactical Utility: Conceding Opponent -> Inside Pass Utility Exceeds Outside Pass
+// ---------------------------------------------------------------------------
+console.log('[5/6] Testing: Case A Expected Utilities -> Inside Dive Preferred with Positive Margin...');
+{
   const egoAI = new NextGenAIController('ego-ai', { aggression: 0.90 });
-  const vehicles = [ego, rival];
+  const ego = new Vehicle({ id: 'ego', spec: 'prototype' });
+  const rival = new Vehicle({ id: 'rival', spec: 'gt' });
+
+  // Train Case A (steady line)
+  for (let i = 0; i < 120; i++) {
+    ego.resetTo(track, 720 + i * 0.20, 0.0);
+    rival.resetTo(track, 745 + i * 0.18, 1.0);
+    egoAI.awareness.scan(ego, [ego, rival], track, DT);
+  }
+
   const race = { phase: 'racing', raceTime: 5.0, elapsed: 5.0, statusFor: () => ({ position: 1 }) };
+  egoAI.update(ego, [ego, rival], track, race, DT);
 
-  const origScan = egoAI.awareness.scan.bind(egoAI.awareness);
-  egoAI.awareness.scan = (veh, allVehs, trk) => {
-    const traffic = origScan(veh, allVehs, trk);
-    if (traffic.primaryAttackTarget) {
-      traffic.primaryAttackTarget.predictions = [
-        { id: 'LATE_BRAKE_OVERSHOOT', probability: 0.85, envelopes: [] },
-        { id: 'HOLD_LINE', probability: 0.10, envelopes: [] },
-        { id: 'DEFEND_INSIDE', probability: 0.05, envelopes: [] }
-      ];
-    }
-    return traffic;
-  };
+  const diag = egoAI.combatEngine.lastTacticalDiagnostics;
+  console.log(`    Selected: ${diag.selectedAction} | 2nd Best: ${diag.secondBestAction} | Margin: ${diag.utilityMargin}`);
 
-  egoAI.update(ego, vehicles, track, race, DT);
+  assert.ok(Array.isArray(diag.actionUtilities) && diag.actionUtilities.length > 0, 'actionUtilities must be recorded');
+  assert.ok(diag.selectedAction, 'selectedAction must be identified');
+  assert.ok(diag.utilityMargin > 0, `utilityMargin must be strictly positive (got ${diag.utilityMargin})`);
+  assert.ok(diag.utilityMargin >= 2.0, `utilityMargin must exceed 2.0 threshold for clear corridor (got ${diag.utilityMargin})`);
 
-  console.log(`    Selected Mode: ${egoAI.combatEngine.attackMode} | Target Lateral: ${egoAI.trajectoryPlan?.selectedOffset?.toFixed(2)}m`);
-  assert.equal(
-    egoAI.combatEngine.attackMode,
-    'SWITCHBACK',
-    `High P(LATE_BRAKE_OVERSHOOT) must causally induce SWITCHBACK undercut (got ${egoAI.combatEngine.attackMode})`
-  );
-  console.log('    [PASS] Causal response to LATE_BRAKE_OVERSHOOT verified.\n');
+  const insideUtil = diag.actionUtilities.find((u) => u.action === 'INSIDE_DIVE')?.expectedUtility ?? -999;
+  const outsideUtil = diag.actionUtilities.find((u) => u.action === 'OUTSIDE_MOMENTUM')?.expectedUtility ?? -999;
+
+  console.log(`    INSIDE_DIVE utility: ${insideUtil} vs OUTSIDE_MOMENTUM utility: ${outsideUtil}`);
+  assert.ok(insideUtil > outsideUtil, `Conceding rival must yield inside utility > outside utility (${insideUtil} > ${outsideUtil})`);
+  assert.equal(diag.selectedAction, 'INSIDE_DIVE', 'INSIDE_DIVE must be chosen when opponent concedes');
+  console.log('    [PASS] Case A inside pass utility superiority verified.\n');
+}
+
+// ---------------------------------------------------------------------------
+// Case B Tactical Utility: Inside Defending Opponent -> Outside Pass Utility Exceeds Inside Pass
+// ---------------------------------------------------------------------------
+console.log('[6/6] Testing: Case B Expected Utilities -> Outside / Switchback Preferred with Positive Margin...');
+{
+  const egoAI = new NextGenAIController('ego-ai', { aggression: 0.90 });
+  const ego = new Vehicle({ id: 'ego', spec: 'prototype' });
+  const rival = new Vehicle({ id: 'rival', spec: 'gt' });
+
+  // Train Case B (moving inside)
+  for (let i = 0; i < 40; i++) {
+    ego.resetTo(track, 720 + i * 0.20, 0.0);
+    rival.resetTo(track, 745 + i * 0.18, 0.5 + i * 0.05);
+    egoAI.awareness.scan(ego, [ego, rival], track, DT);
+  }
+
+  const race = { phase: 'racing', raceTime: 5.0, elapsed: 5.0, statusFor: () => ({ position: 1 }) };
+  egoAI.update(ego, [ego, rival], track, race, DT);
+
+  const diag = egoAI.combatEngine.lastTacticalDiagnostics;
+  console.log(`    Selected: ${diag.selectedAction} | 2nd Best: ${diag.secondBestAction} | Margin: ${diag.utilityMargin}`);
+
+  assert.ok(diag.utilityMargin > 0, `utilityMargin must be strictly positive (got ${diag.utilityMargin})`);
+  assert.ok(diag.utilityMargin >= 2.0, `utilityMargin must exceed 2.0 threshold for clear corridor (got ${diag.utilityMargin})`);
+
+  const insideUtil = diag.actionUtilities.find((u) => u.action === 'INSIDE_DIVE')?.expectedUtility ?? -999;
+  const outsideUtil = diag.actionUtilities.find((u) => u.action === 'OUTSIDE_MOMENTUM')?.expectedUtility ?? -999;
+  const switchbackUtil = diag.actionUtilities.find((u) => u.action === 'SWITCHBACK')?.expectedUtility ?? -999;
+
+  console.log(`    SWITCHBACK: ${switchbackUtil} | OUTSIDE: ${outsideUtil} vs INSIDE_DIVE: ${insideUtil}`);
+  assert.ok(outsideUtil > insideUtil, `Inside defending rival must yield outside utility > inside utility (${outsideUtil} > ${insideUtil})`);
+  assert.ok(switchbackUtil > insideUtil, `Inside defending rival must yield switchback utility > inside utility (${switchbackUtil} > ${insideUtil})`);
+  assert.notEqual(diag.selectedAction, 'INSIDE_DIVE', 'Must NOT dive inside into an opponent who defends inside');
+  console.log('    [PASS] Case B outside pass utility superiority verified.\n');
 }
 
 console.log('================================================================================');

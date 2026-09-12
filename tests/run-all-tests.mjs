@@ -77,6 +77,18 @@ const TEST_SUITES = [
     name: 'Anti-Twitch & Trajectory Continuity Suite',
     file: 'anti-twitch-test.mjs',
     description: 'Harbor Ring GT cornering at 25Hz replanning verifying bounded geometry switching, C2 continuity, and zero twitching'
+  },
+  {
+    id: 'closed-loop-racecraft',
+    name: 'Closed-Loop Racecraft Acceptance Suite (10 Scenarios)',
+    file: 'closed-loop-racecraft-suite.mjs',
+    description: 'Autonomous 120Hz closed-loop validation of pass machine, tactical expected utility, defense feint filtering, and pack combat'
+  },
+  {
+    id: 'anti-twitch-ab',
+    name: 'Multi-Sector Anti-Twitch A/B Benchmark Suite',
+    file: 'anti-twitch-ab-test.mjs',
+    description: 'A/B comparison of candidate V3.2 against canonical e8b9bdc across 4 Harbor sectors measuring steer jerk, lat jerk, and pace'
   }
 ];
 

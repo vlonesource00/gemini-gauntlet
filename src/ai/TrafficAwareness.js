@@ -48,6 +48,14 @@ export class TrafficAwareness {
     this.lateralEnvelope = lateralEnvelope;
     this.bodyLength = bodyLength;
     this.bodyWidth = bodyWidth;
+    this.opponentHistory = new Map();
+  }
+
+  /**
+   * Reset perceived opponent behavioral tracking history.
+   */
+  reset() {
+    this.opponentHistory.clear();
   }
 
   /**
@@ -55,9 +63,10 @@ export class TrafficAwareness {
    * @param {Object} vehicle - Ego vehicle
    * @param {Array<Object>} vehicles - All vehicles on track
    * @param {Object} track - Track geometry and surface model
+   * @param {number} [dt=0.016] - Simulation time step
    * @returns {Object} Comprehensive traffic perception summary
    */
-  scan(vehicle, vehicles, track) {
+  scan(vehicle, vehicles, track, dt = 0.016) {
     const current = vehicle.surface ?? (track?.surfaceAt ? track.surfaceAt(vehicle.position.x, vehicle.position.z) : { lateral: 0, s: vehicle.distance || 0 });
     const forward = vehicle.forward ?? { x: Math.sin(vehicle.yaw || 0), z: Math.cos(vehicle.yaw || 0) };
     const right = vehicle.right ?? { x: Math.cos(vehicle.yaw || 0), z: -Math.sin(vehicle.yaw || 0) };
@@ -98,6 +107,74 @@ export class TrafficAwareness {
       const otherLateral = finite(other.surface?.lateral, side);
       const egoLateral = finite(current?.lateral, 0);
       const lateralDelta = otherLateral - egoLateral;
+
+      const otherId = other.id ?? `car_${entries.length}`;
+      let hist = this.opponentHistory.get(otherId);
+      if (!hist) {
+        hist = {
+          lastLateral: otherLateral,
+          lastSpeed: otherForwardSpeed,
+          lateralVelocity: otherLateralSpeed,
+          accel: 0,
+          stableLineDuration: 0,
+          insideMoveDuration: 0,
+          outsideMoveDuration: 0,
+          thresholdBrakingDuration: 0,
+          samples: 0
+        };
+        this.opponentHistory.set(otherId, hist);
+      }
+
+      const frameDt = clamp(dt, 0.001, 0.1);
+      const latVel = Number.isFinite(otherLateralSpeed) && Math.abs(otherLateralSpeed) > 0.01
+        ? otherLateralSpeed
+        : (otherLateral - hist.lastLateral) / frameDt;
+      const longAccel = (otherForwardSpeed - hist.lastSpeed) / frameDt;
+
+      // Track stable line
+      if (Math.abs(latVel) < 0.12 && Math.abs(otherLateral - hist.lastLateral) < 0.15) {
+        hist.stableLineDuration += frameDt;
+      } else {
+        hist.stableLineDuration = Math.max(0, hist.stableLineDuration - frameDt * 1.5);
+      }
+
+      // Track inside/outside motion
+      const trackPoint = track?.atDistance ? track.atDistance(otherDist) : null;
+      const turnSign = finite(trackPoint?.turnSign, 0);
+
+      if (turnSign !== 0) {
+        const isMovingInside = (turnSign > 0 && latVel > 0.12) || (turnSign < 0 && latVel < -0.12) || (otherLateral * turnSign > 1.2 && latVel * turnSign >= -0.05);
+        const isMovingOutside = (turnSign > 0 && latVel < -0.12) || (turnSign < 0 && latVel > 0.12) || (otherLateral * turnSign < -1.2 && latVel * turnSign <= 0.05);
+        if (isMovingInside) {
+          hist.insideMoveDuration += frameDt;
+          hist.outsideMoveDuration = Math.max(0, hist.outsideMoveDuration - frameDt * 2);
+        } else if (isMovingOutside) {
+          hist.outsideMoveDuration += frameDt;
+          hist.insideMoveDuration = Math.max(0, hist.insideMoveDuration - frameDt * 2);
+        }
+      } else {
+        if (latVel < -0.12) {
+          hist.insideMoveDuration += frameDt;
+          hist.outsideMoveDuration = Math.max(0, hist.outsideMoveDuration - frameDt * 2);
+        } else if (latVel > 0.12) {
+          hist.outsideMoveDuration += frameDt;
+          hist.insideMoveDuration = Math.max(0, hist.insideMoveDuration - frameDt * 2);
+        }
+      }
+
+      // Track threshold braking
+      const isBraking = Boolean(other.controls?.brake > 0.35 || other.brake > 0.35 || longAccel < -4.0);
+      if (isBraking) {
+        hist.thresholdBrakingDuration += frameDt;
+      } else {
+        hist.thresholdBrakingDuration = Math.max(0, hist.thresholdBrakingDuration - frameDt * 2);
+      }
+
+      hist.lastLateral = otherLateral;
+      hist.lastSpeed = otherForwardSpeed;
+      hist.lateralVelocity = latVel;
+      hist.accel = longAccel;
+      hist.samples += 1;
 
       const otherTargetLateral = finite(
         other.aiTactical?.targetLaneOffsetM,
@@ -692,7 +769,15 @@ export class TrafficAwareness {
       });
     };
 
-    // Calculate dynamic context weights for hypothesis probabilities
+    // Calculate dynamic context weights for hypothesis probabilities using observed behavioral history
+    const otherId = entry.other?.id;
+    const hist = this.opponentHistory ? this.opponentHistory.get(otherId) : null;
+    const insideMoveDur = hist ? hist.insideMoveDuration : 0;
+    const outsideMoveDur = hist ? hist.outsideMoveDuration : 0;
+    const stableDur = hist ? hist.stableLineDuration : 0;
+    const threshBrakeDur = hist ? hist.thresholdBrakingDuration : 0;
+    const histAccel = hist ? hist.accel : 0;
+
     let wHold = 0.35;
     let wReturn = 0.25;
     let wInside = 0.20;
@@ -701,40 +786,49 @@ export class TrafficAwareness {
     let wBrakeNormal = 0.05;
     let wOvershoot = 0.02;
 
-    const movingInside = insideSign !== 0 && (
-      (insideSign > 0 && otherLatVel > 0.15) ||
-      (insideSign < 0 && otherLatVel < -0.15)
-    );
-    const movingOutside = insideSign !== 0 && (
-      (insideSign > 0 && otherLatVel < -0.15) ||
-      (insideSign < 0 && otherLatVel > 0.15)
-    );
-    const stableLane = Math.abs(otherLatVel) < 0.12;
+    const movingInside = (insideSign !== 0 && (
+      (insideSign > 0 && otherLatVel > 0.12) ||
+      (insideSign < 0 && otherLatVel < -0.12)
+    )) || insideMoveDur >= 0.15 || (insideSign !== 0 && otherLatVel * insideSign > 0.18);
+
+    const movingOutside = (insideSign !== 0 && (
+      (insideSign > 0 && otherLatVel < -0.12) ||
+      (insideSign < 0 && otherLatVel > 0.12)
+    )) || outsideMoveDur >= 0.15 || (insideSign !== 0 && otherLatVel * insideSign < -0.18);
+
+    const stableLane = (Math.abs(otherLatVel) < 0.12 && !movingInside && !movingOutside) || stableDur >= 0.85;
+    const isBrakingHard = isOtherBraking || threshBrakeDur >= 0.15 || histAccel < -4.0;
 
     if (movingInside) {
-      wInside *= 3.2;
-      wReturn *= 0.4;
-      wOutside *= 0.3;
+      wInside *= 5.5;
+      wReturn *= 0.25;
+      wOutside *= 0.15;
+      wHold *= 0.25;
     } else if (movingOutside) {
-      wOutside *= 2.8;
-      wReturn *= 0.5;
-      wInside *= 0.4;
+      wOutside *= 5.5;
+      wReturn *= 0.25;
+      wInside *= 0.15;
+      wHold *= 0.25;
     }
 
-    if (isOtherBraking) {
-      wBrakeNormal *= 3.0;
-      wBrakeEarly *= 2.5;
-      wOvershoot *= 0.25;
-      wHold *= 0.6;
+    if (isBrakingHard) {
+      wOvershoot *= 4.5;
+      wBrakeNormal *= 3.5;
+      wBrakeEarly *= 3.0;
+      wHold *= 0.15;
+      wReturn *= 0.2;
     } else if (isApproachingCorner && otherSpeed > 28) {
       wOvershoot *= 2.5;
       wBrakeNormal *= 2.2;
       wHold *= 0.7;
     } else if (stableLane) {
-      wHold *= 1.8;
+      wHold *= 4.5;
+      wReturn *= 0.45;
+      wInside *= 0.35;
+      wOutside *= 0.35;
     }
 
-    if (Math.abs(otherLat) > 2.5 && !movingInside) {
+    if (Math.abs(otherLat) > 2.5 && !movingInside && !movingOutside) {
       wReturn *= 1.8;
     }
 

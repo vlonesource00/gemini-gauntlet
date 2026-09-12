@@ -6,6 +6,14 @@
  * - Instantaneous micro-countersteer power sliding under yaw snaps without cutting throttle
  */
 
+/**
+ * CombatDynamicsEngine.js (V2 Combat & Slip Layer)
+ * Combat Rubbing Normal Force Equilibrium & Active Slip-Slope Limit Tracking:
+ * - Side-by-side elastic rubbing contact tolerance (leans into contact without aborting)
+ * - Dynamic slip-slope extremum seeking (∂Fy / ∂α) to ride the crest of tire grip
+ * - Instantaneous micro-countersteer power sliding under yaw snaps without cutting throttle
+ */
+
 import { clamp, wrapAngle } from '../../core/math.js';
 
 const finite = (val, fallback = 0) => (Number.isFinite(val) ? val : fallback);
@@ -18,10 +26,18 @@ export class CombatDynamicsEngine {
     this.rubbingActive = false;
     this.powerSlideActive = false;
     this.attributableContacts = 0;
+    this.contactSeverityEstimate = 0.0;
+    this.egoFaultSeverityEstimate = 0.0;
+    this.actualDamageDelta = 0.0;
+    this.accumulatedHostDamage = 0.0;
+    this.lastHostDamage = null;
+    // Backward-compatibility aliases
     this.attributableDamage = 0.0;
     this.contactAssociatedDamage = 0.0;
+
     this.contactEpisodes = [];
     this.activeContactEpisode = null;
+    this.rivalLastContactTime = new Map();
     this.lastContactTime = -999;
     this.totalTime = 0;
   }
@@ -33,10 +49,17 @@ export class CombatDynamicsEngine {
     this.rubbingActive = false;
     this.powerSlideActive = false;
     this.attributableContacts = 0;
+    this.contactSeverityEstimate = 0.0;
+    this.egoFaultSeverityEstimate = 0.0;
+    this.actualDamageDelta = 0.0;
+    this.accumulatedHostDamage = 0.0;
+    this.lastHostDamage = null;
     this.attributableDamage = 0.0;
     this.contactAssociatedDamage = 0.0;
+
     this.contactEpisodes = [];
     this.activeContactEpisode = null;
+    this.rivalLastContactTime.clear();
     this.lastContactTime = -999;
     this.totalTime = 0;
   }
@@ -56,6 +79,16 @@ export class CombatDynamicsEngine {
     this.totalTime = (this.totalTime || 0) + dt;
     const vSpeed = finite(vehicle?.speed, 0);
     const yawRate = finite(vehicle?.yawRate, 0);
+
+    // Track actual host vehicle damage if available
+    const hostDamage = finite(vehicle?.damage, 0);
+    if (this.lastHostDamage === null) {
+      this.lastHostDamage = hostDamage;
+    }
+    const currentDamageDelta = Math.max(0, hostDamage - this.lastHostDamage);
+    this.lastHostDamage = hostDamage;
+    this.actualDamageDelta = currentDamageDelta;
+    this.accumulatedHostDamage += currentDamageDelta;
 
     // Lateral slip angle beta ~ atan2(v_lat, v_long)
     const sideslip = Math.atan2(
@@ -88,7 +121,7 @@ export class CombatDynamicsEngine {
       }
     }
 
-    // Debounced Contact Episode Tracking & Attribution (Phase 8 & 12)
+    // Debounced Contact Episode Tracking & Attribution (Phase 8, 12 & V3.2)
     if (activeContactEntry) {
       const otherId = activeContactEntry.other?.id ?? 'rival';
       const normalImpactSpeed = Math.abs(finite(activeContactEntry.relativeLateralVelocity, 0));
@@ -130,9 +163,18 @@ export class CombatDynamicsEngine {
         isEgoFault = false;
       }
 
+      // If active contact was with a DIFFERENT rival: close old episode immediately!
+      if (this.activeContactEpisode && this.activeContactEpisode.rivalId !== otherId) {
+        this.activeContactEpisode.closed = true;
+        this.activeContactEpisode.endTime = this.totalTime;
+        this.activeContactEpisode = null;
+      }
+
+      const rivalLastTime = this.rivalLastContactTime.get(otherId) ?? -999;
+      const timeSinceRivalLast = this.totalTime - rivalLastTime;
+
       // Check if continuing an existing contact episode or starting a new one
-      const timeSinceLast = this.totalTime - (this.lastContactTime || 0);
-      if (!this.activeContactEpisode || (this.activeContactEpisode.rivalId !== otherId && timeSinceLast > 0.35)) {
+      if (!this.activeContactEpisode || timeSinceRivalLast > 0.35) {
         this.activeContactEpisode = {
           id: `contact_${otherId}_${Math.round(this.totalTime * 1000)}`,
           rivalId: otherId,
@@ -142,6 +184,8 @@ export class CombatDynamicsEngine {
           peakClosingSpeed: closingSpeed,
           classification,
           egoInitiated: isEgoFault,
+          severityEstimate: 0,
+          egoFaultSeverityEstimate: 0,
           associatedDamage: 0,
           attributableDamage: 0,
           closed: false
@@ -161,20 +205,26 @@ export class CombatDynamicsEngine {
       }
 
       this.lastContactTime = this.totalTime;
+      this.rivalLastContactTime.set(otherId, this.totalTime);
 
-      // Rate-limited damage accumulation
-      const stepDamage = clamp(closingSpeed * 0.012 * dt, 0.0001, 0.005);
-      this.contactAssociatedDamage += stepDamage;
-      this.activeContactEpisode.associatedDamage += stepDamage;
+      // Rate-limited severity estimation
+      const stepSeverity = clamp(closingSpeed * 0.012 * dt, 0.0001, 0.005);
+      this.contactSeverityEstimate += stepSeverity;
+      this.contactAssociatedDamage = this.contactSeverityEstimate;
+      this.activeContactEpisode.severityEstimate += stepSeverity;
+      this.activeContactEpisode.associatedDamage += stepSeverity;
 
       if (this.activeContactEpisode.egoInitiated && this.activeContactEpisode.classification !== 'BENIGN_DOOR_RUB') {
-        this.attributableDamage += stepDamage;
-        this.activeContactEpisode.attributableDamage += stepDamage;
+        this.egoFaultSeverityEstimate += stepSeverity;
+        this.attributableDamage = this.egoFaultSeverityEstimate;
+        this.activeContactEpisode.egoFaultSeverityEstimate += stepSeverity;
+        this.activeContactEpisode.attributableDamage += stepSeverity;
       }
     } else {
       // No active contact this frame
       if (this.activeContactEpisode && (this.totalTime - this.lastContactTime > 0.25)) {
         this.activeContactEpisode.closed = true;
+        this.activeContactEpisode.endTime = this.totalTime;
         this.activeContactEpisode = null;
       }
     }
@@ -210,8 +260,12 @@ export class CombatDynamicsEngine {
       powerSlide: this.powerSlideActive,
       contactEpisodes: this.contactEpisodes,
       activeContactEpisode: this.activeContactEpisode,
-      contactAssociatedDamage: this.contactAssociatedDamage,
-      attributableDamage: this.attributableDamage,
+      contactSeverityEstimate: this.contactSeverityEstimate,
+      egoFaultSeverityEstimate: this.egoFaultSeverityEstimate,
+      actualDamageDelta: this.actualDamageDelta,
+      accumulatedHostDamage: this.accumulatedHostDamage,
+      contactAssociatedDamage: this.contactSeverityEstimate,
+      attributableDamage: this.egoFaultSeverityEstimate,
       attributableContacts: this.attributableContacts
     };
   }

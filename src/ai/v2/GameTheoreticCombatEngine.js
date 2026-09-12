@@ -23,6 +23,30 @@ import { clamp, saturate, lerp, damp, wrap } from '../../core/math.js';
 
 const finite = (val, fallback = 0) => (Number.isFinite(val) ? val : fallback);
 
+function signedTrackDelta(sA, sB, trackLength) {
+  if (!trackLength || trackLength <= 0) return sA - sB;
+  let delta = (sA - sB) % trackLength;
+  if (delta > 0.5 * trackLength) delta -= trackLength;
+  if (delta < -0.5 * trackLength) delta += trackLength;
+  return delta;
+}
+
+function integrateBoundedMotion(v0, targetSpeed, t, maxAccel = 4.5, maxDecel = -12.5, responseTime = 0.35) {
+  if (t <= 0) return 0;
+  const speedDiff = targetSpeed - v0;
+  const rawAccel = speedDiff / Math.max(0.05, responseTime);
+  const a = clamp(rawAccel, maxDecel, maxAccel);
+  if (Math.abs(a) < 1e-4) {
+    return v0 * t;
+  }
+  const tReach = speedDiff / a;
+  if (tReach > 0 && t > tReach) {
+    const sAcc = v0 * tReach + 0.5 * a * tReach * tReach;
+    return sAcc + targetSpeed * (t - tReach);
+  }
+  return v0 * t + 0.5 * a * t * t;
+}
+
 export class GameTheoreticCombatEngine {
   /**
    * @param {Object} [options]
@@ -55,31 +79,30 @@ export class GameTheoreticCombatEngine {
     this.feintFilterTimer = 0;
     this.threatScore = 0;
 
-    // Attack Iterative Best Response (IBR) state
-    this.attackMode = 'NONE'; // 'NONE', 'SLINGSHOT', 'DIVEBOMB', 'SWITCHBACK', 'SIDE_BY_SIDE', 'OVERTAKE', 'ABORT_HOLD', 'ABORT_BLEND', 'PACE'
+    // Attack Iterative Best Response state
+    this.attackMode = 'NONE'; // 'NONE', 'DRAFT_HOLD', 'SLINGSHOT', 'DIVEBOMB', 'SWITCHBACK', 'OVERTAKE', 'SIDE_BY_SIDE'
     this.attackTargetId = null;
     this.passedTargetId = null;
     this.targetLockTimer = 0;
     this.attackTimer = 0;
     this.attackIntensity = 0;
-    this.attackSide = 0;
+    this.attackSide = 0; // -1 (left), 0 (center), +1 (right)
     this.attackSideLocked = false;
     this.passClearDwell = 0;
-    this.switchbackStage = 'NONE'; // 'NONE', 'ENTRY_WIDE', 'EXIT_UNDERCUT'
+    this.switchbackStage = 'NONE'; // 'NONE', 'ENTRY_WIDE', 'APEX_CUT', 'EXIT_UNDERCUT'
     this.divebombCommitted = false;
 
-    // Temporal Commitment & Anti-Indecision Timers
-    this.commitDwellTimer = 0;        // Holds commitment for at least 0.50s
-    this.abortDwellTimer = 0;         // Holds soft abort sequence (0.30s hold, 0.25s blend)
-    this.stabilizeDwellTimer = 0;     // Prevents rapid re-triggering for 0.25s
-    this.insideClosedFilterTimer = 0; // Schmitt trigger filter
+    // Dwell timers to prevent high-frequency mode chatter
+    this.commitDwellTimer = 0;
+    this.abortDwellTimer = 0;
+    this.stabilizeDwellTimer = 0;
+    this.insideClosedFilterTimer = 0;
 
-    // Multi-apex geometry state
+    // Compound corner geometry state
     this.compoundTurnDetected = false;
     this.multiApexState = {
       isCompound: false,
       isChicane: false,
-      isDoubleApex: false,
       primaryCurv: 0,
       primarySign: 1,
       primaryDist: 999,
@@ -88,7 +111,7 @@ export class GameTheoreticCombatEngine {
       secondaryDist: 999
     };
 
-    // 8-State Pass Machine (Phase 7)
+    // 8-State Pass Machine (Phase 7 & V3.2)
     // 'NONE' -> 'APPROACH' -> 'COMMITTED' -> 'OVERLAP' -> 'NOSE_AHEAD' -> 'FULL_CLEAR' -> 'RETAINING' -> 'RETAINED'
     this.passState = 'NONE';
     this.passStateTargetId = null;
@@ -96,15 +119,17 @@ export class GameTheoreticCombatEngine {
     this.retainedTimer = 0;
     this.retainedDistance = 0;
     this.passStartDistance = 0;
-    this.passStartTime = 0;
-    this.passEpisode = {
-      id: null,
-      targetId: null,
-      state: 'NONE',
-      startTime: 0,
-      duration: 0,
-      distance: 0,
-      reason: 'NONE'
+    this.totalCombatTimeS = 0;
+    this.episodeSequence = 0;
+    this.activePassEpisode = null;
+    this.completedPassEpisodes = [];
+    this.passEpisode = null; // Backwards compatibility
+
+    this.lastTacticalDiagnostics = {
+      actionUtilities: [],
+      selectedAction: 'HOLD_POSITION',
+      secondBestAction: null,
+      utilityMargin: 0
     };
 
     // Defensive Episode Memory (FIA single-move rule enforcement)
@@ -163,15 +188,17 @@ export class GameTheoreticCombatEngine {
     this.retainedTimer = 0;
     this.retainedDistance = 0;
     this.passStartDistance = 0;
-    this.passStartTime = 0;
-    this.passEpisode = {
-      id: null,
-      targetId: null,
-      state: 'NONE',
-      startTime: 0,
-      duration: 0,
-      distance: 0,
-      reason: 'NONE'
+    this.totalCombatTimeS = 0;
+    this.episodeSequence = 0;
+    this.activePassEpisode = null;
+    this.completedPassEpisodes = [];
+    this.passEpisode = null;
+
+    this.lastTacticalDiagnostics = {
+      actionUtilities: [],
+      selectedAction: 'HOLD_POSITION',
+      secondBestAction: null,
+      utilityMargin: 0
     };
 
     this.defensiveEpisode = {
@@ -302,11 +329,14 @@ export class GameTheoreticCombatEngine {
     multiApex,
     aggression,
     optimalLat,
-    optimalTargetSpeed
+    optimalTargetSpeed,
+    track,
+    entries = []
   }) {
     const predictions = passTarget.predictions || [];
     const carW = this.carWidth;
     const minPassWidth = carW + 0.85;
+    const trackLength = finite(track?.length, 1000);
 
     const leftSpace = Math.max(minPassWidth, maxMargin + opponentLat);
     const rightSpace = Math.max(minPassWidth, maxMargin - opponentLat);
@@ -317,17 +347,18 @@ export class GameTheoreticCombatEngine {
     const candidateActions = [
       {
         id: 'DRAFT_HOLD',
-        targetLat: clamp(opponentLat, -maxMargin * 0.85, maxMargin * 0.85),
-        targetSpeed: Math.max(optimalTargetSpeed, targetSpeed + 10.0 + aggression * 3.5),
+        targetLat: opponentLat,
+        targetSpeed: optimalTargetSpeed,
         mode: 'SLINGSHOT',
-        notes: 'ATTACK_SLINGSHOT_DRAFTING',
-        dwell: 0.30
+        side: 0,
+        notes: 'ATTACK_HOLD_TUCK_SLIPSTREAM',
+        dwell: 0.25
       },
       {
         id: 'ATTACK_LEFT',
         targetLat: targetLeft,
-        targetSpeed: Math.min(optimalTargetSpeed * 1.04, targetSpeed + 3.0 + aggression * 2.0),
-        mode: 'OVERTAKE',
+        targetSpeed: Math.max(optimalTargetSpeed * 1.02, targetSpeed + 2.5),
+        mode: 'SLINGSHOT',
         side: -1,
         notes: 'ATTACK_OVERTAKE_LEFT',
         dwell: 0.35
@@ -335,8 +366,8 @@ export class GameTheoreticCombatEngine {
       {
         id: 'ATTACK_RIGHT',
         targetLat: targetRight,
-        targetSpeed: Math.min(optimalTargetSpeed * 1.04, targetSpeed + 3.0 + aggression * 2.0),
-        mode: 'OVERTAKE',
+        targetSpeed: Math.max(optimalTargetSpeed * 1.02, targetSpeed + 2.5),
+        mode: 'SLINGSHOT',
         side: 1,
         notes: 'ATTACK_OVERTAKE_RIGHT',
         dwell: 0.35
@@ -389,6 +420,33 @@ export class GameTheoreticCombatEngine {
       const isRoadLegal = Math.abs(act.targetLat) <= maxMargin - 0.20;
       if (!isRoadLegal) expectedUtility -= 50.0;
 
+      // Real corridor feasibility check (Requirement 7)
+      let isCorridorFeasible = true;
+      if (Math.abs(act.targetLat) + carW * 0.5 > maxMargin) {
+        isCorridorFeasible = false;
+      }
+      if (isCorridorFeasible && gap < 25.0 && act.side !== 0 && act.side !== undefined) {
+        const availableFlankSpace = act.side > 0 ? (maxMargin - opponentLat) : (opponentLat - (-maxMargin));
+        if (availableFlankSpace < carW + 0.40) {
+          isCorridorFeasible = false;
+        }
+      }
+      if (isCorridorFeasible && Array.isArray(entries) && entries.length > 0) {
+        for (const entry of entries) {
+          if (!entry?.other || entry.other.id === passTarget.other?.id || entry.other.finished || entry.other.despawned || entry.other.trafficGhost) continue;
+          if (entry.delta > 1.0 && entry.delta < 30.0) {
+            const thirdLat = finite(entry.otherLateral ?? entry.other?.surface?.lateral, 0);
+            if (Math.abs(thirdLat - act.targetLat) < carW + 0.55) {
+              isCorridorFeasible = false;
+              break;
+            }
+          }
+        }
+      }
+      if (!isCorridorFeasible && act.id !== 'HOLD_POSITION' && act.id !== 'DRAFT_HOLD') {
+        expectedUtility -= 80.0;
+      }
+
       // Hysteresis bonus for current mode
       if (this.attackMode === act.mode) expectedUtility += 4.0;
       if (act.side && this.attackSideLocked && this.attackSide !== 0 && act.side === this.attackSide) {
@@ -408,12 +466,15 @@ export class GameTheoreticCombatEngine {
         const prob = finite(pred.probability, 1.0 / predictions.length);
         let u = 0.0;
 
-        // 1. Spatio-temporal envelope overlap penalty
+        // 1. Spatio-temporal envelope overlap penalty using bounded acceleration integration & wrapped interval geometry
         const envelopes = pred.envelopes || [];
         for (const env of envelopes) {
           const t = env.timeS;
-          const egoPredS = vDist + act.targetSpeed * t;
-          const sOverlap = egoPredS >= (env.sMin - 1.2) && egoPredS <= (env.sMax + 1.2);
+          const deltaS = integrateBoundedMotion(vSpeed, act.targetSpeed, t);
+          const egoPredS = vDist + deltaS;
+          const sDelta = signedTrackDelta(egoPredS, env.centerS, trackLength);
+          const halfLongSpan = 0.5 * (env.sMax - env.sMin) + 1.2;
+          const sOverlap = Math.abs(sDelta) <= halfLongSpan;
           if (sOverlap) {
             const latOverlap = Math.abs(act.targetLat - env.centerQ);
             if (latOverlap < (carW + 0.55)) {
@@ -505,6 +566,18 @@ export class GameTheoreticCombatEngine {
     });
 
     actionScores.sort((a, b) => b.expectedUtility - a.expectedUtility);
+
+    const selected = actionScores[0] || { action: candidateActions[candidateActions.length - 1], expectedUtility: 0 };
+    const secondBest = actionScores[1] || null;
+    const utilityMargin = secondBest ? (selected.expectedUtility - secondBest.expectedUtility) : 0;
+
+    this.lastTacticalDiagnostics = {
+      actionUtilities: actionScores.map((s) => ({ action: s.action.id, expectedUtility: Number(s.expectedUtility.toFixed(2)) })),
+      selectedAction: selected.action.id,
+      secondBestAction: secondBest ? secondBest.action.id : null,
+      utilityMargin: Number(utilityMargin.toFixed(2))
+    };
+
     return actionScores;
   }
 
@@ -534,6 +607,7 @@ export class GameTheoreticCombatEngine {
     const vSpeed = finite(vehicle?.speed, 0);
     const vDist = finite(vehicle?.distance, 0);
     const currentLat = finite(vehicle?.surface?.lateral, 0);
+    this.totalCombatTimeS += dt;
 
     const roadHalfW = finite(track?.roadHalfWidth, this.roadHalfWidth);
     const curbW = finite(track?.curbWidth, this.curbWidth);
@@ -567,14 +641,12 @@ export class GameTheoreticCombatEngine {
     const insideOffset = clamp(primaryInsideSign * (maxMargin * 0.85), -maxMargin, maxMargin);
 
     // Scan traffic entries (Challenger behind, Target ahead)
-    // Scan traffic entries (Challenger behind, Target ahead)
     const entries = traffic?.entries ?? [];
 
-    if (this.targetLockTimer > 0) {
-      this.targetLockTimer = Math.max(0, this.targetLockTimer - dt);
-      if (this.targetLockTimer <= 0) {
-        this.passedTargetId = null;
-      }
+    if (this.passedTargetId && entries.some((e) => e.other?.id === this.passedTargetId && e.delta > 2.0)) {
+      // Opponent repassed ego: unlock immediately for legitimate new attack episode
+      this.passedTargetId = null;
+      this.targetLockTimer = 0;
     }
 
     const challenger = (traffic?.primaryDefenseThreat && traffic.primaryDefenseThreat.delta > -45.0)
@@ -590,15 +662,15 @@ export class GameTheoreticCombatEngine {
           return true;
         });
 
-    const activeAttackEntry = (this.attackTargetId || this.passStateTargetId)
+    const activeAttackEntry = ((this.activePassEpisode || this.passState !== 'NONE') && (this.attackTargetId || this.passStateTargetId))
       ? entries.find((e) => e.other?.id === (this.attackTargetId || this.passStateTargetId))
       : null;
 
     const requiredPassClearance = this.carLength + 1.20;
 
     const passTarget = (this.passState === 'RETAINING')
-      ? (activeAttackEntry ?? entries.find((e) => e.delta < -0.2 && e.delta > -25.0) ?? null)
-      : (activeAttackEntry ?? (traffic?.primaryAttackTarget && traffic.primaryAttackTarget.delta < 55.0 ? traffic.primaryAttackTarget : null) ?? entries.find((e) => {
+      ? (activeAttackEntry ?? entries.find((e) => !e?.other?.finished && !e?.other?.despawned && e.delta < -0.2 && e.delta > -25.0) ?? null)
+      : (activeAttackEntry ?? (traffic?.primaryAttackTarget && traffic.primaryAttackTarget.delta < 55.0 && traffic.primaryAttackTarget.other?.id !== this.passedTargetId ? traffic.primaryAttackTarget : null) ?? entries.find((e) => {
           if (!e?.other || e.other.finished || e.other.despawned || e.other.trafficGhost) return false;
           if (e.delta <= 0.4 || e.delta >= 55.0) return false;
           if (e.other.id === this.passedTargetId) return false;
@@ -784,61 +856,85 @@ export class GameTheoreticCombatEngine {
       const closingSpeed = Math.max(0, vSpeed - targetSpeed);
       const isSideBySide = Math.abs(gap) < this.carLength * 1.35;
 
-      // 8-State Pass Machine Transitions (Phase 7)
+      // 8-State Pass Machine Transitions (Phase 7 & V3.2)
       if (this.passStateTargetId == null && this.attackTargetId) {
         this.passStateTargetId = this.attackTargetId;
       }
-      if (this.passState === 'NONE' || this.passStateTargetId !== this.attackTargetId) {
+      if (this.passState === 'NONE' || (this.passStateTargetId && this.passStateTargetId !== this.attackTargetId)) {
         this.passState = 'APPROACH';
         this.passStateTargetId = this.attackTargetId;
         this.passStateTimer = 0;
         this.retainedTimer = 0;
         this.retainedDistance = 0;
         this.passStartDistance = vDist;
-        this.passStartTime = vDist;
-        this.passEpisode = {
-          id: `pass_${this.attackTargetId}_${Math.round(vDist)}`,
+        this.episodeSequence += 1;
+        this.activePassEpisode = {
+          episodeId: `pass_${this.attackTargetId}_${this.episodeSequence}_${Math.round(this.totalCombatTimeS * 100)}`,
+          id: `pass_${this.attackTargetId}_${this.episodeSequence}_${Math.round(this.totalCombatTimeS * 100)}`,
           targetId: this.attackTargetId,
           state: 'APPROACH',
-          startTime: vDist,
-          duration: 0,
-          distance: 0,
-          reason: 'INITIATED'
+          startTimeS: this.totalCombatTimeS,
+          endTimeS: null,
+          durationS: 0,
+          startDistanceM: vDist,
+          endDistanceM: null,
+          retainedDistanceM: 0,
+          completionReason: 'IN_PROGRESS'
         };
+        this.passEpisode = this.activePassEpisode;
+      } else if (this.activePassEpisode == null) {
+        this.passStateTargetId = this.attackTargetId;
+        this.episodeSequence += 1;
+        this.activePassEpisode = {
+          episodeId: `pass_${this.attackTargetId}_${this.episodeSequence}_${Math.round(this.totalCombatTimeS * 100)}`,
+          id: `pass_${this.attackTargetId}_${this.episodeSequence}_${Math.round(this.totalCombatTimeS * 100)}`,
+          targetId: this.attackTargetId,
+          state: this.passState,
+          startTimeS: this.totalCombatTimeS,
+          endTimeS: null,
+          durationS: 0,
+          startDistanceM: vDist,
+          endDistanceM: null,
+          retainedDistanceM: 0,
+          completionReason: 'IN_PROGRESS'
+        };
+        this.passEpisode = this.activePassEpisode;
       }
 
       this.passStateTimer += dt;
-      if (this.passEpisode) {
-        this.passEpisode.duration = this.passStateTimer;
-        this.passEpisode.state = this.passState;
+      if (this.activePassEpisode) {
+        this.activePassEpisode.durationS = this.totalCombatTimeS - this.activePassEpisode.startTimeS;
+        this.activePassEpisode.duration = this.activePassEpisode.durationS;
+        this.activePassEpisode.state = this.passState;
+        this.passEpisode = this.activePassEpisode;
       }
 
       if (this.passState === 'APPROACH' && (this.commitDwellTimer > 0 || ['DIVEBOMB', 'SWITCHBACK', 'SLINGSHOT', 'OVERTAKE', 'SIDE_BY_SIDE'].includes(this.attackMode))) {
         this.passState = 'COMMITTED';
-        if (this.passEpisode) this.passEpisode.state = 'COMMITTED';
+        if (this.activePassEpisode) this.activePassEpisode.state = 'COMMITTED';
       }
 
       if ((this.passState === 'COMMITTED' || this.passState === 'APPROACH') && Math.abs(gap) < this.carLength * 1.15) {
         this.passState = 'OVERLAP';
-        if (this.passEpisode) this.passEpisode.state = 'OVERLAP';
+        if (this.activePassEpisode) this.activePassEpisode.state = 'OVERLAP';
       }
 
       if (this.passState === 'OVERLAP' && gap < -0.30) {
         this.passState = 'NOSE_AHEAD';
-        if (this.passEpisode) this.passEpisode.state = 'NOSE_AHEAD';
+        if (this.activePassEpisode) this.activePassEpisode.state = 'NOSE_AHEAD';
       }
 
       if ((this.passState === 'NOSE_AHEAD' || this.passState === 'OVERLAP') && gap < -requiredPassClearance) {
         this.passState = 'FULL_CLEAR';
         this.passedTargetId = this.attackTargetId;
-        if (this.passEpisode) this.passEpisode.state = 'FULL_CLEAR';
+        if (this.activePassEpisode) this.activePassEpisode.state = 'FULL_CLEAR';
       }
 
       if (this.passState === 'FULL_CLEAR') {
         this.passState = 'RETAINING';
         this.retainedTimer = 0;
         this.retainedDistance = 0;
-        if (this.passEpisode) this.passEpisode.state = 'RETAINING';
+        if (this.activePassEpisode) this.activePassEpisode.state = 'RETAINING';
       }
 
       // Inside opening width relative to inside curb apex offset
@@ -876,21 +972,49 @@ export class GameTheoreticCombatEngine {
         if (gap > -this.carLength * 0.75) {
           this.passState = 'REPASSED';
           this.retainedTimer = 0;
-          if (this.passEpisode) {
-            this.passEpisode.state = 'REPASSED';
-            this.passEpisode.reason = 'REPASSED_BY_OPPONENT';
+          if (this.activePassEpisode) {
+            this.activePassEpisode.state = 'REPASSED';
+            this.activePassEpisode.completionReason = 'REPASSED_BY_OPPONENT';
+            this.activePassEpisode.endTimeS = this.totalCombatTimeS;
+            this.activePassEpisode.durationS = this.totalCombatTimeS - this.activePassEpisode.startTimeS;
+            const trackLen = finite(track?.length, 1000);
+            const deltaDist = signedTrackDelta(vDist, this.activePassEpisode.startDistanceM, trackLen);
+            const effectiveEndDist = this.activePassEpisode.startDistanceM + (deltaDist >= 0 ? deltaDist : deltaDist + trackLen);
+            this.activePassEpisode.endDistanceM = effectiveEndDist;
+            this.activePassEpisode.retainedDistanceM = this.retainedDistance;
+            this.completedPassEpisodes.push({ ...this.activePassEpisode });
+            this.passEpisode = { ...this.activePassEpisode };
           }
+          this.activePassEpisode = null;
+          this.attackTargetId = null;
+          this.passStateTargetId = null;
+          this.passState = 'NONE';
+          isAttacking = false;
         } else if (this.retainedTimer >= 1.8 || this.retainedDistance >= 45.0) {
           this.passState = 'RETAINED';
-          if (this.passEpisode) {
-            this.passEpisode.state = 'RETAINED';
-            this.passEpisode.duration = this.passStateTimer;
-            this.passEpisode.distance = this.retainedDistance;
-            this.passEpisode.reason = 'SAFE_MERGE_COMPLETED';
+          if (this.activePassEpisode) {
+            this.activePassEpisode.state = 'RETAINED';
+            this.activePassEpisode.completionReason = 'RETAINED';
+            this.activePassEpisode.endTimeS = this.totalCombatTimeS;
+            this.activePassEpisode.durationS = this.totalCombatTimeS - this.activePassEpisode.startTimeS;
+            this.activePassEpisode.duration = this.activePassEpisode.durationS;
+            const trackLen = finite(track?.length, 1000);
+            const deltaDist = signedTrackDelta(vDist, this.activePassEpisode.startDistanceM, trackLen);
+            const effectiveEndDist = this.activePassEpisode.startDistanceM + (deltaDist >= 0 ? deltaDist : deltaDist + trackLen);
+            this.activePassEpisode.endDistanceM = effectiveEndDist;
+            this.activePassEpisode.retainedDistanceM = this.retainedDistance;
+            this.completedPassEpisodes.push({ ...this.activePassEpisode });
+            this.passEpisode = { ...this.activePassEpisode };
           }
+          this.passedTargetId = this.passStateTargetId || this.attackTargetId;
           this.targetLockTimer = 16.0;
+          this.activePassEpisode = null;
           this.attackMode = 'NONE';
           this.attackTargetId = null;
+          this.passStateTargetId = null;
+          this.passState = 'NONE';
+          this.passStateTimer = 0;
+          this.retainedTimer = 0;
           this.attackTimer = 0;
           this.divebombCommitted = false;
           this.switchbackStage = 'NONE';
@@ -909,7 +1033,7 @@ export class GameTheoreticCombatEngine {
           this.passState = 'RETAINING';
           this.retainedTimer = 0;
           this.retainedDistance = 0;
-          if (this.passEpisode) this.passEpisode.state = 'RETAINING';
+          if (this.activePassEpisode) this.activePassEpisode.state = 'RETAINING';
         }
       } else {
         this.passClearDwell = 0;
@@ -1010,7 +1134,9 @@ export class GameTheoreticCombatEngine {
             multiApex,
             aggression,
             optimalLat,
-            optimalTargetSpeed: optimalSample.targetSpeed
+            optimalTargetSpeed: optimalSample.targetSpeed,
+            track,
+            entries
           });
 
           const best = scoredActions[0]?.action || {
@@ -1066,34 +1192,52 @@ export class GameTheoreticCombatEngine {
     let dMax = maxMargin;
     let combatNotes = 'OPTIMAL_RACING_LINE';
 
-    // Asymmetric Three-Wide Pack Reasoning (Phase 8 & 11)
+    // Asymmetric Three-Wide Pack Reasoning (Phase 8, 11 & V3.2)
     const leftFlankCar = entries.find((e) => Math.abs(e.delta) < this.carLength * 1.35 && e.side < -0.9 && e.side > -5.5);
     const rightFlankCar = entries.find((e) => Math.abs(e.delta) < this.carLength * 1.35 && e.side > 0.9 && e.side < 5.5);
     this.threeWideActive = Boolean(leftFlankCar && rightFlankCar);
 
     if (this.threeWideActive) {
-      tacticalRole = 'THREE_WIDE_HOLD';
       const leftLat = finite(leftFlankCar.otherLateral ?? leftFlankCar.other?.surface?.lateral, currentLat - 2.5);
       const rightLat = finite(rightFlankCar.otherLateral ?? rightFlankCar.other?.surface?.lateral, currentLat + 2.5);
 
-      const leftInner = leftLat + this.carWidth * 0.5;
-      const rightInner = rightLat - this.carWidth * 0.5;
-      const freeSpaceGap = rightInner - leftInner;
-      const qMid = 0.5 * (leftInner + rightInner);
+      const lowerLat = Math.min(leftLat, rightLat);
+      const upperLat = Math.max(leftLat, rightLat);
 
-      dMin = clamp(leftInner + this.carWidth * 0.5 + 0.25, -maxMargin, maxMargin);
-      dMax = clamp(rightInner - this.carWidth * 0.5 - 0.25, -maxMargin, maxMargin);
-      if (dMin > dMax) {
-        // Severe pinch: keep center
-        dMin = qMid - 0.45;
-        dMax = qMid + 0.45;
-      }
-      targetLateral = clamp(qMid, dMin, dMax);
+      const lowerInner = lowerLat + this.carWidth * 0.5;
+      const upperInner = upperLat - this.carWidth * 0.5;
+      const freeSpaceGap = upperInner - lowerInner;
+      const qMid = 0.5 * (lowerInner + upperInner);
 
-      if (freeSpaceGap < this.carWidth + 0.50) {
-        desiredSpeed = Math.min(optimalSample.targetSpeed, vSpeed * 0.92);
-        combatNotes = 'COMBAT_THREE_WIDE_PINCH_YIELD';
+      const minRequiredWidth = this.carWidth + 0.50; // Required body width + safety margin
+
+      if (freeSpaceGap < minRequiredWidth) {
+        // Severe pinch: do not invent nominal lane corridor; controlled yield/braking
+        tacticalRole = 'THREE_WIDE_PINCH_YIELD';
+        const minFlankSpeed = Math.min(
+          finite(leftFlankCar.otherForwardSpeed, vSpeed),
+          finite(rightFlankCar.otherForwardSpeed, vSpeed)
+        );
+        desiredSpeed = Math.min(optimalSample.targetSpeed * 0.85, Math.min(vSpeed - 3.5, minFlankSpeed - 1.5));
+
+        // Yield toward rear of leading or trailing car safely
+        if (leftFlankCar.delta > rightFlankCar.delta) {
+          targetLateral = clamp(rightLat, -maxMargin, maxMargin);
+        } else {
+          targetLateral = clamp(leftLat, -maxMargin, maxMargin);
+        }
+        dMin = targetLateral - 0.40;
+        dMax = targetLateral + 0.40;
+        combatNotes = 'COMBAT_THREE_WIDE_IMPOSSIBLE_PINCH_YIELD';
       } else {
+        tacticalRole = 'THREE_WIDE_HOLD';
+        dMin = clamp(lowerInner + this.carWidth * 0.5 + 0.25, -maxMargin, maxMargin);
+        dMax = clamp(upperInner - this.carWidth * 0.5 - 0.25, -maxMargin, maxMargin);
+        if (dMin > dMax) {
+          dMin = qMid - 0.45;
+          dMax = qMid + 0.45;
+        }
+        targetLateral = clamp(qMid, dMin, dMax);
         desiredSpeed = isApproachingCorner ? Math.min(optimalSample.targetSpeed, vSpeed * 0.96) : optimalSample.targetSpeed;
         combatNotes = 'COMBAT_THREE_WIDE_CENTER_HOLD';
       }
@@ -1176,9 +1320,15 @@ export class GameTheoreticCombatEngine {
       commitDwellRemaining: Math.max(0, this.commitDwellTimer),
       abortDwellRemaining: Math.max(0, this.abortDwellTimer),
       tacticalPhase: (this.threeWideActive ? 'THREE_WIDE' : (isDefending ? this.defenseMode : (isAttacking ? this.attackMode : 'PACE'))),
+      actionUtilities: this.lastTacticalDiagnostics.actionUtilities,
+      selectedAction: this.lastTacticalDiagnostics.selectedAction,
+      secondBestAction: this.lastTacticalDiagnostics.secondBestAction,
+      utilityMargin: this.lastTacticalDiagnostics.utilityMargin,
       passState: this.passState,
       passStateTargetId: this.passStateTargetId,
-      passEpisode: this.passEpisode ? { ...this.passEpisode } : null,
+      activePassEpisode: this.activePassEpisode ? { ...this.activePassEpisode } : null,
+      completedPassEpisodes: this.completedPassEpisodes.map((ep) => ({ ...ep })),
+      passEpisode: this.activePassEpisode ? { ...this.activePassEpisode } : (this.passEpisode ? { ...this.passEpisode } : null),
       retainedTimer: this.retainedTimer,
       retainedDistance: this.retainedDistance,
       defensiveEpisode: {
