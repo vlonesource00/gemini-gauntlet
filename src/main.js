@@ -17,6 +17,7 @@ import { InputManager } from './input.js';
 import { SynthAudio } from './audio.js';
 import { ScenarioDeck, SCENARIO_CATALOG } from './ui/ScenarioDeck.js';
 import { ReferenceLapManager } from './simulation/ReferenceLap.js';
+import { createSafeWebGLRenderer } from './render/SafeWebGLRenderer.js';
 
 // Simulation Consts
 const FIXED_TIMESTEP = 1 / 120;
@@ -28,8 +29,12 @@ const app = document.querySelector('#app');
 const loadingScreen = document.querySelector('#loading-screen');
 const loadingStatus = document.querySelector('#loading-status');
 
-// WebGL Renderer
-const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
+// WebGL Renderer with Progressive Resilience & Fallback Profiles
+const { renderer } = createSafeWebGLRenderer(THREE, {
+  container: app,
+  ariaLabel: 'GEMINI GAUNTLET 3D Racing Canvas',
+  appName: 'GEMINI GAUNTLET'
+});
 renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.75));
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.shadowMap.enabled = true;
@@ -37,9 +42,6 @@ renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
 renderer.toneMappingExposure = 1.08;
 renderer.outputColorSpace = THREE.SRGBColorSpace;
-renderer.domElement.tabIndex = 0;
-renderer.domElement.setAttribute('aria-label', 'GEMINI GAUNTLET 3D Racing Canvas');
-app?.append(renderer.domElement);
 
 // Scene & Camera
 const scene = new THREE.Scene();
