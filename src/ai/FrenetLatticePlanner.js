@@ -54,6 +54,93 @@ export const minimumJerkSecondDerivative = (value) => {
 };
 
 /**
+ * Categorize a candidate trajectory into a persistent semantic ManeuverDescriptor.
+ * Prevents 25Hz jitter between near-equivalent candidates by providing persistent family identity.
+ * @param {Object} params
+ * @returns {Object} ManeuverDescriptor { family, tacticalRole, flankSide, lateralBand, targetId, racecraftPhase }
+ */
+export function determineManeuverDescriptor({
+  terminalLateral = 0,
+  currentLateral = 0,
+  intentType = 'PRIMARY_INTENT',
+  racecraftPhase = 'NONE',
+  targetId = null,
+  trackCurvature = 0,
+  turnSign = 0,
+  roadMargin = 6.0
+} = {}) {
+  const signedCurv = turnSign * trackCurvature;
+  const isCorner = Math.abs(trackCurvature) > 0.002;
+  const cornerSide = signedCurv > 0 ? 1 : (signedCurv < 0 ? -1 : 0);
+  const candidateSide = Math.sign(terminalLateral);
+
+  let family = 'PACE_CENTER_FLOW';
+  let tacticalRole = 'PACE';
+  let lateralBand = Math.abs(terminalLateral) < roadMargin * 0.28 ? 'CENTER'
+    : (candidateSide === cornerSide && isCorner ? 'INSIDE' : 'OUTSIDE');
+
+  const isInside = isCorner && (
+    (cornerSide > 0 && terminalLateral > 0.2) ||
+    (cornerSide < 0 && terminalLateral < -0.2)
+  );
+  const isOutside = isCorner && (
+    (cornerSide > 0 && terminalLateral < -0.2) ||
+    (cornerSide < 0 && terminalLateral > 0.2)
+  );
+
+  const phaseUpper = String(racecraftPhase || '').toUpperCase();
+
+  if (phaseUpper.includes('ATTACK') || phaseUpper === 'DIVEBOMB' || phaseUpper === 'SWITCHBACK' || phaseUpper === 'SLINGSHOT' || phaseUpper === 'SIDE_BY_SIDE' || phaseUpper === 'OVERTAKE') {
+    tacticalRole = 'ATTACK';
+    if (phaseUpper === 'SWITCHBACK' || intentType === 'SWITCHBACK') {
+      family = 'ATTACK_SWITCHBACK';
+    } else if (isInside || phaseUpper.includes('INSIDE') || intentType === 'ATTACK_INSIDE' || phaseUpper === 'DIVEBOMB') {
+      family = 'ATTACK_INSIDE_DIVE';
+    } else if (isOutside || phaseUpper.includes('OUTSIDE') || intentType === 'ATTACK_OUTSIDE') {
+      family = 'ATTACK_OUTSIDE_MOMENTUM';
+    } else if (phaseUpper === 'SLINGSHOT') {
+      family = 'ATTACK_PULLOUT';
+    } else if (phaseUpper === 'SIDE_BY_SIDE') {
+      family = candidateSide >= 0 ? 'ATTACK_SIDE_BY_SIDE_RIGHT' : 'ATTACK_SIDE_BY_SIDE_LEFT';
+    } else {
+      family = 'ATTACK_CORRIDOR_COMMIT';
+    }
+  } else if (phaseUpper.includes('DEFEND') || phaseUpper === 'APEX_SHIELD' || phaseUpper === 'EXIT_SQUEEZE' || phaseUpper === 'BREAK_TOW' || phaseUpper === 'LOCK_LANE') {
+    tacticalRole = 'DEFEND';
+    if (phaseUpper === 'EXIT_SQUEEZE') {
+      family = 'DEFEND_EXIT_SQUEEZE';
+    } else if (phaseUpper === 'BREAK_TOW') {
+      family = 'DEFEND_BREAK_TOW';
+    } else if (isInside || phaseUpper === 'APEX_SHIELD' || phaseUpper.includes('INSIDE')) {
+      family = 'DEFEND_INSIDE_SHIELD';
+    } else {
+      family = 'DEFEND_RACING_LINE_HOLD';
+    }
+  } else if (intentType === 'AVOIDANCE' || intentType.startsWith('TRAFFIC_BYPASS')) {
+    tacticalRole = 'AVOIDANCE';
+    family = terminalLateral > currentLateral ? 'TRAFFIC_BYPASS_RIGHT' : 'TRAFFIC_BYPASS_LEFT';
+  } else {
+    tacticalRole = 'PACE';
+    if (isInside) {
+      family = 'PACE_APEX';
+    } else if (isOutside) {
+      family = 'PACE_OUTSIDE_ENTRY';
+    } else {
+      family = 'PACE_CENTER_FLOW';
+    }
+  }
+
+  return {
+    family,
+    tacticalRole,
+    flankSide: candidateSide,
+    lateralBand,
+    targetId: targetId ?? null,
+    racecraftPhase
+  };
+}
+
+/**
  * Parabolic constant-acceleration decay function: w(x) = (1 - x)^2 for x in [0, 1).
  * Yields non-zero initial slope -2/L and constant second derivative 2/L^2,
  * perfectly closing tracking offset without receding-horizon fixed-point lag.
@@ -609,32 +696,100 @@ export class FrenetLatticePlanner {
     const costJerk = (lateralDelta * 0.20 + (committed ? transitionTime * 1.0 : transitionTime * 0.22)) * wJerk;
     const costIntent = intentError * intentError * wIntent;
 
-    // Full-path trajectory switching cost against previously active plan
+    // Compute persistent semantic maneuver descriptor
+    const maneuver = determineManeuverDescriptor({
+      terminalLateral,
+      currentLateral: startLateral,
+      intentType,
+      racecraftPhase,
+      targetId,
+      trackCurvature: trackCurvMag,
+      turnSign: trackSign,
+      roadMargin
+    });
+
+    // Near-horizon continuity and trajectory switching cost against previously active plan
     let costSwitching = 0;
+    let costNearHorizon = 0;
+    let meanNearHorizonDivergence = 0;
+    let maxNearHorizonDivergence = 0;
+
     if (previousPlan && Array.isArray(previousPlan.points) && previousPlan.points.length > 0) {
       let pathDiffSum = 0;
+      let nearHorizonDivSum = 0;
+      let nearHorizonCount = 0;
+      let nearHorizonWeightedCost = 0;
       const dt = horizon / Math.max(1, this.pointCount - 1);
       const prevPoints = previousPlan.points;
       const nPrev = prevPoints.length;
+
       for (let i = 0; i < points.length; i++) {
-        const tCheck = points[i].time + dtSinceLastPlan;
+        const pt = points[i];
+        const t = pt.time;
+        const tCheck = t + dtSinceLastPlan;
         let pLat = prevPoints[nPrev - 1].lateral;
-        if (tCheck <= prevPoints[0].time) {
+        let pCurv = prevPoints[nPrev - 1].curvature || 0;
+        let pDot = 0;
+        let pDDot = 0;
+
+        if (previousPlan.curve && typeof previousPlan.curve.eval === 'function') {
+          pLat = previousPlan.curve.eval(tCheck);
+          pDot = typeof previousPlan.curve.deriv === 'function' ? previousPlan.curve.deriv(tCheck) : 0;
+          pDDot = typeof previousPlan.curve.accel === 'function' ? previousPlan.curve.accel(tCheck) : 0;
+        } else if (previousPlan.poly && typeof previousPlan.poly.eval === 'function') {
+          pLat = previousPlan.poly.eval(tCheck);
+          pDot = typeof previousPlan.poly.deriv === 'function' ? previousPlan.poly.deriv(tCheck) : 0;
+          pDDot = typeof previousPlan.poly.accel === 'function' ? previousPlan.poly.accel(tCheck) : 0;
+        } else if (tCheck <= prevPoints[0].time) {
           pLat = prevPoints[0].lateral;
+          pCurv = prevPoints[0].curvature || 0;
         } else if (tCheck < prevPoints[nPrev - 1].time) {
           for (let j = 0; j < nPrev - 1; j++) {
             if (tCheck >= prevPoints[j].time && tCheck <= prevPoints[j + 1].time) {
               const span = Math.max(1e-4, prevPoints[j + 1].time - prevPoints[j].time);
               const frac = (tCheck - prevPoints[j].time) / span;
               pLat = prevPoints[j].lateral + frac * (prevPoints[j + 1].lateral - prevPoints[j].lateral);
+              pCurv = (prevPoints[j].curvature || 0) + frac * ((prevPoints[j + 1].curvature || 0) - (prevPoints[j].curvature || 0));
+              pDot = (prevPoints[j + 1].lateral - prevPoints[j].lateral) / span;
               break;
             }
           }
         }
-        const dLat = points[i].lateral - pLat;
+
+        const dLat = pt.lateral - pLat;
+        const absDLat = Math.abs(dLat);
         pathDiffSum += dLat * dLat * dt;
+
+        // Near-horizon window t in [0, 0.85s] heavily weighted in first 0.4s
+        if (t <= 0.85) {
+          let cDot = 0;
+          let cDDot = 0;
+          if (curve && typeof curve.deriv === 'function') {
+            cDot = curve.deriv(t);
+            cDDot = typeof curve.accel === 'function' ? curve.accel(t) : 0;
+          } else if (poly && typeof poly.deriv === 'function') {
+            cDot = poly.deriv(t);
+            cDDot = typeof poly.accel === 'function' ? poly.accel(t) : 0;
+          } else if (i > 0) {
+            cDot = (pt.lateral - points[i - 1].lateral) / Math.max(1e-4, pt.time - points[i - 1].time);
+          }
+
+          const dDot = Math.abs(cDot - pDot);
+          const dDDot = Math.abs(cDDot - pDDot);
+          const dCurv = Math.abs((pt.curvature || 0) - pCurv);
+
+          const wT = clamp(1.0 - t / 0.8, 0, 1.0);
+          nearHorizonWeightedCost += wT * (absDLat * absDLat * 60.0 + dDot * dDot * 15.0 + dDDot * dDDot * 2.0 + dCurv * dCurv * 40.0) * dt;
+
+          nearHorizonDivSum += absDLat;
+          maxNearHorizonDivergence = Math.max(maxNearHorizonDivergence, absDLat);
+          nearHorizonCount += 1;
+        }
       }
-      costSwitching = pathDiffSum * 28.0;
+
+      costNearHorizon = nearHorizonWeightedCost;
+      costSwitching = pathDiffSum * 24.0 + costNearHorizon;
+      meanNearHorizonDivergence = nearHorizonCount > 0 ? (nearHorizonDivSum / nearHorizonCount) : 0;
 
       const prevTargetLat = previousPlan.selectedOffset ?? previousPlan.terminalLateral;
       if (Number.isFinite(prevTargetLat)) {
@@ -643,6 +798,13 @@ export class FrenetLatticePlanner {
         if (prevDir !== 0 && newDir !== 0 && prevDir !== newDir && Math.abs(terminalLateral - prevTargetLat) > 0.8) {
           costSwitching += 35.0;
         }
+      }
+
+      const prevFamily = previousPlan.maneuver?.family;
+      if (prevFamily && prevFamily === maneuver.family) {
+        costSwitching -= 12.0;
+      } else if (prevFamily && prevFamily !== maneuver.family) {
+        costSwitching += 15.0;
       }
     }
 
@@ -701,6 +863,9 @@ export class FrenetLatticePlanner {
       terminalLateral,
       transitionTime,
       intentType,
+      maneuver,
+      meanNearHorizonDivergence,
+      maxNearHorizonDivergence,
       collisionFree: constraints.collisionFree,
       roadLegal: constraints.roadLegal,
       dynamicallyFeasible,
@@ -724,6 +889,7 @@ export class FrenetLatticePlanner {
         jerk: costJerk,
         intent: costIntent,
         switching: costSwitching,
+        nearHorizonCost: costNearHorizon,
         progressReward: rewardProgress,
         trackWidthReward: rewardWidth,
         hysteresisBonus: costHysteresis
@@ -1041,10 +1207,26 @@ export class FrenetLatticePlanner {
 
     // Loyalty hysteresis bonus for continuing the ongoing candidate
     if (previousPlan && Number.isFinite(previousPlan.selectedOffset)) {
-      const prevTarget = previousPlan.selectedOffset;
-      const ongoing = candidateTrajectories.find((c) =>
-        Math.abs(c.terminalLateral - prevTarget) < 0.35
-      );
+      const prevFamily = previousPlan.maneuver?.family;
+      const prevOffset = previousPlan.selectedOffset ?? previousPlan.terminalLateral;
+
+      let ongoing = null;
+      if (prevFamily) {
+        const matchingFamily = candidateTrajectories.filter((c) =>
+          c.maneuver?.family === prevFamily && c.constraints.roadLegal && c.constraints.collisionFree
+        );
+        if (matchingFamily.length > 0) {
+          ongoing = [...matchingFamily].sort((a, b) =>
+            (a.meanNearHorizonDivergence ?? 0) - (b.meanNearHorizonDivergence ?? 0)
+            || a.score - b.score
+          )[0];
+        }
+      }
+      if (!ongoing && Number.isFinite(prevOffset)) {
+        ongoing = candidateTrajectories.find((c) =>
+          c.constraints.roadLegal && c.constraints.collisionFree && Math.abs(c.terminalLateral - prevOffset) < 0.35
+        );
+      }
       if (ongoing) {
         ongoing.score -= 35.0;
       }
@@ -1072,20 +1254,50 @@ export class FrenetLatticePlanner {
         || a.score - b.score;
     })[0];
 
-    // Switching margin: if switching away from ongoing candidate to a divergent trajectory, require decisive improvement
+    // Net Switch Benefit Gate:
+    // Only switch away from ongoing candidate if new candidate decisively improves score after continuity/switch margins
     let switchOverriddenCandidate = null;
-    if (previousPlan && Number.isFinite(previousPlan.selectedOffset)) {
-      const prevTarget = previousPlan.selectedOffset;
-      const ongoingCandidate = candidateTrajectories.find((c) =>
-        c.constraints.roadLegal && c.constraints.collisionFree && Math.abs(c.terminalLateral - prevTarget) < 0.35
-      );
+    let isMaterialSwitch = false;
+
+    if (previousPlan) {
+      const prevFamily = previousPlan.maneuver?.family;
+      const prevTarget = previousPlan.selectedOffset ?? previousPlan.terminalLateral;
+
+      let ongoingCandidate = null;
+      if (prevFamily) {
+        const safeFamilyMatches = safeCandidates.filter((c) => c.maneuver?.family === prevFamily);
+        if (safeFamilyMatches.length > 0) {
+          ongoingCandidate = [...safeFamilyMatches].sort((a, b) =>
+            (a.meanNearHorizonDivergence ?? 0) - (b.meanNearHorizonDivergence ?? 0)
+            || a.score - b.score
+          )[0];
+        }
+      }
+      if (!ongoingCandidate && Number.isFinite(prevTarget)) {
+        ongoingCandidate = safeCandidates.find((c) => Math.abs(c.terminalLateral - prevTarget) < 0.35);
+      }
+
       if (ongoingCandidate && selected !== ongoingCandidate) {
-        const isDirectionReversal = Math.sign(selected.terminalLateral - currentLateral) !== Math.sign(prevTarget - currentLateral)
-          && Math.abs(selected.terminalLateral - prevTarget) > 0.8;
-        const switchMargin = isDirectionReversal ? 40.0 : 20.0;
-        if (selected.score > ongoingCandidate.score - switchMargin) {
-          switchOverriddenCandidate = selected;
-          selected = ongoingCandidate;
+        const ongoingSafe = ongoingCandidate.constraints.collisionFree
+          && ongoingCandidate.constraints.roadLegal
+          && ongoingCandidate.constraints.dynamicsState !== 'HARD_INFEASIBLE'
+          && (ongoingCandidate.minimumClearanceM ?? 99) >= 0.80;
+
+        if (!ongoingSafe) {
+          // Immediate emergency safety override: safety always trumps hysteresis
+          isMaterialSwitch = true;
+        } else {
+          const sameFamily = selected.maneuver?.family && selected.maneuver.family === ongoingCandidate.maneuver?.family;
+          const isDirectionReversal = Math.sign(selected.terminalLateral - currentLateral) !== Math.sign(ongoingCandidate.terminalLateral - currentLateral)
+            && Math.abs(selected.terminalLateral - ongoingCandidate.terminalLateral) > 0.8;
+
+          const switchMargin = sameFamily ? 5.0 : (isDirectionReversal ? 35.0 : 18.0);
+          if (selected.score > ongoingCandidate.score - switchMargin) {
+            switchOverriddenCandidate = selected;
+            selected = ongoingCandidate;
+          } else {
+            isMaterialSwitch = !sameFamily;
+          }
         }
       }
     }
@@ -1286,6 +1498,10 @@ export class FrenetLatticePlanner {
       maxCurvaturePerM: selected.maxCurvaturePerM,
       maxLateralAccelerationMps2: selected.maxLateralAccelerationMps2,
       intentType: selected.intentType,
+      maneuver: selected.maneuver,
+      isMaterialSwitch,
+      meanNearHorizonDivergence: selected.meanNearHorizonDivergence ?? 0,
+      maxNearHorizonDivergence: selected.maxNearHorizonDivergence ?? 0,
       candidates: visualCandidates,
       committed,
       recovering: Boolean(recovering),

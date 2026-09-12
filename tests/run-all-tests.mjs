@@ -59,6 +59,12 @@ const TEST_SUITES = [
     name: 'Decision Stability & Anti-Indecision Suite',
     file: 'decision-stability-test.mjs',
     description: 'Temporal decision stability, 10Hz/25Hz/120Hz multirate decoupling, C2 trajectory switching hysteresis, and anti-twitching verification'
+  },
+  {
+    id: 'supreme-racecraft',
+    name: 'Supreme Racecraft V3 Suite (23 Scenarios)',
+    file: 'supreme-racecraft-suite.mjs',
+    description: 'Persistent Maneuvers, Predictive Attack, Intelligent Defense, 8-State Pass Machine, and Multi-Car Combat'
   }
 ];
 

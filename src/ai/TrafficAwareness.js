@@ -239,12 +239,52 @@ export class TrafficAwareness {
       });
     }
 
+    // Multi-Car Relevance Scoring & Opponent Predictions (Phase 3 & 4)
+    for (const entry of entries) {
+      entry.attackOpportunity = this.scoreAttackOpportunity(vehicle, entry, track);
+      entry.defenseThreat = this.scoreDefenseThreat(vehicle, entry, track);
+      entry.compositeRelevance = (entry.delta > 0) ? entry.attackOpportunity : entry.defenseThreat;
+    }
+
+    const primaryAttackTarget = entries
+      .filter((e) => e.delta > 0.4 && e.delta < 65.0 && e.attackOpportunity > 0.05)
+      .sort((a, b) => b.attackOpportunity - a.attackOpportunity)[0] ?? ahead;
+
+    const primaryDefenseThreat = entries
+      .filter((e) => e.delta < -0.4 && e.delta > -45.0 && e.defenseThreat > 0.05)
+      .sort((a, b) => b.defenseThreat - a.defenseThreat)[0] ?? behind;
+
+    // Top 3-5 relevant multi-car combatants
+    const topRelevant = [...entries]
+      .filter((e) => Math.abs(e.delta) < 70.0)
+      .sort((a, b) => (b.compositeRelevance ?? 0) - (a.compositeRelevance ?? 0))
+      .slice(0, 5);
+
+    for (const entry of topRelevant) {
+      entry.predictions = this.predictOpponentResponses(entry, track, {
+        speed: egoForwardSpeed,
+        distance: vehicle.distance,
+        lateral: current?.lateral ?? 0
+      });
+    }
+
+    // Corridor blockers: vehicles ahead within 35m that restrict passing corridors
+    const corridorBlockers = entries.filter((e) => {
+      if (e.delta <= 0.5 || e.delta > 35.0) return false;
+      const latDist = Math.abs(finite(e.otherLateral, 0) - (current?.lateral ?? 0));
+      return latDist < 3.2;
+    });
+
     return {
       current,
       entries,
       ahead,
       behind,
       alongside,
+      primaryAttackTarget,
+      primaryDefenseThreat,
+      topRelevant,
+      corridorBlockers,
       occupancy,
       egoForwardSpeed,
       egoLateralSpeed,
@@ -499,5 +539,176 @@ export class TrafficAwareness {
       })
       .filter((entry) => entry.ttc < maximumTtc)
       .sort((a, b) => a.ttc - b.ttc)[0] ?? null;
+  }
+
+  /**
+   * Score tactical attack opportunity for a car ahead.
+   * @param {Object} egoVehicle - Ego car
+   * @param {Object} entry - Traffic entry of rival ahead
+   * @param {Object} track - Circuit
+   * @returns {number} Opportunity score in [0, 1]
+   */
+  scoreAttackOpportunity(egoVehicle, entry, track) {
+    if (!entry || entry.delta <= 0.2 || entry.delta > 65.0) return 0;
+    const gap = entry.delta;
+    const closingSpeed = finite(entry.relativeLongitudinalVelocity, 0); // ego - other
+    const ttc = finite(entry.ttc, 99);
+
+    const fGap = Math.exp(-gap / 22.0);
+    const fClose = clamp((closingSpeed + 0.8) / 4.5, 0, 1.5);
+    const fTtc = ttc < 5.0 ? Math.pow(1.0 - ttc / 5.0, 1.5) : 0;
+    const fDraft = entry.wakeContribution > 0.1 ? 1.0 + entry.wakeContribution * 0.75 : 1.0;
+
+    const otherLat = finite(entry.otherLateral, 0);
+    const roadMargin = 5.5;
+    const leftRoom = roadMargin + otherLat;
+    const rightRoom = roadMargin - otherLat;
+    const bestRoom = Math.max(leftRoom, rightRoom);
+    const fRoom = clamp(bestRoom / 3.0, 0.2, 1.2);
+
+    return clamp((fGap * 0.35 + fClose * 0.35 + fTtc * 0.20) * fDraft * fRoom, 0, 1);
+  }
+
+  /**
+   * Score defensive threat for a challenger behind.
+   * @param {Object} egoVehicle - Ego car
+   * @param {Object} entry - Traffic entry of challenger behind
+   * @param {Object} track - Circuit
+   * @returns {number} Defense threat score in [0, 1]
+   */
+  scoreDefenseThreat(egoVehicle, entry, track) {
+    if (!entry || entry.delta >= -0.3 || entry.delta < -45.0) return 0;
+    const gap = Math.abs(entry.delta);
+    const closingSpeed = -finite(entry.relativeLongitudinalVelocity, 0); // challenger - ego
+    const ttc = closingSpeed > 0.15 ? Math.max(0, gap - this.bodyLength) / closingSpeed : 99.0;
+
+    const fGap = Math.exp(-gap / 16.0);
+    const fClose = clamp((closingSpeed + 0.3) / 4.0, 0, 1.5);
+    const fTtc = ttc < 4.5 ? Math.pow(1.0 - ttc / 4.5, 2) : 0;
+
+    const trackPt = track?.atDistance ? track.atDistance(egoVehicle?.distance || 0) : null;
+    const isCornering = Math.abs(finite(trackPt?.curvature, 0)) > 0.003;
+    const fCorner = isCornering ? 1.35 : 1.0;
+
+    return clamp((fGap * 0.35 + fClose * 0.35 + fTtc * 0.30) * fCorner, 0, 1);
+  }
+
+  /**
+   * Generate opponent response hypotheses with time-dependent Frenet occupancy envelopes.
+   * @param {Object} entry - Opponent traffic entry
+   * @param {Object} track - Track geometry
+   * @param {Object} egoState - Ego state
+   * @returns {Array<Object>} Hypotheses with spatio-temporal bounding boxes
+   */
+  predictOpponentResponses(entry, track, egoState = {}) {
+    if (!entry || !entry.other) return [];
+
+    const otherLat = finite(entry.otherLateral, 0);
+    const otherLatVel = finite(entry.otherLateralSpeed, 0);
+    const otherSpeed = finite(entry.otherForwardSpeed, 25);
+    const otherDist = finite(entry.other.distance, 0);
+    const trackLength = finite(track?.length, 1000);
+
+    const trackPoint = track?.atDistance ? track.atDistance(otherDist) : null;
+    const turnSign = finite(trackPoint?.turnSign, 0);
+    const insideSign = turnSign !== 0 ? turnSign : 0;
+
+    const horizons = [0.4, 0.8, 1.4, 2.2];
+
+    const makeEnvelopes = (latProfileFn, speedProfileFn) => {
+      return horizons.map((t) => {
+        const predLat = latProfileFn(t);
+        const predSpeed = speedProfileFn(t);
+        const predDist = wrap(otherDist + predSpeed * t, trackLength);
+
+        const latUncertainty = 0.25 + 0.35 * t;
+        const longUncertainty = 0.50 + 0.90 * t;
+
+        return {
+          timeS: t,
+          sMin: predDist - this.bodyLength * 0.5 - longUncertainty,
+          sMax: predDist + this.bodyLength * 0.5 + longUncertainty,
+          qMin: predLat - this.bodyWidth * 0.5 - latUncertainty,
+          qMax: predLat + this.bodyWidth * 0.5 + latUncertainty,
+          centerS: predDist,
+          centerQ: predLat,
+          speed: predSpeed
+        };
+      });
+    };
+
+    return [
+      {
+        id: 'HOLD_LINE',
+        probability: 0.35,
+        description: 'Maintains current lateral position and steady speed',
+        envelopes: makeEnvelopes(
+          (t) => otherLat + otherLatVel * t * Math.exp(-t / 1.2),
+          (t) => otherSpeed
+        )
+      },
+      {
+        id: 'RETURN_TO_RACING_LINE',
+        probability: 0.25,
+        description: 'Drifts smoothly toward nominal racing line',
+        envelopes: makeEnvelopes(
+          (t) => otherLat * Math.exp(-t / 1.0),
+          (t) => otherSpeed
+        )
+      },
+      {
+        id: 'DEFEND_INSIDE',
+        probability: 0.20,
+        description: 'Squeezes toward inside apex curb to defend corner',
+        envelopes: makeEnvelopes(
+          (t) => {
+            const targetInside = insideSign !== 0 ? insideSign * 3.5 : (otherLat >= 0 ? 3.0 : -3.0);
+            const blend = 1.0 - Math.exp(-t / 0.8);
+            return otherLat + (targetInside - otherLat) * blend;
+          },
+          (t) => Math.max(10, otherSpeed - 2.0 * t)
+        )
+      },
+      {
+        id: 'DEFEND_OUTSIDE',
+        probability: 0.08,
+        description: 'Carries momentum on the outside perimeter',
+        envelopes: makeEnvelopes(
+          (t) => {
+            const targetOutside = insideSign !== 0 ? -insideSign * 3.8 : (otherLat >= 0 ? -3.5 : 3.5);
+            const blend = 1.0 - Math.exp(-t / 1.1);
+            return otherLat + (targetOutside - otherLat) * blend;
+          },
+          (t) => otherSpeed + 1.0 * t
+        )
+      },
+      {
+        id: 'BRAKE_EARLY',
+        probability: 0.05,
+        description: 'Conservative early braking before corner entry',
+        envelopes: makeEnvelopes(
+          (t) => otherLat,
+          (t) => Math.max(8, otherSpeed - 6.5 * t)
+        )
+      },
+      {
+        id: 'BRAKE_NORMAL',
+        probability: 0.05,
+        description: 'Standard threshold braking at baseline marker',
+        envelopes: makeEnvelopes(
+          (t) => otherLat,
+          (t) => (t < 0.6 ? otherSpeed : Math.max(12, otherSpeed - 8.0 * (t - 0.6)))
+        )
+      },
+      {
+        id: 'LATE_BRAKE_OVERSHOOT',
+        probability: 0.02,
+        description: 'Aggressive deep entry with apex overshoot risk',
+        envelopes: makeEnvelopes(
+          (t) => otherLat + (insideSign > 0 ? -1.5 : 1.5) * clamp(t - 0.8, 0, 1.5),
+          (t) => Math.max(14, otherSpeed - 4.0 * t)
+        )
+      }
+    ];
   }
 }

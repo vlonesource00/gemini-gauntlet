@@ -17,12 +17,24 @@ export class CombatDynamicsEngine {
     this.carLength = 4.65;
     this.rubbingActive = false;
     this.powerSlideActive = false;
+    this.attributableContacts = 0;
+    this.attributableDamage = 0.0;
+  }
+
+  /**
+   * Reset internal combat dynamics metrics.
+   */
+  reset() {
+    this.rubbingActive = false;
+    this.powerSlideActive = false;
+    this.attributableContacts = 0;
+    this.attributableDamage = 0.0;
   }
 
   /**
    * Apply combat dynamics and slip-slope adjustments to raw MPCC controls.
    * @param {Object} params
-   * @returns {Object} Adjusted { steer, throttle, brake, rubbing, powerSlide }
+   * @returns {Object} Adjusted { steer, throttle, brake, rubbing, powerSlide, attributableDamage, attributableContacts }
    */
   process({
     vehicle,
@@ -42,7 +54,7 @@ export class CombatDynamicsEngine {
     const absSlip = Math.abs(slipAngle);
 
     // =========================================================================
-    // 1. CONTACT-TOLERANT LATERAL RUBBING EQUILIBRIUM
+    // 1. CONTACT-TOLERANT LATERAL RUBBING EQUILIBRIUM & ATTRIBUTION
     // =========================================================================
     this.rubbingActive = false;
     const entries = traffic?.entries ?? [];
@@ -58,6 +70,15 @@ export class CombatDynamicsEngine {
         // Maintain drive momentum during side-by-side rubbing contact unless already breaking away
         if (throttle > 0.1 && brake < 0.05 && absSlip < 0.20) {
           throttle = Math.max(throttle, 0.45);
+        }
+
+        // Contact Attribution (Phase 8 & 12):
+        // Hard lateral pinch vs benign elastic door rub
+        const normalImpactSpeed = Math.abs(finite(entry.relativeLateralVelocity, 0));
+        const isDeepPenetration = Math.abs(latGap) < this.carWidth * 0.52;
+        if (normalImpactSpeed > 1.1 || isDeepPenetration) {
+          this.attributableContacts += 1;
+          this.attributableDamage += clamp(normalImpactSpeed * 0.012 * dt, 0.0001, 0.005);
         }
         break;
       }
@@ -91,7 +112,9 @@ export class CombatDynamicsEngine {
       throttle,
       brake,
       rubbing: this.rubbingActive,
-      powerSlide: this.powerSlideActive
+      powerSlide: this.powerSlideActive,
+      attributableDamage: this.attributableDamage,
+      attributableContacts: this.attributableContacts
     };
   }
 }

@@ -744,7 +744,9 @@ export class NextGenAIController {
         points: this.trajectoryPlan.points,
         selectedOffset: this.trajectoryPlan.selectedOffset,
         generatedAt: this.trajectoryPlan.generatedAt ?? this.totalTime,
-        replanIndex: this.trajectoryPlan.replanIndex ?? 0
+        replanIndex: this.trajectoryPlan.replanIndex ?? 0,
+        maneuver: this.trajectoryPlan.maneuver,
+        curve: this.trajectoryPlan.curve
       } : null;
 
       this.trajectoryPlan = this.trajectoryPlanner.plan({
@@ -780,6 +782,9 @@ export class NextGenAIController {
         dtSinceLastPlan
       });
       this.replanCount = (this.replanCount || 0) + 1;
+      if (this.trajectoryPlan?.isMaterialSwitch) {
+        this.materialSwitchCount = (this.materialSwitchCount || 0) + 1;
+      }
       if (this.trajectoryPlan) {
         this.trajectoryPlan.generatedAt = this.totalTime || 0;
         this.trajectoryPlan.replanIndex = this.replanCount;
@@ -1186,7 +1191,17 @@ export class NextGenAIController {
         safeTrajectories: finite(this.trajectoryPlan?.safeTrajectoryCount ?? this.trajectoryPlan?.candidateCount, 0),
         steeringReversalsLastSecond: finite(this.steeringReversalsLastSecond, 0),
         trajectorySwitchBonus: finite(this.trajectoryPlan?.costBreakdown?.hysteresisBonus, 0),
-        lateralLoadTransferRate: finite(this.lateralLoadTransferRate, 0)
+        lateralLoadTransferRate: finite(this.lateralLoadTransferRate, 0),
+        replanCount: finite(this.replanCount, 0),
+        materialSwitchCount: finite(this.materialSwitchCount, 0),
+        meanNearHorizonDivergence: finite(this.trajectoryPlan?.meanNearHorizonDivergence, 0),
+        maxNearHorizonDivergence: finite(this.trajectoryPlan?.maxNearHorizonDivergence, 0),
+        maneuverFamily: this.trajectoryPlan?.maneuver?.family || 'PACE_CENTER_FLOW',
+        passState: tactical.passState || 'NONE',
+        defensiveEpisode: tactical.defensiveEpisode || null,
+        threeWideActive: Boolean(tactical.threeWideActive),
+        attributableDamage: finite(finalControls?.attributableDamage, 0),
+        attributableContacts: finite(finalControls?.attributableContacts, 0)
       }
     };
   }

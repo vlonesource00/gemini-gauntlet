@@ -87,6 +87,31 @@ export class GameTheoreticCombatEngine {
       secondarySign: 1,
       secondaryDist: 999
     };
+
+    // 8-State Pass Machine (Phase 7)
+    // 'NONE' -> 'APPROACH' -> 'COMMITTED' -> 'OVERLAP' -> 'NOSE_AHEAD' -> 'FULL_CLEAR' -> 'RETAINING' -> 'RETAINED'
+    this.passState = 'NONE';
+    this.passStateTargetId = null;
+    this.passStateTimer = 0;
+    this.retainedTimer = 0;
+    this.retainedDistance = 0;
+    this.passStartDistance = 0;
+
+    // Defensive Episode Memory (FIA single-move rule enforcement)
+    this.defensiveEpisode = {
+      active: false,
+      threatId: null,
+      moveCount: 0,
+      initialLane: 0,
+      lockedLane: null,
+      defenseDirection: 0,
+      dwellTimer: 0,
+      startTime: 0,
+      duration: 0
+    };
+
+    // Three-wide spatial presence
+    this.threeWideActive = false;
   }
 
   /**
@@ -122,7 +147,28 @@ export class GameTheoreticCombatEngine {
     this.stabilizeDwellTimer = 0;
     this.insideClosedFilterTimer = 0;
 
+    this.passState = 'NONE';
+    this.passStateTargetId = null;
+    this.passStateTimer = 0;
+    this.retainedTimer = 0;
+    this.retainedDistance = 0;
+    this.passStartDistance = 0;
+
+    this.defensiveEpisode = {
+      active: false,
+      threatId: null,
+      moveCount: 0,
+      initialLane: 0,
+      lockedLane: null,
+      defenseDirection: 0,
+      dwellTimer: 0,
+      startTime: 0,
+      duration: 0
+    };
+
+    this.threeWideActive = false;
     this.compoundTurnDetected = false;
+    this.role = 'PACE';
     return this;
   }
 
@@ -225,6 +271,10 @@ export class GameTheoreticCombatEngine {
    * @param {number} [params.dt=0.016] - Simulation time step
    * @returns {Object} Tactical corridor, lateral target, desired speed, and racecraft metadata
    */
+  update(params) {
+    return this.evaluate(params);
+  }
+
   evaluate({
     vehicle,
     track,
@@ -269,50 +319,43 @@ export class GameTheoreticCombatEngine {
     const insideOffset = clamp(primaryInsideSign * (maxMargin * 0.85), -maxMargin, maxMargin);
 
     // Scan traffic entries (Challenger behind, Target ahead)
+    // Scan traffic entries (Challenger behind, Target ahead)
     const entries = traffic?.entries ?? [];
 
-    const challenger = entries.find((e) => {
-      if (!e?.other || e.other.finished || e.other.despawned || e.other.trafficGhost) return false;
-      if (e.delta >= -0.8 || e.delta <= -45.0) return false;
-      const closing = finite(e.otherForwardSpeed - traffic.egoForwardSpeed, 0);
-      if (this.passedTargetId && e.other.id === this.passedTargetId) {
-        if (Math.abs(e.delta) > 6.0 || closing <= 0.35) return false;
-      }
-      if (closing < -0.3 && Math.abs(e.delta) > 8.0) return false;
-      return true;
-    });
-
-    const activeAttackEntry = this.attackTargetId
-      ? entries.find((e) => e.other?.id === this.attackTargetId)
-      : null;
-
-    const requiredPassClearance = this.carLength + 0.65;
-    if (activeAttackEntry) {
-      if (activeAttackEntry.delta < -requiredPassClearance) {
-        this.passClearDwell += dt;
-        if (this.passClearDwell >= 0.20) {
-          this.passedTargetId = this.attackTargetId;
-          this.targetLockTimer = 16.0;
-          this.attackMode = 'NONE';
-          this.attackTargetId = null;
-          this.attackTimer = 0;
-          this.divebombCommitted = false;
-          this.switchbackStage = 'NONE';
-          this.attackSideLocked = false;
-          this.attackSide = 0;
-          this.passClearDwell = 0;
-        }
-      } else {
-        this.passClearDwell = 0;
+    if (this.targetLockTimer > 0) {
+      this.targetLockTimer = Math.max(0, this.targetLockTimer - dt);
+      if (this.targetLockTimer <= 0) {
+        this.passedTargetId = null;
       }
     }
 
-    const targetAhead = entries.find((e) => {
-      if (!e?.other || e.other.finished || e.other.despawned || e.other.trafficGhost) return false;
-      if (e.delta <= 0.4 || e.delta >= 55.0) return false;
-      if (e.other.id === this.passedTargetId) return false;
-      return true;
-    });
+    const challenger = (traffic?.primaryDefenseThreat && traffic.primaryDefenseThreat.delta > -45.0)
+      ? traffic.primaryDefenseThreat
+      : entries.find((e) => {
+          if (!e?.other || e.other.finished || e.other.despawned || e.other.trafficGhost) return false;
+          if (e.delta >= -0.8 || e.delta <= -45.0) return false;
+          const closing = finite(e.otherForwardSpeed - traffic.egoForwardSpeed, 0);
+          if (this.passedTargetId && e.other.id === this.passedTargetId) {
+            if (Math.abs(e.delta) > 6.0 || closing <= 0.35) return false;
+          }
+          if (closing < -0.3 && Math.abs(e.delta) > 8.0) return false;
+          return true;
+        });
+
+    const activeAttackEntry = (this.attackTargetId || this.passStateTargetId)
+      ? entries.find((e) => e.other?.id === (this.attackTargetId || this.passStateTargetId))
+      : null;
+
+    const requiredPassClearance = this.carLength + 1.20;
+
+    const passTarget = (this.passState === 'RETAINING')
+      ? (activeAttackEntry ?? entries.find((e) => e.delta < -0.2 && e.delta > -25.0) ?? null)
+      : (activeAttackEntry ?? (traffic?.primaryAttackTarget && traffic.primaryAttackTarget.delta < 55.0 ? traffic.primaryAttackTarget : null) ?? entries.find((e) => {
+          if (!e?.other || e.other.finished || e.other.despawned || e.other.trafficGhost) return false;
+          if (e.delta <= 0.4 || e.delta >= 55.0) return false;
+          if (e.other.id === this.passedTargetId) return false;
+          return true;
+        }));
 
     // =========================================================================
     // 1. EVALUATE DEFENSE THREAD (Stackelberg Leader)
@@ -365,22 +408,53 @@ export class GameTheoreticCombatEngine {
             : clamp(insideOffset * 0.65, -maxMargin * 0.75, maxMargin * 0.75);
         }
 
-        // FIA Single Defensive Move Rule
-        if (!this.oneMoveLocked || this.lockedDefensiveLane === null) {
+        // Defensive Episode Memory & FIA Single Defensive Move Rule
+        const challengerId = challenger.other?.id ?? 'challenger';
+        if (!this.defensiveEpisode.active || this.defensiveEpisode.threatId !== challengerId) {
+          this.defensiveEpisode = {
+            active: true,
+            threatId: challengerId,
+            moveCount: 0,
+            initialLane: currentLat,
+            lockedLane: null,
+            defenseDirection: 0,
+            dwellTimer: 1.2,
+            startTime: this.defenseTimer
+          };
+        } else {
+          this.defensiveEpisode.dwellTimer = 1.2;
+        }
+
+        if (this.defensiveEpisode.moveCount === 0) {
           this.defenseDirection = Math.sign(preferredDefensiveOffset) || primaryInsideSign;
           this.lockedDefensiveLane = preferredDefensiveOffset;
+          this.defensiveEpisode.lockedLane = preferredDefensiveOffset;
+          this.defensiveEpisode.defenseDirection = this.defenseDirection;
+          this.defensiveEpisode.moveCount = 1;
           this.oneMoveLocked = true;
         }
 
-        const lockedSign = this.defenseDirection;
+        const lockedSign = this.defensiveEpisode.defenseDirection || this.defenseDirection;
         const defensiveTargetLat = (lockedSign === primaryInsideSign)
           ? insideOffset
           : clamp(lockedSign * (maxMargin * 0.75), -maxMargin, maxMargin);
+
+        // State Machine Evaluation:
+        // Evaluate EXIT_SQUEEZE on corner exit BEFORE generic corner approach so it is not shadowed
+        const pastCurv = Math.abs(track?.atDistance ? track.atDistance(vDist - 20)?.curvature ?? 0 : 0);
+        const currCurv = Math.abs(track?.atDistance ? track.atDistance(vDist)?.curvature ?? 0 : 0);
+        const isCornerExit = (!isStraight && (multiApex.primaryDist > 14.0 || multiApex.primaryCurv < 0.0035))
+          || (pastCurv > 0.006 && currCurv < pastCurv * 0.75);
 
         if (isStraight && gap > 11.0 && closingSpeed > 0.6) {
           this.defenseMode = 'BREAK_TOW';
           defTargetLat = clamp(defensiveTargetLat * 0.70, -maxMargin * 0.75, maxMargin * 0.75);
           defNotes = 'DEFEND_BREAK_TOW';
+        } else if (isCornerExit && gap < 9.0) {
+          this.defenseMode = 'EXIT_SQUEEZE';
+          const outsideBoundary = clamp(-primaryInsideSign * (maxMargin - this.carWidth - 0.20), -maxMargin, maxMargin);
+          defTargetLat = outsideBoundary;
+          defNotes = 'DEFEND_EXIT_SQUEEZE';
         } else if (isApproachingCorner || gap < 15.0 || ttc < 2.4) {
           this.defenseMode = 'APEX_SHIELD';
           if (multiApex.isChicane && multiApex.primaryDist < 12.0) {
@@ -393,17 +467,21 @@ export class GameTheoreticCombatEngine {
             defTargetLat = insideOffset;
             defNotes = 'DEFEND_APEX_SHIELD';
           }
-        } else if (!isStraight && gap < 8.0) {
-          this.defenseMode = 'EXIT_SQUEEZE';
-          const outsideBoundary = clamp(-primaryInsideSign * (maxMargin - this.carWidth - 0.20), -maxMargin, maxMargin);
-          defTargetLat = outsideBoundary;
-          defNotes = 'DEFEND_EXIT_SQUEEZE';
         } else {
           this.defenseMode = 'LOCK_LANE';
           defTargetLat = defensiveTargetLat;
           defNotes = 'DEFEND_HOLD_LANE';
         }
       } else {
+        if (this.defensiveEpisode.active) {
+          this.defensiveEpisode.dwellTimer = Math.max(0, this.defensiveEpisode.dwellTimer - dt);
+          if (this.defensiveEpisode.dwellTimer <= 0) {
+            this.defensiveEpisode.active = false;
+            this.defensiveEpisode.threatId = null;
+            this.defensiveEpisode.moveCount = 0;
+            this.defensiveEpisode.lockedLane = null;
+          }
+        }
         this.defenseDwellTimer = Math.max(0, this.defenseDwellTimer - dt);
         if (this.defenseDwellTimer <= 0) {
           this.defenseMode = 'PACE';
@@ -415,6 +493,15 @@ export class GameTheoreticCombatEngine {
         }
       }
     } else {
+      if (this.defensiveEpisode.active) {
+        this.defensiveEpisode.dwellTimer = Math.max(0, this.defensiveEpisode.dwellTimer - dt);
+        if (this.defensiveEpisode.dwellTimer <= 0) {
+          this.defensiveEpisode.active = false;
+          this.defensiveEpisode.threatId = null;
+          this.defensiveEpisode.moveCount = 0;
+          this.defensiveEpisode.lockedLane = null;
+        }
+      }
       this.defenseDwellTimer = Math.max(0, this.defenseDwellTimer - dt);
       if (this.defenseDwellTimer <= 0) {
         this.defenseMode = 'PACE';
@@ -438,16 +525,54 @@ export class GameTheoreticCombatEngine {
     if (this.commitDwellTimer > 0) this.commitDwellTimer = Math.max(0, this.commitDwellTimer - dt);
     if (this.stabilizeDwellTimer > 0) this.stabilizeDwellTimer = Math.max(0, this.stabilizeDwellTimer - dt);
 
-    if (targetAhead && targetAhead.delta < 55.0) {
+    if (passTarget && passTarget.delta < 55.0) {
       isAttacking = true;
-      this.attackTargetId = targetAhead.other?.id ?? null;
+      this.attackTargetId = passTarget.other?.id ?? null;
       this.attackTimer += dt;
 
-      const gap = targetAhead.delta;
-      const targetSpeed = finite(targetAhead.other?.speed ?? targetAhead.otherForwardSpeed, vSpeed);
-      const opponentLat = finite(targetAhead.otherLateral ?? targetAhead.other?.surface?.lateral, 0);
+      const gap = passTarget.delta;
+      const targetSpeed = finite(passTarget.other?.speed ?? passTarget.otherForwardSpeed, vSpeed);
+      const opponentLat = finite(passTarget.otherLateral ?? passTarget.other?.surface?.lateral, 0);
       const closingSpeed = Math.max(0, vSpeed - targetSpeed);
       const isSideBySide = Math.abs(gap) < this.carLength * 1.35;
+
+      // 8-State Pass Machine Transitions (Phase 7)
+      if (this.passStateTargetId == null && this.attackTargetId) {
+        this.passStateTargetId = this.attackTargetId;
+      }
+      if (this.passState === 'NONE' || this.passStateTargetId !== this.attackTargetId) {
+        this.passState = 'APPROACH';
+        this.passStateTargetId = this.attackTargetId;
+        this.passStateTimer = 0;
+        this.retainedTimer = 0;
+        this.retainedDistance = 0;
+        this.passStartDistance = vDist;
+      }
+
+      this.passStateTimer += dt;
+
+      if (this.passState === 'APPROACH' && (this.commitDwellTimer > 0 || ['DIVEBOMB', 'SWITCHBACK', 'SLINGSHOT', 'OVERTAKE', 'SIDE_BY_SIDE'].includes(this.attackMode))) {
+        this.passState = 'COMMITTED';
+      }
+
+      if ((this.passState === 'COMMITTED' || this.passState === 'APPROACH') && Math.abs(gap) < this.carLength * 1.15) {
+        this.passState = 'OVERLAP';
+      }
+
+      if (this.passState === 'OVERLAP' && gap < -0.30) {
+        this.passState = 'NOSE_AHEAD';
+      }
+
+      if ((this.passState === 'NOSE_AHEAD' || this.passState === 'OVERLAP') && gap < -requiredPassClearance) {
+        this.passState = 'FULL_CLEAR';
+        this.passedTargetId = this.attackTargetId;
+      }
+
+      if (this.passState === 'FULL_CLEAR') {
+        this.passState = 'RETAINING';
+        this.retainedTimer = 0;
+        this.retainedDistance = 0;
+      }
 
       // Inside opening width relative to inside curb apex offset
       const insideOpeningWidth = Math.abs(opponentLat - insideOffset);
@@ -468,10 +593,24 @@ export class GameTheoreticCombatEngine {
         isInsideOpen = insideOpeningWidth > 1.80;
       }
 
-      if (gap < -requiredPassClearance) {
-        this.passClearDwell += dt;
-        if (this.passClearDwell >= 0.20) {
-          this.passedTargetId = this.attackTargetId;
+      // In RETAINING state: post-pass safe merge & retention check
+      if (this.passState === 'RETAINING') {
+        this.retainedTimer += dt;
+        this.retainedDistance += vSpeed * dt;
+
+        // Smooth post-pass merge back to optimal line (without chopping across opponent's nose)
+        const mergeProgress = clamp(this.retainedTimer / 1.8, 0, 1.0);
+        const passSideSign = this.attackSide !== 0 ? this.attackSide : (currentLat >= opponentLat ? 1 : -1);
+        const postPassOffset = clamp(opponentLat + passSideSign * (this.carWidth + 0.8), -maxMargin, maxMargin);
+        atkTargetLat = lerp(postPassOffset, optimalLat, mergeProgress);
+        atkDesiredSpeed = optimalSample.targetSpeed;
+        atkNotes = 'POST_PASS_SAFE_MERGE_RETAINING';
+
+        if (gap > -this.carLength * 0.75) {
+          this.passState = 'REPASSED';
+          this.retainedTimer = 0;
+        } else if (this.retainedTimer >= 1.8 || this.retainedDistance >= 45.0) {
+          this.passState = 'RETAINED';
           this.targetLockTimer = 16.0;
           this.attackMode = 'NONE';
           this.attackTargetId = null;
@@ -483,8 +622,16 @@ export class GameTheoreticCombatEngine {
           this.passClearDwell = 0;
           this.commitDwellTimer = 0;
           this.abortDwellTimer = 0;
-          this.stabilizeDwellTimer = 0.25;
+          this.stabilizeDwellTimer = 0.35;
           isAttacking = false;
+        }
+      } else if (gap < -requiredPassClearance) {
+        this.passClearDwell += dt;
+        if (this.passClearDwell >= 0.20) {
+          this.passedTargetId = this.attackTargetId;
+          this.passState = 'RETAINING';
+          this.retainedTimer = 0;
+          this.retainedDistance = 0;
         }
       } else {
         this.passClearDwell = 0;
@@ -669,7 +816,19 @@ export class GameTheoreticCombatEngine {
     let dMax = maxMargin;
     let combatNotes = 'OPTIMAL_RACING_LINE';
 
-    if (isDefending && isAttacking) {
+    // Three-Wide Pack Reasoning (Phase 10 & 11)
+    const leftFlankCar = entries.find((e) => Math.abs(e.delta) < this.carLength * 1.25 && e.side < -1.1 && e.side > -4.5);
+    const rightFlankCar = entries.find((e) => Math.abs(e.delta) < this.carLength * 1.25 && e.side > 1.1 && e.side < 4.5);
+    this.threeWideActive = Boolean(leftFlankCar && rightFlankCar);
+
+    if (this.threeWideActive) {
+      tacticalRole = 'THREE_WIDE_HOLD';
+      targetLateral = 0.0;
+      dMin = -0.55;
+      dMax = 0.55;
+      desiredSpeed = isApproachingCorner ? Math.min(desiredSpeed, vSpeed * 0.94) : desiredSpeed;
+      combatNotes = 'COMBAT_THREE_WIDE_CENTER_HOLD';
+    } else if (isDefending && isAttacking) {
       tacticalRole = 'DUAL_COMBAT';
 
       if (this.attackMode === 'DIVEBOMB') {
@@ -712,13 +871,8 @@ export class GameTheoreticCombatEngine {
       tacticalRole = 'ATTACK';
       targetLateral = atkTargetLat;
       desiredSpeed = atkDesiredSpeed;
-      if (this.attackMode === 'DIVEBOMB') {
-        dMin = targetLateral - 1.5;
-        dMax = targetLateral + 1.5;
-      } else {
-        dMin = targetLateral - 1.8;
-        dMax = targetLateral + 1.8;
-      }
+      dMin = -maxMargin;
+      dMax = maxMargin;
       combatNotes = atkNotes;
     }
 
@@ -726,6 +880,7 @@ export class GameTheoreticCombatEngine {
     targetLateral = clamp(targetLateral, -maxMargin, maxMargin);
     dMin = clamp(Math.min(dMin, targetLateral), -maxMargin, maxMargin);
     dMax = clamp(Math.max(dMax, targetLateral), -maxMargin, maxMargin);
+    this.role = tacticalRole;
 
     return {
       role: tacticalRole,
@@ -751,7 +906,18 @@ export class GameTheoreticCombatEngine {
       attackIntensity: this.attackIntensity,
       commitDwellRemaining: Math.max(0, this.commitDwellTimer),
       abortDwellRemaining: Math.max(0, this.abortDwellTimer),
-      tacticalPhase: (isDefending ? this.defenseMode : (isAttacking ? this.attackMode : 'PACE'))
+      tacticalPhase: (this.threeWideActive ? 'THREE_WIDE' : (isDefending ? this.defenseMode : (isAttacking ? this.attackMode : 'PACE'))),
+      passState: this.passState,
+      passStateTargetId: this.passStateTargetId,
+      retainedTimer: this.retainedTimer,
+      retainedDistance: this.retainedDistance,
+      defensiveEpisode: {
+        active: this.defensiveEpisode.active,
+        threatId: this.defensiveEpisode.threatId,
+        moveCount: this.defensiveEpisode.moveCount,
+        lockedLane: this.defensiveEpisode.lockedLane
+      },
+      threeWideActive: this.threeWideActive
     };
   }
 }
